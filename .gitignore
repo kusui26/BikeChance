@@ -1,0 +1,67 @@
+# === 機密情報（絶対にコミットしない） ===
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.vercel
+.supabase
+
+# === macOS ===
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# === Node / pnpm（apps/web, packages/*） ===
+node_modules/
+.pnpm-store/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+.turbo/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# === Python（apps/ml） ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# === Xcode / Swift（apps/ios） ===
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.swiftpm/
+*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# === Supabase CLI ===
+supabase/.temp/
+supabase/.branches/
+
+# === データ成果物（Storage/Drive が一次ソース。リポジトリには置かない） ===
+data/
+*.parquet
+*.json.gz
+!fixtures/**/*.json.gz
+models/
+*.txt.model
+*.pkl
+
+# === Claude Code のローカル設定（CLAUDE.md は追跡する） ===
+.claude/settings.local.json
+
+# === その他 ===
+.idea/
+.vscode/
+coverage/
+*.log
