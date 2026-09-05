@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: lint / typecheck / test / build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format check
+        run: pnpm format
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+  secrets:
+    name: 機密情報の混入チェック
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: トークン・鍵らしき文字列を検出
+        run: |
+          if git grep -nIE '(acl:consumerKey=[A-Za-z0-9_-]{8}|sb_secret_[A-Za-z0-9]|service_role[^s]|gh[pousr]_[A-Za-z0-9]{20}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' -- . ':!*.md' ':!.github/workflows/ci.yml'; then
+            echo "::error::機密情報らしき文字列が含まれています"
+            exit 1
+          fi
+          echo "OK: 検出なし"

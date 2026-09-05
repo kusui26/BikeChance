@@ -65,3 +65,6 @@ models/
 .vscode/
 coverage/
 *.log
+
+# Next.js が生成する型定義
+next-env.d.ts
