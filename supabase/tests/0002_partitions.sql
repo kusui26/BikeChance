@@ -8,6 +8,19 @@
 begin;
 select plan(24);
 
+-- このファイルはトランザクション内で完結し rollback するので、ここでの削除は外に影響しない。
+-- ベンチマークや手動確認でデータが残っていても同じ結果になるよう、作業テーブルを空にしてから始める
+-- （テストが実行環境の状態に依存しないようにする）。
+delete from public.station_status_latest;
+delete from public.status_snapshots;
+delete from public.station_attributes;
+delete from public.stations;
+delete from public.feed_fetch_log;
+delete from public.job_runs;
+update public.feed_state
+   set last_fetch_at = null, last_success_at = null, last_observed_at = null,
+       last_etag = null, consecutive_errors = 0;
+
 -- テスト用のスナップショットを 1 行入れる小さなヘルパ
 create function pg_temp.put_snapshot(p_observed_at timestamptz) returns void
 language sql as $$
