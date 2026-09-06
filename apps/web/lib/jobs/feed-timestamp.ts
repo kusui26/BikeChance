@@ -6,11 +6,12 @@
  *
  * 読めなければ null を返し、呼び出し側は取得時刻をパスに使って**保存は続ける**。
  * 壊れたフィードでも生データを失わないことを優先する。
+ *
+ * 妥当範囲の定数は `@bikechance/gbfs-core` と共有する。ここと gbfs-core で
+ * 「いつからいつまでを妥当とするか」がずれると、保存のパスと DB の値が食い違う。
  */
 
-/** GBFS の `last_updated` は POSIX 秒。ミリ秒が来た場合などを弾くための妥当範囲。 */
-const MIN_PLAUSIBLE_EPOCH_S = 1_577_836_800; // 2020-01-01T00:00:00Z
-const MAX_PLAUSIBLE_EPOCH_S = 4_102_444_800; // 2100-01-01T00:00:00Z
+import { MAX_PLAUSIBLE_EPOCH_S, MIN_PLAUSIBLE_EPOCH_S } from "@bikechance/gbfs-core";
 
 const isPlausibleEpochSeconds = (value: unknown): value is number =>
   typeof value === "number" &&

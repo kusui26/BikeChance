@@ -7,6 +7,21 @@ export default tseslint.config(
   },
   js.configs.recommended,
   {
+    // scripts/ は Node で直接実行する道具。Node のグローバルを認め、進捗の出力も許す
+    files: ["scripts/**/*.mjs", "scripts/**/*.js"],
+    languageOptions: {
+      globals: {
+        process: "readonly",
+        console: "readonly",
+        Buffer: "readonly",
+        URL: "readonly",
+      },
+    },
+    rules: {
+      "no-console": "off",
+    },
+  },
+  {
     files: ["**/*.ts", "**/*.tsx"],
     extends: [...tseslint.configs.recommended],
     rules: {
