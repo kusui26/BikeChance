@@ -10,8 +10,8 @@
 - **目的**：開発プラン §5.8 に箇条書きで書いた W1 の手順を、**そのまま実装に着手できる粒度**まで分解する。何を・どの順で・どこまでやったら完了か、どう検証するかを PR 単位で定義する。
 - **PR 分割の方針**：1 つの PR は「1 つの関心事」「20〜40 分で読める分量」「単独で検証でき、マージしても本番が壊れない」を満たすこと。`main` へのマージは Vercel の本番デプロイを意味するため、**壊れた状態を main に置かない**ことを最優先にする。
 - **参照の表記**：本文書内の章節は `§4.2` のように書く。上位文書を指す場合は必ず「開発プラン §5.3」のように前置きする。
-- **この文書の読み方**：§4 で実測にもとづく設計判断を示し、§5 に v1.1 の検証で見つかった問題と修正を、§6 に 6 本の PR を定義する。実装時は §6 の各 PR の「完了条件」を満たしたら次に進む。§11 の付録に、複数の PR にまたがる契約（RPC のシグネチャ・配列の意味・`feed_state` の書き込み規律）を置いた。ここが PR B と PR C・D の合意点になる。
-- **変更履歴**：v1.0（2026-09-05）初版。**v1.1（2026-09-06）前提から疑う検証を行い、27 件の問題を修正**（§5）。主な変更は、`stations` への毎分書き込みの廃止、`feed_state` の書き込み規律による取りこぼし防止、DEFAULT パーティション、`station_status_latest` の `is_present` と `last_changed_at`、`begin_fetch` による原子的な claim、PR D への 5 分毎カナリア Cron、エラー時の 500 応答、環境ファイルの使い分け。M0 を 9/9 から 9/10 に 1 日遅らせ、カナリア運転を挟んだ。あわせて ODPT の認証方式とレート制限を追測し、初稿で提案していた D-04 の入れ替え（公開を正にする）を**取り下げ、認証付きを正のまま**とした。トークンの漏洩面は W1-21 の仕組みで閉じる（§4.2b、§5 末尾）。
+- **この文書の読み方**：§4 で実測にもとづく設計判断を示し、§5 に検証で見つかった問題と修正を、§6 に **8 本の PR**（0・A・C・B・D・E1・E2・F）を定義する。§6 は実行順に並べてある。実装時は §6 の各 PR の「完了条件」を満たしたら次に進む。§11 の付録に、複数の PR にまたがる契約（RPC のシグネチャ・配列の意味・`feed_state` の書き込み規律）を置いた。ここが PR B と PR C・D の合意点になる。
+- **変更履歴**：v1.0（2026-09-05）初版。**v1.1（2026-09-06）前提から疑う検証を行い、27 件の問題を修正**（§5）。主な変更は、`stations` への毎分書き込みの廃止、`feed_state` の書き込み規律による取りこぼし防止、DEFAULT パーティション、`station_status_latest` の `is_present` と `last_changed_at`、`begin_fetch` による原子的な claim、PR D への 5 分毎カナリア Cron、エラー時の 500 応答、環境ファイルの使い分け。M0 を 9/9 から 9/10 に 1 日遅らせ、カナリア運転を挟んだ。あわせて ODPT の認証方式とレート制限を追測し、初稿で提案していた D-04 の入れ替え（公開を正にする）を**取り下げ、認証付きを正のまま**とした。トークンの漏洩面は W1-21 の仕組みで閉じる（§4.2b、§5 末尾）。**v1.2（2026-09-06）実装順序を見直した**（§5.1）。生データの保全だけを切り出した **PR 0** を段 0 に置き、**蓄積開始を 9/9 から 9/7 に前倒し**した。PR B と PR C の順序を入れ替え、PR E を **E1（監視）→ E2（毎分化）** に分割した。マイルストーンの日付は変えていない。
 - **開発プラン本体との関係**：本文書は W1 の実装詳細のみを扱う。設計の根拠・代替案・決定記録は開発プランにある。実装中に設計判断が変わった場合は、**開発プランの該当章と §15 を先に更新**してから実装する（CLAUDE.md §2 の原則 10）。v1.1 で開発プランと食い違いが生じた箇所（§5 末尾）は PR A のマージ後に開発プラン側を追随させる。
 
 ## 1. Week 1 のゴールと完了条件
@@ -22,7 +22,8 @@
 
 | マイルストーン | 目標日 | 完了条件 |
 |---|---|---|
-| **カナリア運転** | 9/9（水）午前〜 | PR D の 5 分毎 Cron で両システムのスナップショットが入り、Cron の到達性と取り込みの一通りを確認する（§7 の段 4〜5） |
+| **M0− 生データの保全開始** | 9/7（月）午前 | PR 0 の毎分 Cron で、両システムの生 gzip JSON が `gbfs-raw` に貯まり始める。**Cron が本番に届くことがここで確定する**（§7 の段 0） |
+| **DB 経路の検証** | 9/9（水）午前 | PR D の 5 分毎 Cron でスナップショットが `status_snapshots` に入り、§8.6 の照合が通る（§7 の段 4） |
 | **M0 収集の本番稼働** | 9/10（木） | 毎分の Cron に切り替え、両システムのスナップショットが期待周期で `status_snapshots` に入り、対応する生 gzip JSON が Storage に存在する |
 | **M1 24 時間 QA 合格** | 9/11（金） | 下表の合格基準をすべて満たす |
 
@@ -34,7 +35,7 @@
 | ドコモのスナップショット取得数 | 約 1,080 件/日（80 秒周期） | **≥ 1,074 件**（同上） |
 | 連続欠損の最大長 | 0 | **30 分未満** |
 | 重複行（同一 `system_id, observed_at`） | 0 | **0**（Cron の二重配信が起きても 0） |
-| Storage の生 JSON 件数 | スナップショット数と一致 | **完全一致** |
+| Storage の生 JSON 件数 | スナップショット数と一致 | **完全一致**（PR D 稼働後の日のみで判定。PR 0 の期間は DB 行を伴わない。§8.3） |
 | DB サイズの増分 | 22.7 MB/日（実測ベース、§4.1 の (c)） | **≤ 40 MB/日** |
 | 収集の Active CPU | 約 0.05 秒/回 | **≤ 0.3 秒/回**（月 1.5 CPU 時間以内） |
 | 収集エンドポイントの失敗率 | 0% | **< 1%**（ODPT 側の一時障害を除く） |
@@ -68,13 +69,13 @@ Supabase CLI のインストール、DB スキーマ、RPC、Storage バケッ�
 
 ### 3.1 あなたの作業
 
-**必須の作業は残っていません。** `SUPABASE_ACCESS_TOKEN` は貼り付け済みで、Management API に対して疎通と Projects 権限を確認しました（東京リージョンの BikeChance プロジェクトが `ACTIVE_HEALTHY` で見えています）。Database 権限は PR A の `supabase db push` で実地に確認します。
+**必須の作業は残っていません。** `SUPABASE_ACCESS_TOKEN` は貼り付け済みで、Management API に対して疎通と Projects 権限を確認しました（東京リージョンの BikeChance プロジェクトが `ACTIVE_HEALTHY` で見えています）。Database 権限は PR 0 の `supabase db push` で実地に確認します。
 
 **任意だが強く推奨**：監視通知の送信先を用意してください。
 
 - Discord のサーバーに専用チャンネルを作り、チャンネル設定 → 連携サービス → ウェブフックで URL を発行する（Slack の Incoming Webhook でも同じ）
 - URL を `.env` の `ALERT_WEBHOOK_URL=` に貼り付ける
-- 用途：フィード停滞・収集器の停止・DB 容量・日次 QA の通知（PR E）。無ければ通知は `alert_state` テーブルに記録されるだけになり、気づくのが遅れます
+- 用途：フィード停滞・収集器の停止・DB 容量・日次 QA の通知（PR E1）。無ければ通知は `alert_state` テーブルに記録されるだけになり、気づくのが遅れます
 
 **参考：`SUPABASE_ACCESS_TOKEN` の権限**（発行時に選んだ設定の記録）
 
@@ -85,13 +86,14 @@ Supabase CLI のインストール、DB スキーマ、RPC、Storage バケッ�
 
 このトークンはアカウント全体に効く。保存先は `.env` だけで、Vercel や GitHub には登録しない。
 
-### 3.2 私の作業（PR A の中で実施）
+### 3.2 私の作業
 
-- Supabase CLI のインストール（`brew install supabase/tap/supabase`）
-- `supabase init`、`supabase link --project-ref <ref>`
-- ローカル Postgres の起動と `supabase db reset` による適用テスト
-- Storage バケットの作成（SQL マイグレーションで実施。ダッシュボード操作は不要）
-- Vault へのシークレット登録（`.env` を読むローカルスクリプトで実施。値をリポジトリに置かない。PR E）
+- Supabase CLI のインストール（`brew install supabase/tap/supabase`）（PR 0）
+- `supabase init`、`supabase link --project-ref <ref>`（PR 0）
+- ローカル Postgres の起動と `supabase db reset` による適用テスト（PR 0）
+- Storage バケットの作成（SQL マイグレーションで実施。ダッシュボード操作は不要）（PR 0）
+- フィクスチャの取り直しと `station_information` のベースライン保存（段 0。§5.1 の 30・31）
+- Vault へのシークレット登録（`.env` を読むローカルスクリプトで実施。値をリポジトリに置かない）（PR E1）
 
 ## 4. W1 で確定させた設計判断
 
@@ -171,7 +173,7 @@ RPC にまとめれば往復は 1 回になるため、実際はこれより速�
 | **W1-16** | `station_status_latest` の意味 | `last_changed_at`（最後に変化した時刻）と `is_present` を持つ。フィードの鮮度は `feed_state.last_observed_at` | 「最後に変化」と「最後に観測」を区別しないと鮮度表示が誤る（§5 の 4） |
 | **W1-17** | 二重起動の抑止 | **`begin_fetch` RPC** の 1 文 UPDATE で claim し、同時に ETag と `last_observed_at` を返す | 読んでから書く方式は競合する。往復も 1 回で済む（§5 の 6） |
 | **W1-18** | 異常なフィードの扱い | 出現ポート数が登録済みの 50% 未満なら保存はするが `is_present` の反転はしない | 空や大幅欠落のフィードで全ポートを「不在」にしない（§5 の 7） |
-| **W1-19** | 本番稼働の段取り | PR D で **5 分毎のカナリア Cron**、PR E で毎分化 | Cron の到達性（最大のリスク）を 1 日早く、低い負荷で確認する（§5 の 8） |
+| **W1-19** | 本番稼働の段取り | PR D で **5 分毎のカナリア Cron**、PR E で毎分化 | Cron の到達性（最大のリスク）を 1 日早く、低い負荷で確認する（§5 の 8）。**v1.2 の W1-22・W1-23 で置き換え**：到達性の確認は PR 0 が初日に行い、PR E は E1／E2 に分かれた |
 | **W1-20** | エラー時の HTTP ステータス | **500** を返す（成功・未更新・スキップは 200） | Vercel Observability のエラー率検知を効かせる（§5 の 9） |
 | **W1-21** | ODPT のエンドポイントとトークンの扱い | **開発プラン D-04 を維持**（認証付きを正、公開をフォールバック）。トークンの漏洩面は規律ではなく**仕組み**で閉じる（下記 4 点） | 認証付きだけが日 24,000 の残量ヘッダーを返す。公開に替えるとこの可視性が消え、開発プラン R9 が数値で追えなくなる（§4.1 (d)、§5 末尾） |
 
@@ -184,6 +186,16 @@ RPC にまとめれば往復は 1 回になるため、実際はこれより速�
 
 あわせて、認証付きの利点を実際の運用に変える。`X-RateLimit-Remaining-day` を `feed_fetch_log.ratelimit_remaining_day` に記録し、残量が減り続けたら気づけるようにする（想定は 1 日 2,880 回＝上限の 12%）。
 
+### 4.2c v1.2 で追加した決定
+
+実装順序を見直して導いた決定（§5.1）。設計そのものは変えていない。
+
+| ID | 論点 | 決定 | 根拠 |
+|---|---|---|---|
+| **W1-22** | 生データの保全開始時期 | **PR 0 を段 0 に置き、スキーマ・RPC・`gbfs-core` を待たずに生 gzip JSON の保全を始める**。DB への取り込みは従来どおり PR D | 生 JSON は一次ソース（開発プラン D-03）で、Postgres の配列はそこから再構築できる派生物。この週の律速は作業量ではなく待ち時間で、蓄積開始を 9/9 から **9/7** に前倒しできる。あわせて最大の未知（Cron の到達性）を初日に確かめられる |
+| **W1-23** | 本番稼働の分割 | **PR E を E1（ウォッチドッグ・監視）と E2（毎分化）に分ける**。監視を先に立ち上げ、稼働を上げるのは最後の 1 行にする | 「本番に影響する変更を後ろに寄せる」（§6.1）という自分の原則に、v1.1 の PR E は反していた。最大の影響を持つ変更が最も新規 SQL の多い変更と同居していた。分ければ M0 は 1 行になり、巻き戻しも 1 行になる |
+| **W1-24** | PR B と PR C の順序 | **C を B より先にする**（A → C → B → D） | v1.1 では B の完了条件「実データのフィクスチャで初回 1 秒以内」が、C で作るフィクスチャに依存していた。加えて配列の契約に関する発見は C 側で先に出るため、B を先に作ると後で覆る契約を pgTAP に固めてしまう |
+
 ### 4.3 実装時に踏みやすい落とし穴
 
 調査で判明した、放置すると必ず詰まる点。各 PR の受け入れ条件に組み込む。
@@ -192,21 +204,21 @@ RPC にまとめれば往復は 1 回になるため、実際はこれより速�
 |---|---|---|
 | 1 | **新規テーブルは `service_role` からも見えない**。「新規テーブルの自動公開」を OFF にすると、`anon`・`authenticated` だけでなく **`service_role` の権限も既定で剥奪**される。RLS を有効にしただけでは足りず、REST 呼び出しが `42501 permission denied` になる | マイグレーションで明示的に `grant select, insert, update, delete on table ... to service_role;` と `grant usage, select on all sequences in schema public to service_role;` を書く（PR A） |
 | 2 | **RPC には明示的な `grant execute` が必要**で、DDL 後に PostgREST のスキーマキャッシュを更新しないと 404 になる | `grant execute on function ... to service_role;` と、マイグレーション末尾の `notify pgrst, 'reload schema';`（PR B） |
-| 3 | `cron.job_run_details` は**自動削除されない**。毎分ジョブで月 4.3 万行たまる | 削除ジョブを同じマイグレーションで登録する（PR E） |
-| 4 | Supabase では `postgres` ロールが `cron.job` に **SELECT しかできない**。`update cron.job set active=false` は失敗する | 有効・無効の切替は `cron.alter_job()`、削除は `cron.unschedule()` を使う（PR E） |
-| 5 | pg_cron は **UTC 固定**（`cron.timezone` は変更不可）。`'0 3 * * *'` は 12:00 JST | 日次ジョブは UTC で書き、コメントに JST を併記する（PR E） |
-| 6 | `cron.schedule('名前', ...)` は**同名ジョブを上書き**する（名前は大文字小文字を区別し変更不可） | ジョブ名を定数として管理し、マイグレーションの冪等性に利用する（PR E） |
-| 7 | `net.http_post` の引数順は `url, body, params, headers, timeout_milliseconds` で `http_get` と異なる。既定タイムアウトは **2000 ms** | 必ず名前付き引数で呼び、`timeout_milliseconds := 10000` を明示する（PR E） |
-| 8 | `pg_net` のリクエストは**トランザクションのコミット後**に送信される | SQL Editor で `begin ... rollback` して試しても何も送られない。検証は commit する（PR E） |
+| 3 | `cron.job_run_details` は**自動削除されない**。毎分ジョブで月 4.3 万行たまる | 削除ジョブを同じマイグレーションで登録する（PR E1） |
+| 4 | Supabase では `postgres` ロールが `cron.job` に **SELECT しかできない**。`update cron.job set active=false` は失敗する | 有効・無効の切替は `cron.alter_job()`、削除は `cron.unschedule()` を使う（PR E1） |
+| 5 | pg_cron は **UTC 固定**（`cron.timezone` は変更不可）。`'0 3 * * *'` は 12:00 JST | 日次ジョブは UTC で書き、コメントに JST を併記する（PR E1） |
+| 6 | `cron.schedule('名前', ...)` は**同名ジョブを上書き**する（名前は大文字小文字を区別し変更不可） | ジョブ名を定数として管理し、マイグレーションの冪等性に利用する（PR E1） |
+| 7 | `net.http_post` の引数順は `url, body, params, headers, timeout_milliseconds` で `http_get` と異なる。既定タイムアウトは **2000 ms** | 必ず名前付き引数で呼び、`timeout_milliseconds := 10000` を明示する（PR E1） |
+| 8 | `pg_net` のリクエストは**トランザクションのコミット後**に送信される | SQL Editor で `begin ... rollback` して試しても何も送られない。検証は commit する（PR E1） |
 | 9 | Storage に `Buffer` を上げるとき `contentType` を省略すると **`text/plain;charset=UTF-8`** になる。REST 経由では `Content-Encoding` が無視される | `contentType: 'application/gzip'` を明示し、読み出し側で gunzip する（PR D） |
 | 10 | Storage の同一パス上書きは CDN に古い内容が残る | パスに `observed_at` を含めて毎回別パスにする。既定の `upsert: false` のまま（PR D） |
 | 11 | PostgREST の `max_rows` は 1000。集合を返す RPC は**警告なく切り詰められる** | RPC は `jsonb` のスカラを返す（PR B） |
 | 12 | URL とヘッダの合計が 16 KB を超えると **HTTP 520**。413 のときは JSON でなく HTML が返る | 配列は必ず POST の本文に入れる。エラー処理では `Content-Type` を確認してから JSON パースする（PR D） |
 | 13 | `statement_timeout` 超過は 504 ではなく **500（`57014`）** | 再試行の判定でステータスコードだけを見ない（PR D） |
-| 14 | **Vercel Services の中では Middleware が使えない**（`middleware.ts` があるとデプロイが拒否される） | 認証はルートハンドラ内で行う。この制約を CLAUDE.md に追記する（PR A） |
-| 15 | `supabase init` は `supabase/migrations/` を作らない | 最初の `supabase migration new` で作られる（PR A） |
+| 14 | **Vercel Services の中では Middleware が使えない**（`middleware.ts` があるとデプロイが拒否される） | 認証はルートハンドラ内で行う。この制約を CLAUDE.md に追記する（PR 0） |
+| 15 | `supabase init` は `supabase/migrations/` を作らない | 最初の `supabase migration new` で作られる（PR 0） |
 | 16 | `supabase db push` は**タイムスタンプが前後するマイグレーションを拒否**する（内容ではなく版番号だけを比較） | PR を 1 本ずつマージする運用（CLAUDE.md §4）を守る |
-| 17 | `supabase db diff` は **Storage バケットと `security_invoker` ビューを検出しない** | これらは手書きでマイグレーションに入れる（PR A） |
+| 17 | `supabase db diff` は **Storage バケットと `security_invoker` ビューを検出しない** | これらは手書きでマイグレーションに入れる（PR 0・PR A） |
 
 ### 4.4 確定したコスト見積り
 
@@ -227,14 +239,14 @@ v1.0 を「前提から疑う」姿勢で読み直し、実データと本番環
 
 | # | 重大度 | 問題 | 修正 | 反映 |
 |---|---|---|---|---|
-| 1 | **重大** | v1.0 の RPC は毎スナップショットで `stations.last_seen_at` を更新する設計だった。HELLO では **5 分毎に 14,861 行の UPDATE**（1 日 430 万行）になり、テーブルの膨張と WAL の増加で Micro インスタンスを圧迫する | 収集の最短経路では `stations` に**登録以外の書き込みをしない**。`last_seen_at` と `is_active` は日次ジョブが直近 25 時間のスナップショットの配列から計算する | §6 PR B・PR E、§11.3 |
+| 1 | **重大** | v1.0 の RPC は毎スナップショットで `stations.last_seen_at` を更新する設計だった。HELLO では **5 分毎に 14,861 行の UPDATE**（1 日 430 万行）になり、テーブルの膨張と WAL の増加で Micro インスタンスを圧迫する | 収集の最短経路では `stations` に**登録以外の書き込みをしない**。`last_seen_at` と `is_active` は日次ジョブが直近 25 時間のスナップショットの配列から計算する | §6 PR B・PR E1、§11.3 |
 | 2 | **重大** | **静かにデータを失う経路**があった。Storage への保存に成功した後に RPC が失敗すると、次の取得で ODPT が 304 を返し（ETag は変わっていない）、そのスナップショットは二度と DB に入らない | `feed_state.last_etag` と `last_observed_at` は **RPC が取り込みに成功したときだけ**更新する。関数側は絶対に書かない。これにより「最後に取り込みに成功した ETag」で条件付き要求を出すことになり、失敗分は次回に自然に再取得される | §6 PR D、§11.3、§11.4 |
-| 3 | **重大** | 月替わりに該当月のパーティションが無いと INSERT が失敗し、保守ジョブが止まっていれば**収集が丸ごと止まる** | **DEFAULT パーティション**を置き、行が入ったら監視で検知する。保守ジョブは 2 か月先まで作る。これで最悪でも保存は続く | §6 PR A、PR E |
+| 3 | **重大** | 月替わりに該当月のパーティションが無いと INSERT が失敗し、保守ジョブが止まっていれば**収集が丸ごと止まる** | **DEFAULT パーティション**を置き、行が入ったら監視で検知する。保守ジョブは 2 か月先まで作る。これで最悪でも保存は続く | §6 PR A、PR E1 |
 | 4 | **重大** | `station_status_latest` は変化行だけ更新するため、その `observed_at` は「最後に**変化**した時刻」であって「最後に観測した時刻」ではない。鮮度表示に使えず、フィードから消えたポートは古い値のまま「現在値」として残る | 列を **`last_changed_at`** に改名し、**`is_present`** を追加する。フィードの鮮度は `feed_state.last_observed_at` で表す。消えたポートは `is_present=false` になり、値は最後に観測したものを保持する | §6 PR A・PR B、§11.3 |
 | 5 | 中 | `reported_age_s` の負値（ODPT 側の時計ずれ）を -1 に丸める仕様は、**欠損の印である -1 と衝突**する | 負値は **0** に丸める。-1 は欠損専用にする | §11.1 |
 | 6 | 中 | Cron 二重起動の抑止が「`last_fetch_at` を読んで判断」だったため、同時に走る 2 つの関数が両方とも通過する | **`begin_fetch` RPC** で `update ... where last_fetch_at < now() - 30s returning` により**原子的に claim** する。同時に ETag と `last_observed_at` も返し、往復を 1 回にまとめる | §6 PR B・PR D、§11.3 |
 | 7 | 中 | フィードが空や大幅欠落で返ってきたとき、登録済みポートの大半が「不在」に反転し、翌日の `is_active=false` 判定まで汚染する | **異常ガード**：出現ポート数が登録済みの 50% 未満なら、スナップショットは保存するが `is_present` の反転はせず、通知だけ出す | §6 PR B、§11.3 |
-| 8 | 中 | Deployment Protection が Cron を弾く可能性（最大のリスク）を確かめるのが **M0 と同時**だった | **PR D に 5 分毎のカナリア Cron** を入れ、本番稼働の 1 日前に Cron の到達性と取り込みの一通りを確認する。PR E で毎分に切り替える | §6 PR D・PR E |
+| 8 | 中 | Deployment Protection が Cron を弾く可能性（最大のリスク）を確かめるのが **M0 と同時**だった | **PR D に 5 分毎のカナリア Cron** を入れ、本番稼働の 1 日前に Cron の到達性と取り込みの一通りを確認する。PR E で毎分に切り替える（**v1.2 で到達性の確認は PR 0 に前倒し**） | §6 PR D・PR E2 |
 | 9 | 中 | エラー時も 200 を返す設計は、Vercel Observability の**エラー率による異常検知が効かない** | 成功・未更新・スキップは 200、**エラーは 500** を返す。本文に `ok` と `result` を入れる点は変えない | §11.6 |
 | 10 | 中 | ドコモの status には **`station_information` に存在しないポートが 11 件**ある（実測）。属性を前提にした処理が例外になる | `ingest_snapshot` は status から登録するので取り込みは問題ない。PR F の同期と将来の API は「属性が無いポート」を前提に作る | §6 PR F、§11.1 |
 | 11 | 中 | ドコモのポート ID は数分単位で出入りする。60 分で **122 件が一部の回にしか現れない**が、和集合は 1 回あたり +6 に収まる（実測） | `idx` は有限集合の中で振られるため設計は安全。`is_present` は生の真値として毎回反転させ、「休止」として見せる平滑化は W2 以降の API・特徴量側で行う | §11.1 |
@@ -243,11 +255,11 @@ v1.0 を「前提から疑う」姿勢で読み直し、実データと本番環
 | 14 | 軽微 | 生 JSON を「パース後に再直列化して gzip」すると ODPT の原文と一致しない | **受信したバイト列をそのまま gzip** する。再直列化しない | §6 PR D |
 | 15 | 軽微 | Storage の同一パス重複（409）の扱いが未定義 | 409 は正常系として扱い、パスが同じなら内容も同じとみなす | §6 PR D |
 | 16 | 軽微 | 重複 ID の除去で「どちらを残すか」が未定義 | **先頭を残す**。内容が異なる重複は件数を `feed_fetch_log.warnings` に記録する | §11.1 |
-| 17 | 軽微 | `daily_quality.quality_date` の日付基準が未定義 | **JST の日付**にする。Storage のパスと Parquet のパーティションは UTC のままで、用途が違うことを明記する | §6 PR E、§11.5 |
+| 17 | 軽微 | `daily_quality.quality_date` の日付基準が未定義 | **JST の日付**にする。Storage のパスと Parquet のパーティションは UTC のままで、用途が違うことを明記する | §6 PR E1、§11.5 |
 | 18 | 軽微 | User-Agent が未指定。ODPT から見て誰の取得か分からない | `BikeChance/0.1 (+CONTACT_EMAIL)` を付ける。ODPT 利用規約の「著しい負荷」判定で連絡が取れる状態にする | §6 PR D |
 | 19 | 軽微 | `feed_state` の初期行が無いと `begin_fetch` の claim が空振りする | seed で 2 行を入れる | §6 PR A |
-| 20 | 軽微 | 監視の「同じ事象を繰り返し通知しない」に必要なテーブルが無い | `alert_state` を PR E のマイグレーションに追加する | §6 PR E |
-| 21 | 軽微 | 第三のシークレット保管先として Vault に URL を入れていた | 本番 URL は秘密ではないので `app_config` テーブルに置く。Vault は `cron_secret` と Webhook URL だけにする | §6 PR E、§11.7 |
+| 20 | 軽微 | 監視の「同じ事象を繰り返し通知しない」に必要なテーブルが無い | `alert_state` を PR E1 のマイグレーションに追加する | §6 PR E1 |
+| 21 | 軽微 | 第三のシークレット保管先として Vault に URL を入れていた | 本番 URL は秘密ではないので `app_config` テーブルに置く。Vault は `cron_secret` と Webhook URL だけにする | §6 PR E1、§11.7 |
 | 22 | 軽微 | 24 時間検証に「配列の値が生 JSON と一致する」確認が無かった | 生 JSON 1 件と DB の配列を突き合わせる照合スクリプトを QA に加える | §8.6 |
 | 23 | **重大** | `systems` 等の参照データを `supabase/seed.sql` に置いていたが、**seed はローカルの `db reset` でしか実行されず `db push` は流さない**。本番の `feed_state` が空のままだと `begin_fetch` が claim できず収集が始まらない | 参照データは `on conflict do nothing` の冪等な INSERT としてマイグレーションに入れる。`seed.sql` はローカル専用（pgtap の有効化のみ） | §6 PR A |
 | 24 | 中 | DEFAULT パーティションに行があると、Postgres は同じ範囲の新パーティション作成を**エラーにする**。v1.1 の初稿の復旧手順（親に insert して default から delete）も、その前の `create table` で失敗する | `ensure_snapshot_partitions` が DEFAULT の該当行を検出し、detach → 作成 → 移動 → attach を 1 トランザクションで行う。復旧手順もこの関数を呼ぶだけにする | §6 PR A、§9 |
@@ -274,22 +286,37 @@ v1.0 を「前提から疑う」姿勢で読み直し、実データと本番環
 - 開発プラン §15 の D-04 に、上記のレート制限とヘッダー認証不可の実測値を追記する（決定そのものは変更しない）。
 - 開発プラン §5.3 の DDL は本文書の §11 と食い違う箇所がある（`gap` 列、`station_status_latest` の列名、`feed_state` の列、`systems.lock_key`）。PR A のマージ後に開発プランを追随させる。
 
+### 5.1 v1.2 の実装順序の見直しで見つかった問題
+
+v1.1 を「この順で作って本当に最短か」という観点で読み直した。設計の誤りは見つからなかったが、**順序と前提**に 4 件の問題があった。番号は §5 の表からの続き。
+
+| # | 重大度 | 問題 | 修正 | 反映 |
+|---|---|---|---|---|
+| 28 | **重大** | この週の律速は作業量ではなく待ち時間（カナリア 18 時間＋24 時間 QA）である。それにもかかわらず、**最初の 1 バイトが保存されるのは PR D がマージされる 9/9**で、それまでの 2 日半は 1 件も貯まらない。生 JSON は一次ソースであり、その保全にスキーマも RPC も要らない | 生データの保全だけを切り出した **PR 0** を段 0 に置く（W1-22）。蓄積開始が **9/7** になり、W6 の LightGBM v1 が使えるデータが 2 日半増える | §6.2、§7 |
+| 29 | 中 | **PR B の完了条件が PR C の成果物に依存していた**。B は「実データのフィクスチャ（HELLO 14,861 件）で初回 1 秒以内」を条件にし `scripts/bench-ingest.ts` がそれを読むが、`fixtures/gbfs/` を作るのは C である。順序が逆だった | **A → C → B → D** にする（W1-24） | §6.4、§6.5、§7 |
+| 30 | 中 | **フィクスチャの元データが残っていない**。開発プラン §16.B は 2026-09-04 の生 JSON が作業ディレクトリにあると書いているが、`fixtures/` も `.json.gz` も存在しない。テストが期待する件数（ドコモの完全重複、`station_information` に無いポート数）も、取り直したデータでは変わり得る | 段 0 で取り直す。PR 0 が保存した生 JSON を Storage から取って縮約するのが最も手軽で、実際に収集したものと同一である点でも望ましい。件数は**測り直してからテストに書く** | §6.4、§7 |
+| 31 | 中 | **`station_information` を取得するものが PR F（9/11）まで存在しない**。`station_status` と違って生アーカイブも残らないため、9/7〜9/11 に起きたポート属性の変化は永久に失われる | 段 0 で各システム 1 回だけ手で取得し Storage に保存する。PR F の初回実行でそれも取り込めば、属性履歴の起点が 9/7 になる | §6.9、§7 |
+
+あわせて、v1.1 の PR E が「本番に影響する変更を後ろに寄せる」という §6.1 の原則に反していた点を直し、**E1（監視）→ E2（毎分化）** に分割した（W1-23）。
+
 ## 6. PR の分割と各 PR の定義
 
 ### 6.1 分割の方針
 
 - 1 つの PR は **1 つの関心事**に閉じ、レビューが 20〜60 分で終わる量にする（目安：差分 300〜600 行。PR A はスキーマなので最も大きい）
-- **本番に影響する変更を後ろに寄せる**。PR A〜C はマージしても本番の挙動が変わらない。PR D で 5 分毎のカナリア、PR E で毎分の本番稼働
+- **本番に影響する変更を後ろに寄せる**。ただし PR 0 だけは例外で、生データの保全を最優先するため最初に置く（§4.2c の W1-22）
 - **各 PR はそれ自体で CI を通し、テストを含む**。「テストは次の PR で」は認めない
-- 依存は一直線（A → B → C → D → E → F）。ただし C は A・B と独立に着手できる
+- 依存は **0 → A → C → B → D → E1 → E2 → F**。C は A と独立に着手できる
 
 | PR | 名前 | 主な成果物 | 本番影響 | 目安 |
 |---|---|---|---|---|
-| **A** | スキーマ v1 と Supabase 連携 | `supabase/` 一式、5 本のマイグレーション、seed、pgTAP、CI の SQL テスト、`regions` | なし（空のテーブルができるだけ） | 半日 |
-| **B** | 取り込み RPC | `begin_fetch` / `ingest_snapshot` / `finish_fetch` と pgTAP | なし（呼び出し元がまだない） | 半日 |
+| **0** | 生データの先行保全 | Supabase CLI 連携、`gbfs-raw` バケット、最小の収集ルート、毎分 Cron、`redact` | **小**（Storage に書くだけ。Cron 削除で即停止） | 2〜3 時間 |
+| **A** | スキーマ v1 | 5 本のマイグレーション、参照データ、pgTAP、CI の SQL テスト | なし（空のテーブルができるだけ） | 半日 |
 | **C** | `packages/gbfs-core` | Zod スキーマ、正規化、配列組み立て、フィクスチャ、単体テスト | なし | 半日 |
-| **D** | 収集エンドポイント＋カナリア Cron | `/api/jobs/collect/[system]`、Storage 保存、5 分毎の Cron、照合スクリプト | **小**（5 分毎に本番へ書く。Cron の無効化で即停止） | 半日〜1 日 |
-| **E** | 本番稼働（毎分化・ウォッチドッグ・監視） | `crons` 毎分化、pg_cron ジョブ群、Vault、`alert_state`、日次ジョブ | **大**（M0） | 半日〜1 日 |
+| **B** | 取り込み RPC | `begin_fetch` / `ingest_snapshot` / `finish_fetch` と pgTAP | なし（呼び出し元がまだない） | 半日 |
+| **D** | 収集エンドポイントの DB 取り込み | PR 0 のルートに ETag・重複排除・RPC を足す、照合スクリプト | **中**（`*/5` で本番 DB に書く） | 半日 |
+| **E1** | ウォッチドッグと監視 | pg_cron ジョブ群、Vault、`alert_state`、日次ジョブ、開発プランの追随 | 小（収集の Cron は `*/5` のまま） | 半日 |
+| **E2** | 毎分化 | `vercel.json` の `crons` を `* * * * *` に | **大**（M0） | 15 分 |
 | **F** | ポート属性の日次同期 | `/api/jobs/sync-stations/[system]`、SCD2 の RPC、Cron | 小 | 半日 |
 
 **PR 共通の作法**（CLAUDE.md §4 に従う）
@@ -299,9 +326,9 @@ v1.0 を「前提から疑う」姿勢で読み直し、実データと本番環
 - PR の説明に「完了条件の確認結果」を箇条書きで載せる（テストの実行結果、実データでの計測値）
 - マージは常にあなたの判断。main へのマージは本番デプロイになる
 
-### 6.2 PR A：スキーマ v1 と Supabase 連携
+### 6.2 PR 0：生データの先行保全
 
-**目的**：W1 で使うテーブル・パーティション・RLS・Storage バケットをマイグレーションとして定義し、ローカルと本番の両方に適用できる状態にする。
+**目的**：**9/7 午前に生 gzip JSON の保全を始める。** スキーマも RPC も `gbfs-core` も待たない。生 JSON が一次ソース（開発プラン D-03）で、Postgres の配列はそこから再構築できる派生物だから成立する。あわせて、この週で最大の未知である「Vercel Cron が Deployment Protection を越えて本番に届くか」の答えを初日に得る。
 
 **前提**：Supabase CLI をインストールし、プロジェクトに link する。
 
@@ -318,21 +345,90 @@ supabase start                     # ローカルスタック（Postgres 17・St
 supabase/
   config.toml
   migrations/
-    <ts>_0001_extensions.sql          # pg_cron, pg_net（pgcrypto は既存）
-    <ts>_0002_core_tables.sql         # 下表のテーブル
-    <ts>_0003_reference_data.sql      # systems 2 行、feed_state 2 行、app_config 1 行（on conflict do nothing）
-    <ts>_0004_partitions.sql          # 保守関数 + 初期パーティション + DEFAULT
-    <ts>_0005_rls_and_grants.sql      # 全テーブル RLS 有効、service_role に明示 grant
-    <ts>_0006_storage_buckets.sql     # gbfs-raw（storage スキーマが存在する環境のみ）
+    <ts>_0001_storage_buckets.sql      # gbfs-raw のみ（storage スキーマが存在する環境で作る）
+apps/web/app/api/jobs/collect/[system]/route.ts   # 最小版。PR D が同じルートを育てる
+apps/web/lib/jobs/
+  auth.ts             # CRON_SECRET の timingSafeEqual 比較
+  odpt-fetch.ts       # 取得・UA・フォールバック・タイムアウト。トークン付き URL を組み立てる唯一の場所（W1-21）
+  redact.ts           # acl:consumerKey=... を伏字化する純粋関数（W1-21）
+  storage.ts          # 受信バイト列を gzip して gbfs-raw に保存（409 は成功扱い）
+  supabase.ts         # service_role クライアント（サーバー専用）
+apps/web/test/jobs/collect-raw.test.ts
+apps/web/test/jobs/redact.test.ts
+apps/web/.env.local.example
+vercel.json           # regions: ["hnd1"]、crons 2 本（* * * * *）
+package.json          # scripts: db:start / db:reset / db:push
+.github/workflows/ci.yml   # 機密チェックに res.url / response.url の使用検出を追加（W1-21）
+.claude/CLAUDE.md          # 「Services 内で middleware.ts を使わない」を §3 に追記
+```
+
+**一連の手順**
+
+1. `Authorization: Bearer` を `CRON_SECRET` と定数時間比較。不一致 → 401
+2. `system` を `SYSTEM_IDS` で検証。未知 → 400
+3. ODPT を取得。`User-Agent: BikeChance/0.1 (+CONTACT_EMAIL)`、`AbortSignal.timeout(20_000)`。認証付きを正とし、失敗時は公開エンドポイントに 1 回だけフォールバック
+4. 受信バイト列から **`last_updated` だけ**を読む（Zod での検証はしない。壊れていて読めなければ `fetched_at` をパスに使い、`warnings` として応答に載せる）
+5. **受信バイト列をそのまま gzip** し、§11.5 のパスに `contentType: 'application/gzip'`・`upsert: false` で保存。**409 は正常系**（同じ `last_updated` を二度保存しない）
+6. 200 を返す。例外は 500（`message` は `redact()` を通す）
+
+**PR 0 がやらないこと**：DB への書き込み（`feed_state`・`status_snapshots`・`feed_fetch_log` は存在しない）、ETag の条件付き要求、配列化、異常ガード、監視。すべて PR D 以降で足す。
+
+```ts
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+```
+
+**Cron**
+
+```json
+{
+  "regions": ["hnd1"],
+  "services": { "web": { "root": "apps/web", "framework": "nextjs" } },
+  "rewrites": [{ "source": "/(.*)", "destination": { "service": "web" } }],
+  "crons": [
+    { "path": "/api/jobs/collect/hellocycling", "schedule": "* * * * *" },
+    { "path": "/api/jobs/collect/docomo-cycle", "schedule": "* * * * *" }
+  ]
+}
+```
+
+**ETag を使わないことの代償**：`feed_state` がまだ無いので条件付き要求ができず、毎回フィード全体を受信する。ODPT からの転送量は 31 MB/日 ではなく **155 MB/日** になる。PR D までの 2 日で約 310 MB の増加にとどまり、**リクエスト数は最終形と同じ 1 日 2,880 回**（認証付きの上限 24,000 回/日の 12%）なので、開発プラン R9 の観点では問題にならない。同じ `last_updated` は同じパスに写像されるため、Storage のオブジェクト数は重複排除した場合と一致する（余分な取得は 409 で畳まれる）。
+
+**テスト**
+
+- 単体（vitest）：401 / 400 / 保存成功 / 409（既存）/ 取得失敗（500）の分岐。`last_updated` が読めない壊れた本文でも 500 にならず保存されること。**エラーメッセージ・応答本文のいずれにも `consumerKey` が含まれないこと**（undici 風の `cause` 付き例外を注入した場合も含む）。`redact()` が値を伏字にすること
+- 統合（手動、ローカル Supabase）：`pnpm dev` で `curl -H "Authorization: Bearer $CRON_SECRET" localhost:3000/api/jobs/collect/hellocycling` → 200。ローカルの Storage に gzip がある。同じ `last_updated` で再実行 → 409 を正常系として 200
+
+**マージ後の確認（段 0 のゲート）**
+
+- マージから 15 分以内に、`gbfs-raw/{system}/{YYYY}/{MM}/{DD}/` に両システムのオブジェクトが現れる
+- Vercel の Cron 画面で直近の実行が 200 になっている。**302 や 401 なら Deployment Protection が Cron を弾いている**。この場合は開発プラン §5.7 の pg_cron 主系への切り替え、または Protection Bypass for Automation を検討する。**この確認を初日に行えることが PR 0 の主目的のひとつ**
+- 1 時間後、HELLO のオブジェクトが 12 件前後、ドコモが 45 件前後（余分な取得が 409 で畳まれている証拠）
+- Observability で 1 回の Active CPU が 0.3 秒以下
+
+**完了条件**：上記の確認がすべて通ること。`.env.local.example` に値を入れないこと。
+
+### 6.3 PR A：スキーマ v1
+
+**目的**：W1 で使うテーブル・パーティション・RLS をマイグレーションとして定義し、ローカルと本番の両方に適用できる状態にする。Supabase CLI の連携と `gbfs-raw` バケットは PR 0 で済んでいる。
+
+**変更ファイル**
+
+```
+supabase/
+  migrations/
+    <ts>_0002_extensions.sql          # pg_cron, pg_net（pgcrypto は既存）
+    <ts>_0003_core_tables.sql         # 下表のテーブル
+    <ts>_0004_reference_data.sql      # systems 2 行、feed_state 2 行、app_config 1 行（on conflict do nothing）
+    <ts>_0005_partitions.sql          # 保守関数 + 初期パーティション + DEFAULT
+    <ts>_0006_rls_and_grants.sql      # 全テーブル RLS 有効、service_role に明示 grant
   seed.sql                            # ローカル専用：pgtap 拡張の有効化のみ（本番には流れない）
   tests/
     0001_tables.sql                   # pgTAP：テーブル・列・制約・参照データ
     0002_partitions.sql               # pgTAP：パーティション関数と DEFAULT
     0003_grants.sql                   # pgTAP：RLS と権限
-vercel.json                           # regions: ["hnd1"] を追加
 .github/workflows/sql-tests.yml       # 新規ワークフロー。on.pull_request.paths を supabase/** に限定
-.claude/CLAUDE.md                     # 「Services 内で middleware.ts を使わない」を §3 に追記
-package.json                          # scripts: db:start / db:reset / db:test / db:push
+package.json                          # scripts: db:test を追加
 ```
 
 **テーブル定義（W1 で作るもの）**
@@ -366,7 +462,7 @@ create function public.drop_expired_snapshot_partitions(p_keep_days int default 
 -- 上限が now() - p_keep_days より前のパーティションを drop table する（DEFAULT は対象外）
 ```
 
-初期マイグレーションで `ensure_snapshot_partitions(2)` を呼び、今月・翌月・翌々月を作る。DEFAULT は保守ジョブが止まったときの受け皿で、**行が入ったら監視で気づく**（PR E）。パーティションの drop は `detach concurrently` を使わない。plpgsql 関数の中では使えず、深夜の数ミリ秒の排他ロックは実害がないため。
+初期マイグレーションで `ensure_snapshot_partitions(2)` を呼び、今月・翌月・翌々月を作る。DEFAULT は保守ジョブが止まったときの受け皿で、**行が入ったら監視で気づく**（PR E1）。パーティションの drop は `detach concurrently` を使わない。plpgsql 関数の中では使えず、深夜の数ミリ秒の排他ロックは実害がないため。
 
 **DEFAULT に行があるときの新規パーティション作成**：Postgres は、新しい範囲に該当する行が DEFAULT に存在すると `create table ... partition of ... for values` を**エラーにする**。したがって `ensure_snapshot_partitions` は、作ろうとする範囲の行が DEFAULT にあるかを先に調べ、あれば同一トランザクション内で「DEFAULT を detach → 新パーティションを作成 → 該当行を親に insert し DEFAULT から delete → DEFAULT を attach」の順で処理する。無ければ単純に作成する。この分岐も pgTAP で確認する。
 
@@ -381,20 +477,6 @@ alter default privileges in schema public grant select, insert, update, delete o
 ```
 
 「Automatically expose new tables」を OFF にした本番では、**`service_role` にも明示的な grant が必要**である（実測：grant なしでは REST 経由で 42501 になった）。`alter default privileges` は将来作るテーブルにも効くが、**パーティションは親テーブル経由でアクセスするため個別の grant は不要**。
-
-**Storage バケット**
-
-```sql
-do $$ begin
-  if exists (select 1 from information_schema.schemata where schema_name = 'storage') then
-    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-    values ('gbfs-raw', 'gbfs-raw', false, 52428800, array['application/gzip'])
-    on conflict (id) do nothing;
-  end if;
-end $$;
-```
-
-`storage` スキーマの存在で分岐するのは、素の Postgres イメージでマイグレーションを流す環境（将来の軽量 CI）でも失敗しないため。ローカルの `supabase start` と本番では作成される。
 
 **CI の SQL テスト**
 
@@ -431,9 +513,53 @@ jobs:
 - `supabase db push` で本番に適用。Table Editor で 10 テーブルとパーティション（当月〜翌々月 ＋ DEFAULT）、`systems` と `feed_state` の 2 行ずつを確認
 - 本番に対し `service_role` キーで `feed_state` を REST 経由で読める（`curl -H "apikey: ..." .../rest/v1/feed_state` → 200 で 2 行）
 - CI の SQL テストジョブが通る
-- `vercel.json` に `regions: ["hnd1"]` が入り、デプロイが成功する（`preferredRegion` は使わない）
+- **PR 0 の収集が止まっていないこと**（マイグレーションは収集の経路に触れないので影響しないはずだが、毎回確認する）
 
-### 6.3 PR B：取り込み RPC
+### 6.4 PR C：`packages/gbfs-core`
+
+**目的**：GBFS の JSON を検証・正規化し、RPC の引数に変換する**純粋関数**をまとめる。I/O を持たないため、フィクスチャで完全にテストできる。**PR B より先に行う**：B の完了条件（実データでの所要時間測定）が C の作るフィクスチャに依存し、配列の契約に関する発見も C 側で先に出るため（§4.2c の W1-24）。
+
+**フィクスチャは取り直す**。開発プラン §16.B は 2026-09-04 の生 JSON が作業ディレクトリにあると書いているが、**現在は残っていない**（`fixtures/` も `.json.gz` も存在しない）。段 0 で ODPT から取り直し、ディレクトリ名は実際の取得日にする。あわせて、テストが期待する件数（ドコモの完全重複、`station_information` に無いポート数）を**取り直したデータで測り直してから**テストに書く。PR 0 が保存した生 JSON を Storage から取ってきて縮約するのが最も手軽で、実際に収集したものと同一である点でも望ましい。
+
+**変更ファイル**
+
+```
+packages/gbfs-core/
+  package.json  tsconfig.json  eslint.config.js
+  src/
+    schemas.ts        # z.looseObject による station_status / station_information のスキーマ
+    normalize.ts      # 重複排除（先頭優先）、フラグのビット化、reported_age_s の丸め
+    build-args.ts     # RPC 引数（p_station_ids と 4 本の配列）への変換
+    index.ts
+  fixtures/gbfs/<取得日>/
+    hellocycling.station_status.json.gz
+    hellocycling.station_information.json.gz
+    docomo-cycle.station_status.json.gz
+    docomo-cycle.station_information.json.gz
+  test/
+    schemas.test.ts  normalize.test.ts  build-args.test.ts  golden.test.ts  perf.test.ts
+```
+
+**設計上の要点**
+
+- **配列は「現れたポート」の分だけ作る**。`-1` を埋めた密な配列は RPC が組み立てる。TypeScript 側は `idx` を知らない
+- `reported_age_s = observed_at − last_reported`。負値は 0、32767 超は 32767、`last_reported` 無し（ドコモは全件同値だが将来の欠落に備える）は `observed_at` と同じとみなして 0
+- `flags = installed*1 + renting*2 + returning*4`
+- 重複 `station_id` は先頭を残す。内容が異なる重複の件数を `warnings.conflicting_duplicates` に入れる
+- HELLO の `vehicle_capacity` が文字列である等の非標準値は `looseObject` で保持し、検証で落とさない。`num_bikes_available` 等の必須値は `z.int().min(0)`
+- `capacity` は読まない（§11.2）
+
+**テスト**
+
+- スキーマ：実データ 4 件が通る。必須キー欠落・負の台数・`station_id` の型違いは弾く。未知キーは保持する
+- 正規化：ドコモの完全重複が除去され、先頭が残ることをフィクスチャの順序で確認（件数は取り直したデータで測り直す）。負の `reported_age_s` が 0 になる。フラグの 8 通り
+- 配列組み立て：長さが揃う。順序が `p_station_ids` と一致
+- ゴールデン：実データ 2 件について RPC 引数の SHA-256 をスナップショットとして保存し、リファクタで変わらないことを確認
+- 性能：HELLO 実データの検証＋正規化＋組み立てが **150 ms 未満**（実測 69 ms）
+
+**完了条件**：lint・typecheck・test 通過。`apps/web` から `@bikechance/gbfs-core` を import してビルドが通る。
+
+### 6.5 PR B：取り込み RPC
 
 **目的**：§11.3 の 3 つの RPC を実装し、pgTAP で境界条件を固める。
 
@@ -444,7 +570,7 @@ supabase/migrations/<ts>_0007_ingest_rpc.sql     # begin_fetch / ingest_snapshot
 supabase/tests/0004_begin_fetch.sql
 supabase/tests/0005_ingest_snapshot.sql
 supabase/tests/0006_finish_fetch.sql
-scripts/bench-ingest.ts                          # 実データのフィクスチャで初回・定常の所要時間を測る（node の pg を使う）
+scripts/bench-ingest.ts                          # PR C のフィクスチャで初回・定常の所要時間を測る（node の pg を使う）
 ```
 
 **`ingest_snapshot` の実装上の要点**
@@ -504,78 +630,31 @@ where l.last_changed_at < excluded.last_changed_at                          -- l
 - `finish_fetch`：`result` が `inserted` / `duplicate` / `unchanged` なら `consecutive_errors` が 0 に戻り `last_success_at` が進む。`skipped_recent` / `locked` はログだけで `feed_state` を変えない。`ok=false` で `consecutive_errors` が加算。`feed_fetch_log` に 1 行入り `source` が記録される
 - 権限：`service_role` から 3 つの RPC を `execute` できる。`anon` からはできない
 
-同時実行（`locked` の経路）は pgTAP の単一セッションでは再現できない。設計で担保し、PR D のカナリア運転で `dedup_hits` の内訳を見る。
+同時実行（`locked` の経路）は pgTAP の単一セッションでは再現できない。設計で担保し、PR D の観測で `dedup_hits` の内訳を見る。
 
 **完了条件**
 
 - pgTAP 全通過
-- 実データのフィクスチャ（HELLO 14,861 件）で初回 1 秒以内、定常 0.5 秒以内（プロトタイプ実測：0.65 秒 / 0.45 秒）
+- PR C のフィクスチャ（HELLO 14,861 件）で初回 1 秒以内、定常 0.5 秒以内（プロトタイプ実測：0.65 秒 / 0.45 秒）
 - 本番に `db push` 後、`service_role` で `begin_fetch` を REST 経由で呼べる（`POST /rest/v1/rpc/begin_fetch`）。呼んだ後に `feed_state.last_fetch_at` を手で NULL に戻す
 
-### 6.4 PR C：`packages/gbfs-core`
+### 6.6 PR D：収集エンドポイントの DB 取り込み
 
-**目的**：GBFS の JSON を検証・正規化し、RPC の引数に変換する**純粋関数**をまとめる。I/O を持たないため、フィクスチャで完全にテストできる。
+**目的**：PR 0 が Storage までしかやっていないルートを育て、ETag による条件付き取得・重複排除・RPC による取り込みを足す。**Cron を一時的に `*/5` に落とし**、DB 経路の正しさを低い負荷で確かめてから毎分に戻す（PR E2）。
 
-**変更ファイル**
-
-```
-packages/gbfs-core/
-  package.json  tsconfig.json  eslint.config.js
-  src/
-    schemas.ts        # z.looseObject による station_status / station_information のスキーマ
-    normalize.ts      # 重複排除（先頭優先）、フラグのビット化、reported_age_s の丸め
-    build-args.ts     # RPC 引数（p_station_ids と 4 本の配列）への変換
-    index.ts
-  fixtures/gbfs/2026-09-04/
-    hellocycling.station_status.json.gz
-    hellocycling.station_information.json.gz
-    docomo-cycle.station_status.json.gz
-    docomo-cycle.station_information.json.gz
-  test/
-    schemas.test.ts  normalize.test.ts  build-args.test.ts  golden.test.ts  perf.test.ts
-```
-
-**設計上の要点**
-
-- **配列は「現れたポート」の分だけ作る**。`-1` を埋めた密な配列は RPC が組み立てる。TypeScript 側は `idx` を知らない
-- `reported_age_s = observed_at − last_reported`。負値は 0、32767 超は 32767、`last_reported` 無し（ドコモは全件同値だが将来の欠落に備える）は `observed_at` と同じとみなして 0
-- `flags = installed*1 + renting*2 + returning*4`
-- 重複 `station_id` は先頭を残す。内容が異なる重複の件数を `warnings.conflicting_duplicates` に入れる
-- HELLO の `vehicle_capacity` が文字列である等の非標準値は `looseObject` で保持し、検証で落とさない。`num_bikes_available` 等の必須値は `z.int().min(0)`
-- `capacity` は読まない（§11.2）
-
-**テスト**
-
-- スキーマ：実データ 4 件が通る。必須キー欠落・負の台数・`station_id` の型違いは弾く。未知キーは保持する
-- 正規化：重複 10 件（ドコモ実データ）が 5,800 件になる。先頭が残ることをフィクスチャの順序で確認。負の `reported_age_s` が 0 になる。フラグの 8 通り
-- 配列組み立て：長さが揃う。順序が `p_station_ids` と一致
-- ゴールデン：実データ 2 件について RPC 引数の SHA-256 をスナップショットとして保存し、リファクタで変わらないことを確認
-- 性能：HELLO 実データの検証＋正規化＋組み立てが **150 ms 未満**（実測 69 ms）
-
-**完了条件**：lint・typecheck・test 通過。`apps/web` から `@bikechance/gbfs-core` を import してビルドが通る。
-
-### 6.5 PR D：収集エンドポイントとカナリア Cron
-
-**目的**：ODPT → 検証 → Storage → RPC の一連を Route Handler として実装し、**5 分毎のカナリア Cron** で本番に流す。M0 の前に Cron の到達性と取り込みの正しさを低い負荷で確認する。
+**PR 0 との関係**：ルートもモジュールも新規作成ではなく**変更**になる。Cron の到達性は PR 0 で確認済みなので、この段で確かめるのは取り込みの正しさだけである。
 
 **変更ファイル**
 
 ```
-apps/web/app/api/jobs/collect/[system]/route.ts
+apps/web/app/api/jobs/collect/[system]/route.ts   # 変更：collect.ts に委譲する
 apps/web/lib/jobs/
-  auth.ts             # CRON_SECRET の timingSafeEqual 比較
-  odpt-fetch.ts       # 条件付き取得・UA・フォールバック・タイムアウト。トークン付き URL を組み立てる唯一の場所（W1-21）
-  redact.ts           # acl:consumerKey=... を伏字化する純粋関数（W1-21）
-  storage.ts          # gzip して gbfs-raw に保存（409 は成功扱い）
-  collect.ts          # 一連の手順（下記）
-  supabase.ts         # service_role クライアント（サーバー専用）
-apps/web/test/jobs/collect.test.ts     # fetch と supabase をモックし、結果の分岐をすべて通す
-apps/web/test/jobs/redact.test.ts      # 伏字化の単体テスト（W1-21）
-apps/web/.env.local.example
+  collect.ts          # 新規：一連の手順（下記）
+  odpt-fetch.ts       # 変更：If-None-Match と X-RateLimit-Remaining-day の読み取りを追加
+apps/web/test/jobs/collect.test.ts     # 変更：結果の分岐をすべて通す
 scripts/reconcile-raw.ts               # Storage と DB の件数を UTC 日で突き合わせる
 scripts/reconcile-snapshot.ts          # 生 JSON 1 件と DB の配列を idx で突き合わせる
-vercel.json                            # crons: 2 本、*/5 * * * *
-.github/workflows/ci.yml               # 機密チェックに res.url / response.url の使用検出を追加（W1-21）
+vercel.json                            # crons を */5 * * * * に一時的に落とす
 ```
 
 **一連の手順（`collect.ts`）**
@@ -583,7 +662,7 @@ vercel.json                            # crons: 2 本、*/5 * * * *
 1. `Authorization: Bearer` を `CRON_SECRET` と定数時間比較。不一致 → 401（**DB には何も書かない**。スキャナの試行でログを埋めないため）
 2. `system` を `SYSTEM_IDS` で検証。未知 → 400。クエリの `source`（`cron` / `watchdog` / `manual`、既定 `cron`）を検証し、ログに記録する
 3. `begin_fetch(system)` を呼ぶ。`claimed=false` → `finish_fetch(skipped_recent)` → 200
-4. ODPT を取得。`If-None-Match: <last_etag>`、`User-Agent: BikeChance/0.1 (+CONTACT_EMAIL)`、`AbortSignal.timeout(20_000)`。**認証付きを正**（開発プラン D-04、W1-21）とし、失敗（ネットワーク・5xx・タイムアウト）なら公開エンドポイントに 1 回だけフォールバック（ETag は同一なので 304 の最適化は失われない）。トークン付き URL の組み立てとこの `fetch` は `odpt-fetch.ts` の中で完結させ、**`Response` を外に返さない**。呼び出し側が受け取るのは `{ http_status, etag, bytes, body, endpoint, ratelimit_remaining_day }` のみ。`X-RateLimit-Remaining-day` はここで読み取る
+4. ODPT を取得。`If-None-Match: <last_etag>`、`User-Agent: BikeChance/0.1 (+CONTACT_EMAIL)`、`AbortSignal.timeout(20_000)`。**認証付きを正**（開発プラン D-04、W1-21）とし、失敗（ネットワーク・5xx・タイムアウト）なら公開エンドポイントに 1 回だけフォールバック（ETag は同一なので 304 の最適化は失われない）。トークン付き URL の組み立てとこの `fetch` は `odpt-fetch.ts` の中で完結させ、**`Response` を外に返さない**。呼び出し側が受け取るのは `{ http_status, etag, bytes, body, endpoint, ratelimit_remaining_day }` のみ
 5. 304 → `finish_fetch(unchanged, ok=true)` → 200
 6. 200 → `gbfs-core` で検証・正規化。`last_updated` が `last_observed_at` **以下**（同じか、後退している）→ `finish_fetch(unchanged)` → 200。後退したスナップショットは取り込まない
 7. **受信したバイト列を gzip** し、§11.5 のパスに `contentType: 'application/gzip'`・`upsert: false` で保存。409 は成功扱い
@@ -591,62 +670,42 @@ vercel.json                            # crons: 2 本、*/5 * * * *
 9. `finish_fetch(result, ok=true)` → 200
 10. どこかで例外 → `finish_fetch(error, ok=false, message)` → **500**。捕捉した例外は再送出せず `{ phase, http_status, error_name }` に詰め替える（undici の `cause` は URL を抱えるため連結しない）。`message` は `redact()` を通してから記録する（W1-21）
 
-```ts
-export const dynamic = "force-dynamic";
-export const maxDuration = 60;   // 20 s × 2（フォールバック）＋ Storage ＋ RPC で最悪 45 秒程度
-```
-
-**Cron（カナリア）**
-
-```json
-{
-  "regions": ["hnd1"],
-  "services": { "web": { "root": "apps/web", "framework": "nextjs" } },
-  "rewrites": [{ "source": "/(.*)", "destination": { "service": "web" } }],
-  "crons": [
-    { "path": "/api/jobs/collect/hellocycling", "schedule": "*/5 * * * *" },
-    { "path": "/api/jobs/collect/docomo-cycle", "schedule": "*/5 * * * *" }
-  ]
-}
-```
-
-HELLO は 5 分周期なので 5 分毎でもほぼ全スナップショットが入る。ドコモ（80 秒周期）は 3 分の 1 程度になるが、カナリアの目的は到達性と正しさの確認なので構わない。
+**Cron を `*/5` に落とす理由と代償**：DB 経路の誤りが毎分繰り返されるのを避ける。HELLO は 5 分周期なのでほぼ全スナップショットが入るが、**ドコモ（80 秒周期）は 3 分の 1 程度しか入らない**。§8.6 の照合が通ればすぐ PR E2 に進んでよく、この窓を短くするほど損失は小さくなる。なお生 JSON の保全もこの間は `*/5` になるため、ドコモの生データにも同じ欠けが生じる。
 
 **テスト**
 
-- 単体（vitest）：`result` の 8 分岐（`inserted` / `duplicate` / `unchanged`（304）/ `unchanged`（同一 `last_updated`）/ `skipped_recent` / `locked` / `error` / 401 / 400）をモックで通す。`error` のとき `finish_fetch` が `ok=false` で呼ばれ、応答が 500 であること。**エラーメッセージ・応答本文・`finish_fetch` の引数のいずれにも `consumerKey` が含まれないこと**（undici 風の `cause` 付き例外を注入した場合も含む）。`redact()` が `acl:consumerKey=` に続く値を伏字にすること。認証付きの応答から `ratelimit_remaining_day` が読み取られ、公開へフォールバックしたときは `null` になること
-- 統合（手動、ローカル Supabase）：`pnpm dev` で `curl -H "Authorization: Bearer $CRON_SECRET" localhost:3000/api/jobs/collect/hellocycling` → `inserted`。直後に再実行 → `skipped_recent`。31 秒後 → `unchanged`。ローカルの Storage に gzip がある。`reconcile-snapshot.ts` で不一致 0
+- 単体（vitest）：`result` の分岐（`inserted` / `duplicate` / `unchanged`（304）/ `unchanged`（同一 `last_updated`）/ `skipped_recent` / `locked` / `error` / 401 / 400）をモックで通す。`error` のとき `finish_fetch` が `ok=false` で呼ばれ、応答が 500 であること。**エラーメッセージ・応答本文・`finish_fetch` の引数のいずれにも `consumerKey` が含まれないこと**（undici 風の `cause` 付き例外を注入した場合も含む）。認証付きの応答から `ratelimit_remaining_day` が読み取られ、公開へフォールバックしたときは `null` になること
+- 統合（手動、ローカル Supabase）：`pnpm dev` で `curl -H "Authorization: Bearer $CRON_SECRET" localhost:3000/api/jobs/collect/hellocycling` → `inserted`。直後に再実行 → `skipped_recent`。31 秒後 → `unchanged`。`reconcile-snapshot.ts` で不一致 0
 
-**マージ後の確認（段 4 のゲート）**
+**マージ後の確認（段 4 のゲート、約 1〜2 時間）**
 
 - マージから 15 分以内に `feed_fetch_log` に両システムの行が入り、`status_snapshots` に少なくとも 1 行ずつある
-- Vercel の Cron 画面で直近の実行が 200 になっている。**302 や 401 なら Deployment Protection が Cron を弾いている**。その場合は W1 の予定を止めず、対処を決める（開発プラン §5.7 の pg_cron 主系への切り替え、または Protection Bypass for Automation の設定）
+- §8.2（重複・エラー率）、§8.5（値の健全性）、**§8.6（配列と生 JSON の照合。各システム 3 スナップショット）**を実施する。`*/5` なら 3 スナップショットは 15 分ほどで揃う
+- §8.7 で DEFAULT パーティションが 0 行
 - Observability で 1 回の Active CPU が 0.3 秒以下
 
-**カナリア運転（段 5、約 18 時間）**：§8.2・§8.3・§8.5・§8.6 を実施。**§8.6 の照合が通らなければ PR E に進まない**。
+**完了条件**：上記テストと確認がすべて通ること。**§8.6 の照合が通らなければ PR E1 に進まない。**
 
-**完了条件**：上記テスト・確認がすべて通ること。`.env.local.example` に値を入れないこと。
+### 6.7 PR E1：ウォッチドッグと監視
 
-### 6.6 PR E：本番稼働（毎分化・ウォッチドッグ・監視）
-
-**目的**：Cron を毎分にし、Vercel Cron が欠けたときの再起動、異常の検知と通知、日次の保守を揃える。**M0**。
+**目的**：Vercel Cron が欠けたときの再起動、異常の検知と通知、日次の保守を揃える。**収集の Cron は `*/5` のままなので、収集そのものへの影響はない。** 監視を先に立ち上げてから毎分化する（§4.2c の W1-23）。
 
 **変更ファイル**
 
 ```
-vercel.json                                        # crons を * * * * * に
 supabase/migrations/<ts>_0008_alert_state.sql      # alert_state(alert_key pk, first_seen_at, last_sent_at, last_value jsonb)
 supabase/migrations/<ts>_0009_ops_functions.sql    # send_alert / watchdog_collect / monitor_feeds / run_maintenance / refresh_station_activity / compute_daily_quality
 supabase/migrations/<ts>_0010_cron_jobs.sql        # cron.schedule（名前つき。同名は上書き）
 supabase/tests/0007_ops_functions.sql
 scripts/setup-vault.ts                             # .env を読み vault.create_secret を実行（node の pg、パラメータ化クエリ。値をコマンドラインに載せない）
+docs/260904_dev_plan.md                            # §15 に W1-13〜W1-24 を転記し、§5.3 の DDL を本文書 §11 に追随させる
 ```
 
 **pg_cron のジョブ（すべて UTC）**
 
 | 名前 | スケジュール | 内容 |
 |---|---|---|
-| `watchdog_collect` | `* * * * *` | `feed_state.last_fetch_at` が 150 秒より古いシステムについて、`app_config.project_base_url` ＋ `/api/jobs/collect/{system}?source=watchdog` を `net.http_get` で叩く。`Authorization` は Vault の `cron_secret`。`timeout_milliseconds := 10000` を明示（§4.3 の 7） |
+| `watchdog_collect` | `* * * * *` | `feed_state.last_fetch_at` が 150 秒より古いシステムについて、`app_config.project_base_url` ＋ `/api/jobs/collect/{system}?source=watchdog` を `net.http_get` で叩く。`Authorization` は Vault の `cron_secret`。`timeout_milliseconds := 10000` を明示（§4.3 の 7）。**収集が `*/5` の間は常時発火するため、E1 の間だけ閾値を 400 秒にしておき、E2 で 150 秒に戻す** |
 | `monitor_feeds` | `*/5 * * * *` | 下表の検知を行い、`alert_state` で重複を抑えて `net.http_post` で Webhook に送る |
 | `maintain_partitions` | `0 18 * * *`（03:00 JST） | `ensure_snapshot_partitions(2)`、`drop_expired_snapshot_partitions(60)`、`feed_fetch_log` 30 日超と `cron.job_run_details` 7 日超の削除 |
 | `refresh_station_activity` | `30 18 * * *`（03:30 JST） | 直近 25 時間のスナップショットの配列を `unnest with ordinality` で展開し、`stations.last_seen_at` を更新。72 時間見えないポートを `is_active=false`、再出現で `true` |
@@ -664,6 +723,8 @@ scripts/setup-vault.ts                             # .env を読み vault.create
 | ポート数の急変 | 最新スナップショットの `n_stations` が 24 時間前の中央値から ±5% 以上ずれる | 同上 |
 | DB 容量 | `pg_database_size` が 6 GB を超える（Pro の 8 GB に対する早期警告） | 日 1 回 |
 
+ドコモのフィード停滞（4 分）は、収集が `*/5` の E1 の間は必ず発火する。**E1 の間はドコモの停滞検知だけ無効化しておき、E2 と同時に有効化する。**
+
 Webhook が未設定（Vault に `alert_webhook_url` が無い）でも `alert_state` には記録し、ジョブは失敗させない。本文の形式は `app_config.alert_webhook_kind`（`discord` → `{"content"}`、`slack` → `{"text"}`、`generic` → そのまま）で切り替える。時刻は JST で書く。pg_cron から呼ぶ関数はすべて開始・終了・結果を `job_runs` に記録し、`pg_try_advisory_xact_lock(8423, 0)` で多重起動を避ける。
 
 **ウォッチドッグの補足**：Vercel Cron が正常なら `last_fetch_at` は常に 60 秒以内に更新されるため、ウォッチドッグは発火しない。発火するのは Cron が 2 回以上欠けたとき。`net.http_get` は応答を待たない（fire-and-forget）ので、結果は次の分の `feed_state` で判断する。Deployment Protection が Cron を弾く場合でも、本番ドメイン `https://bike-chance.vercel.app` への直接要求は公開されているため、ウォッチドッグは通る。
@@ -671,16 +732,35 @@ Webhook が未設定（Vault に `alert_webhook_url` が無い）でも `alert_s
 **テスト**
 
 - pgTAP：`refresh_station_activity` が 25 時間内に現れたポートの `last_seen_at` を更新し、72 時間見えないポートを非活性にし、再出現で活性に戻す。`daily_quality` が JST の日付で集計する。`ensure`/`drop` の実行後にパーティションが期待どおり。`alert_state` の抑制が効く（同じ key を 2 回呼んで 1 回だけ送る）
-- 本番での強制発火：Vercel の Cron を 5 分間 Disable → `last_fetch_at` が 150 秒を超える → ウォッチドッグが叩く → `feed_fetch_log` に `source = 'watchdog'` の行が入ることで到達を確認。Webhook にテスト通知が届く（`select public.send_alert('test', '{}'::jsonb)` を手で実行）
+- 本番での強制発火：Vercel の Cron を 5 分間 Disable → `last_fetch_at` が閾値を超える → ウォッチドッグが叩く → `feed_fetch_log` に `source = 'watchdog'` の行が入ることで到達を確認。Webhook にテスト通知が届く（`select public.send_alert('test', '{}'::jsonb)` を手で実行）
+
+**完了条件**
+
+- pgTAP 全通過。ウォッチドッグと通知の強制発火に成功
+- `monitor_feeds` が誤報を出していない（E1 用の閾値調整が効いている）
+- 開発プラン §15 に W1-13〜W1-24 を転記し、§5.3 の DDL を本文書 §11 に追随させた
+
+### 6.8 PR E2：毎分化（M0）
+
+**目的**：収集の Cron を毎分に戻し、**本番稼働を宣言する**。差分は 1 行で、巻き戻しも 1 行。
+
+**変更ファイル**
+
+```
+vercel.json          # crons を * * * * * に戻す
+supabase/migrations/<ts>_0011_watchdog_thresholds.sql   # ウォッチドッグを 150 秒に戻し、ドコモの停滞検知を有効化
+```
 
 **完了条件（M0）**
 
 - 両システムが期待周期で増え続ける（30 分観測：HELLO 6 件、ドコモ 22 件前後）
-- ウォッチドッグと通知の強制発火に成功
-- `vercel crons run` 相当の手動実行で 200
-- 開発プラン §15 に W1-13〜W1-20 を転記し、開発プラン §5.3 の DDL を本文書 §11 に追随させる（同じ PR で `docs/` を更新）
+- `feed_fetch_log` の `unchanged`（304）の比率が HELLO で 8 割前後になる（ETag が効いている証拠）
+- `monitor_feeds` が誤報を出さない
+- 収集の Active CPU が 1 回 0.3 秒以下
 
-### 6.7 PR F：ポート属性の日次同期
+**巻き戻し**：`vercel.json` を `*/5` に戻して再デプロイするか、Vercel の Cron 画面で Disable する。
+
+### 6.9 PR F：ポート属性の日次同期
 
 **目的**：`station_information` を日次で取得し、`station_attributes` を SCD2 で更新する。
 
@@ -689,7 +769,7 @@ Webhook が未設定（Vault に `alert_webhook_url` が無い）でも `alert_s
 ```
 apps/web/app/api/jobs/sync-stations/[system]/route.ts
 apps/web/lib/jobs/sync-stations.ts
-supabase/migrations/<ts>_0011_station_attributes_rpc.sql   # upsert_station_attributes
+supabase/migrations/<ts>_0012_station_attributes_rpc.sql   # upsert_station_attributes
 supabase/tests/0008_station_attributes.sql
 vercel.json                                                # crons に 2 本追加（0 19 * * * = 04:00 JST）
 ```
@@ -704,35 +784,39 @@ vercel.json                                                # crons に 2 本追�
 - ドコモの `capacity`（動的）はそのまま保存し、意味の解釈は特徴量側で行う。HELLO は `capacity` が無く `vehicle_capacity`（文字列）のみのため、数値に変換できたら `capacity` に入れる
 - 生 JSON は `gbfs-raw/{system}/{YYYY}/{MM}/{DD}/station_information_{fetched_at_epoch}.json.gz` に保存
 
+**段 0 のベースラインを取り込む**：PR F が動き出すまで `station_information` を取得するものが無いため、**段 0 で各システム 1 回だけ手で取得し Storage に保存しておく**（§7 の段 0）。PR F の初回実行時にそのファイルも取り込めば、属性履歴の起点が 9/7 になり、W1 中の属性変化を失わない。
+
 **テスト**：初回で全件が新規。同じ入力の 2 回目で `n_changed=0`。座標を 1 件変えた入力で 1 件だけ新しい `valid_from` の行ができ、旧行の `valid_to` が閉じる。入力から 1 件消しても有効行が残る。`stations` に無い ID を含む入力で登録が行われる。
 
 **完了条件**：本番で 2 回実行し、2 回目の `n_changed=0`。`station_attributes` の有効行数が HELLO 14,861・ドコモ 5,800 前後。status にしか現れないポート（ドコモ 11 件）に属性が無いことを確認し、将来の API がそれを許容する旨を開発プラン §8.3 に追記。
 
 ## 7. スケジュール（ゲート方式）
 
-日付は目標であり、**各段のゲートを満たすまで次に進まない**。収集はこのアプリの生命線なので、早さより確実さを優先する。v1.0 より M0 を 1 日遅らせ、その代わりに 5 分毎のカナリア運転を挟んだ。
+日付は目標であり、**各段のゲートを満たすまで次に進まない**。収集はこのアプリの生命線なので、早さより確実さを優先する。v1.2 では、生データの保全だけを切り出した PR 0 を段 0 に置き、**データの蓄積開始を 9/9 から 9/7 に前倒しした**。マイルストーンの日付は v1.1 から動かしていない。
 
 | 段 | 目標日 | 内容 | ゲート（次に進む条件） |
 |---|---|---|---|
-| 0 | 9/7（月）午前 | 事前準備：Supabase CLI、`link`、ローカル起動 | `supabase db reset` がローカルで通る |
-| 1 | 9/7（月）午後 | **PR A** スキーマ v1 | pgTAP 全通過、リモートに適用済み、`service_role` の権限を REST 経由で確認 |
-| 2 | 9/8（火）午前 | **PR B** 取り込み RPC | pgTAP 全通過、実データ 14,861 件で初回 1 秒以内 |
-| 3 | 9/8（火）午後 | **PR C** `packages/gbfs-core` | 単体テスト通過、性能テスト 150 ms 未満 |
-| 4 | 9/9（水）午前 | **PR D** 収集エンドポイント＋**カナリア Cron（5 分毎）** | マージ後 15 分以内に両システムのスナップショットが入る（= Cron の到達性と取り込みの一通りを確認） |
-| 5 | 9/9（水）午後〜9/10 午前 | **カナリア運転**（約 18 時間） | 5 分毎の取得で欠損なし、エラー率 1% 未満、Storage と DB の件数一致、配列と生 JSON の照合が一致（§8.6） |
-| 6 | 9/10（木）午前 | **PR E** 毎分化・ウォッチドッグ・監視 | **M0**：両システムが期待周期で増え続ける。ウォッチドッグと通知の強制発火を確認 |
+| 0 | 9/7（月）午前 | 準備（Supabase CLI・`link`・ローカル起動）、フィクスチャの取り直し、`station_information` の初回保存、**PR 0 生データの先行保全** | Cron が本番に届き、両システムの生 gzip が Storage に貯まり始める。**ここが最重要ゲート** |
+| 1 | 9/7（月）午後 | **PR A** スキーマ v1 | pgTAP 全通過、リモートに適用済み、`service_role` の権限を REST 経由で確認。PR 0 の収集が止まっていない |
+| 2 | 9/8（火）午前 | **PR C** `packages/gbfs-core` | 単体テスト通過、性能テスト 150 ms 未満 |
+| 3 | 9/8（火）午後 | **PR B** 取り込み RPC | pgTAP 全通過、PR C のフィクスチャで初回 1 秒以内 |
+| 4 | 9/9（水）午前 | **PR D** DB 取り込み（Cron を `*/5` に） | §8.2・§8.5・§8.6・§8.7 を実施。**§8.6 の照合が通ること**（`*/5` なら 15 分ほどで 3 スナップショット揃う） |
+| 5 | 9/9（水）午後 | **PR E1** ウォッチドッグ・監視 | 強制発火に成功、誤報なし。この状態で一晩観測する |
+| 6 | 9/10（木）午前 | **PR E2** 毎分化 | **M0**：両システムが期待周期で増え続ける。304 の比率が期待どおり |
 | 7 | 9/10（木）〜9/11（金） | 24 時間観測 | **M1**：§8 の合格基準をすべて満たす |
-| 8 | 9/11（金） | **PR F** 属性同期、開発プランの追随更新 | 2 回目の同期で新規行 0 |
+| 8 | 9/11（金） | **PR F** 属性同期、予備 | 2 回目の同期で新規行 0 |
 
-**カナリア運転で見るもの**：Cron の到達（Deployment Protection の影響）、5 分毎という低い負荷での取り込みの正しさ、Vercel の Active CPU と Supabase の DB 増分が §4.4 の見積りと合うか。ここで問題が出れば PR E の前に直す。
+**段 0 を最重要ゲートにする理由**：この週で最大の未知は「Vercel Cron が Deployment Protection を越えて本番に届くか」で、届かなければ開発プラン D-17（Vercel Cron を主スケジューラ）そのものを見直すことになる。PR 0 はスキーマも RPC も要らないため、この確認を 2 日早く、最小の投資で行える。届かなかった場合は §9 の対処を検討したうえで、pg_cron 主系への切り替えを判断する。
 
-**前倒しする場合**：PR A と PR C は他への依存がないため、9/5〜9/6 に着手できる。カナリア運転の時間は短縮しない。
+**段 4〜6 の窓を短くする**：`*/5` の間、ドコモは 80 秒周期に対して 3 分の 1 しか取得できない。§8.6 の照合が通り次第、段 5・段 6 を前倒ししてよい（同日中に E2 まで進めても構わない）。逆に、照合が通らないうちは絶対に E2 に進まない。
 
-**遅れた場合**：ゲートを満たさないまま次に進まない。9/11 に M1 が達成できなければ W2 の頭に持ち越し、W2 の Parquet 圧縮を後ろにずらす。収集の品質が学習データの品質を決めるため、この順序は動かさない。
+**前倒しする場合**：PR A と PR C は互いに独立なので並行して進められる。段 0 と、24 時間観測の長さは短縮しない。
+
+**遅れた場合**：ゲートを満たさないまま次に進まない。PR 0 が動いている限り**生データは貯まり続ける**ため、DB 経路の遅延が学習データの欠損に直結しなくなった点が v1.1 との最大の違いである。9/11 に M1 が達成できなければ W2 の頭に持ち越し、W2 の Parquet 圧縮を後ろにずらす。
 
 ## 8. 検証の手順と合格判定
 
-カナリア運転（段 5）と 24 時間観測（段 7）で使う。すべて Supabase の SQL Editor か `psql` で実行できる。
+段 4（DB 経路の検証）と段 7（24 時間観測）で使う。段 0〜3 の間は Storage のオブジェクト数だけを見る（§6.2）。すべて Supabase の SQL Editor か `psql` で実行できる。
 
 ### 8.1 取得率と欠損
 
@@ -770,7 +854,7 @@ where next_at - observed_at > make_interval(secs => expected_cadence_s * 3)
 order by gap desc;
 ```
 
-**合格ライン**：取得率が両システムとも 99.5% 以上。欠損区間の最大が 30 分未満。カナリア運転（5 分毎）ではドコモの取得数は期待値の 3 分の 1 程度になるため、この基準は段 7 で適用する。
+**合格ライン**：取得率が両システムとも 99.5% 以上。欠損区間の最大が 30 分未満。段 4〜6 は Cron が `*/5` なのでドコモの取得数が期待値の 3 分の 1 程度になる。**この基準は毎分化した後の段 7 で適用する。**
 
 ### 8.2 重複・冪等性・エラー率
 
@@ -797,7 +881,9 @@ where fetched_at >= now() - interval '24 hours';
 
 Storage の `gbfs-raw/{system}/{YYYY}/{MM}/{DD}/` のオブジェクト数と、同じ UTC 日の `status_snapshots` の行数を突き合わせる。照合スクリプト `scripts/reconcile-raw.ts`（PR D で追加）が両方を数えて差分を出す。
 
-**合格ライン**：差分 0。
+**PR 0 の期間は差分が出るのが正常**：段 0 から PR D のマージまで（9/7〜9/9）、生 JSON は貯まるが `status_snapshots` には行が無い。この照合は **PR D が終日稼働した UTC 日**にだけ適用する。PR D をまたぐ日は、マージ時刻より後の分だけを数える。9/7〜9/8 分の生 JSON は W2 の再構築スクリプトで DB に取り込む。
+
+**合格ライン**：差分 0（PR D 稼働後の日）。
 
 ### 8.4 容量とコスト
 
@@ -836,7 +922,7 @@ where s.observed_at = (select max(observed_at) from status_snapshots x where x.s
 
 配列の並び（`idx`）と生 JSON の値が一致していることを、実データで確認する。`scripts/reconcile-snapshot.ts`（PR D で追加）が、指定した `observed_at` の生 gzip JSON を Storage から取得し、`stations` の `idx` を使って DB の配列と全ポートを突き合わせる。
 
-**合格ライン**：カナリア運転中に少なくとも 3 スナップショット（各システム）で不一致 0。この照合が通らなければ PR E に進まない。
+**合格ライン**：段 4 の検証中に少なくとも 3 スナップショット（各システム）で不一致 0。`*/5` なら 15 分ほどで揃う。**この照合が通らなければ PR E1 に進まない。**
 
 ### 8.7 DEFAULT パーティションと保守
 
@@ -862,16 +948,20 @@ from pg_inherits where inhparent = 'status_snapshots'::regclass order by 1;
 | 誤ってデータを消した | Supabase の日次バックアップ（7 日保持）から復元。`status_snapshots` は Storage の生 JSON から再構築できる（再構築スクリプトは W2） | 生 JSON が一次ソースである理由 |
 | ODPT 側が落ちた | 何もしない。欠損として記録し、補間はしない | `feed_fetch_log` に `ok=false` で残る。ウォッチドッグは叩き続けるが害はない |
 | DEFAULT パーティションに行が入った | `select public.ensure_snapshot_partitions(2);` を手で実行する。関数が DEFAULT の detach → 作成 → 行の移動 → attach を 1 トランザクションで行う。**新パーティションを直接 `create table ... partition of` すると、DEFAULT に該当行があるためエラーになる** | 保守ジョブが止まっている原因（`cron.job_run_details`）を調べる |
-| カナリア運転で問題が出た | Cron を Disable し、原因を直して PR D に追加コミット。カナリアを再開して再度観測する | PR E には進まない |
+| DB 経路の検証（段 4）で問題が出た | Cron を Disable し、原因を直して PR D に追加コミット。再開して再度観測する | PR E1・E2 には進まない |
+| **Cron が本番に届かない**（段 0 で 302 / 401） | Protection Bypass for Automation を設定するか、開発プラン §5.7 の pg_cron 主系（`net.http_get` で叩く）に切り替える。**開発プラン D-17 の見直しになるため、実装を進める前に判断する** | PR 0 をこの位置に置いた最大の理由。2 日早く判明する |
+| **PR 0 が動いているのに DB 経路が遅れている** | 何もしない。生 JSON は貯まり続けており、W2 の再構築スクリプトで `status_snapshots` に取り込める | v1.2 でこの状況が「損失」でなくなった |
 
 **PR ごとのロールバック可否**
 
 | PR | main へマージ後の巻き戻し |
 |---|---|
+| 0（生データ保全） | `vercel.json` から `crons` を外して再デプロイ、または Cron を Disable。書き込み先は Storage だけで、破壊的な失敗経路がない |
 | A・B（SQL のみ） | 前進マイグレーションで修正。テーブルが空のうちは `drop table` を含む修正も安全 |
 | C（純粋関数のみ） | 呼び出し元がないため影響なし |
-| D（エンドポイント＋カナリア Cron） | Cron を Disable すれば収集が止まるだけで、既存データは無傷。5 分毎なので影響範囲は小さい |
-| E（毎分化・監視） | **本番稼働の分岐点**。Cron を Disable、または `vercel.json` を 5 分毎に戻す |
+| D（DB 取り込み） | Cron を Disable すれば収集が止まるだけで、既存データは無傷。`*/5` なので影響範囲は小さい。ルートを PR 0 の版に戻せば生データの保全だけは続けられる |
+| E1（監視） | `cron.unschedule()` で pg_cron ジョブを外す。収集の経路には触れていない |
+| E2（毎分化） | **本番稼働の分岐点**。`vercel.json` を `*/5` に戻して再デプロイ、または Cron を Disable。差分が 1 行なので巻き戻しも 1 行 |
 | F（日次同期） | Cron を Disable。`station_attributes` は追記のみなので既存行は壊れない |
 
 ## 10. W1 では作らないもの
@@ -1023,6 +1113,7 @@ gbfs-raw/{system_id}/{YYYY}/{MM}/{DD}/station_information_{fetched_at_epoch}.jso
 
 - 日付は **UTC**。Parquet のパーティションも UTC に揃える。一方、`daily_quality.quality_date` は人が読む QA 用なので **JST の日付**にする。用途が違うので基準が違うことを明記して混同を防ぐ
 - `observed_at_epoch` はフィードの `last_updated`（POSIX 秒）。同じ観測を二重に保存しない
+- **PR 0 と PR D は同じ規約を使う**。PR 0 は `feed_state` を持たず毎回フィード全体を取得するが、同じ `last_updated` は同じパスに写像されるため、余分な取得は `upsert: false` の 409 で畳まれ、オブジェクト数は重複排除した場合と一致する。`last_updated` が読めなかった場合だけ `fetched_at` をパスに使い、後から見分けられるようにする
 - **保存するのは ODPT から受信したバイト列そのもの**を gzip したもの。パース後に再直列化しない（原文との一致を保つため）
 - `upsert: false` で保存し、既存（HTTP 409）は正常系として扱う。パスが同じなら内容も同じとみなす
 - `contentType` は `application/gzip` を明示する（省略すると `text/plain` になる）
@@ -1042,6 +1133,8 @@ gbfs-raw/{system_id}/{YYYY}/{MM}/{DD}/station_information_{fetched_at_epoch}.jso
 | `error` | **500** | 取得・保存・取り込みのいずれかで失敗した |
 | （認証失敗） | **401** | `CRON_SECRET` 不一致 |
 | （未知のシステム） | **400** | パスの `system` が `systems` に無い |
+
+**PR 0 の段階**では `feed_state` も `feed_fetch_log` も無いため、`result` は `saved`（保存した）/ `duplicate`（409、既に同じパスがある）/ `error` の 3 種類だけになる。記録先は Vercel のログのみで、確認は Storage のオブジェクト数で行う（§6.2）。PR D が `feed_state` を使う分岐と DB への記録を足して、上の表の形にする。
 
 ```json
 { "ok": true, "system": "hellocycling", "result": "inserted",
