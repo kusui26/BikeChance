@@ -8,7 +8,15 @@
 import { redact } from "./redact";
 
 /** 失敗した工程。運用調査でどこを見ればよいかが分かる粒度にする。 */
-export const JOB_PHASES = ["auth", "validate", "fetch", "parse", "storage"] as const;
+export const JOB_PHASES = [
+  "auth",
+  "validate",
+  "fetch",
+  "parse",
+  "storage",
+  "ingest",
+  "unknown",
+] as const;
 export type JobPhase = (typeof JOB_PHASES)[number];
 
 export type JobFailure = {
