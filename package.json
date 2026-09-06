@@ -13,12 +13,17 @@
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "pnpm -r --if-present test"
+    "test": "pnpm -r --if-present test",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop",
+    "db:reset": "supabase db reset",
+    "db:push": "supabase db push"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.10.0",
     "prettier": "^3.9.6",
+    "supabase": "2.116.0",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.69.0"
   }

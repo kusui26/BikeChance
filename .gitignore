@@ -1,7 +1,8 @@
 # === 機密情報（絶対にコミットしない） ===
 .env
 .env.*
-!.env.example
+# 値を含まない雛形は追跡する（.env.example / .env.local.example）
+!.env*.example
 *.pem
 *.key
 .vercel

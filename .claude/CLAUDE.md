@@ -41,7 +41,10 @@
 - **型を厳格に**：明示的型を必ず付ける。**`any` 禁止**。**`as` キャスト禁止 → 型ガード**（`(x: unknown): x is T`）。Zod からは **`z.infer`** で導出（重複型を作らない）。GBFS 入力の Zod スキーマは `passthrough` で未知フィールドを保全し、非標準値（HELLO の文字列 `vehicle_capacity` 等）はスキーマで正規化する。
 - **DRY・定数・単位**：マジックナンバー禁止 → 名前付き定数（水平・閾値・保持日数は `packages/shared` の定数に集約）。**変数名に単位**を（`timeout_ms`, `distance_km`, `radius_m`, `reported_age_s`）。
 - **堅牢性**：失敗しうる処理に try/catch ＋**文脈付きエラー**（system・phase・HTTP ステータス等。URL は含めない）。fetch/API は **`AbortSignal.timeout` / `AbortController`** 必須。
-- **Cron ハンドラの定型**（`/api/jobs/*`、`/ml/*`）：`CRON_SECRET` 検証 → アドバイザリロック → 冪等チェック → 処理 → `job_runs` / `feed_fetch_log` / `inference_log` に記録 → 200 で要約 JSON を返す（3xx を返さない。Cron はリダイレクトを追わない）。`maxDuration` を明示。
+- **Cron ハンドラの定型**（`/api/jobs/*`、`/ml/*`）：`CRON_SECRET` 検証 → アドバイザリロック → 冪等チェック → 処理 → `job_runs` / `feed_fetch_log` / `inference_log` に記録 → 200 で要約 JSON を返す（3xx を返さない。Cron はリダイレクトを追わない）。`maxDuration` を明示。エラーは 500 を返す（Vercel Observability のエラー率検知を効かせるため）。
+- **Vercel Services の中では Middleware（Next.js 16 では `proxy.ts`、旧 `middleware.ts`）を使わない**。ファイルがあるとデプロイが拒否される。認証はルートハンドラの中で行う。
+- **リージョン指定は `vercel.json` のトップレベル `regions`**。ルートの `preferredRegion` は使わない（Next.js 16 で非推奨。Vercel 上で許される値は `auto` / `global` / `home` のみで、Node ランタイムではルート単位の指定が無視される）。
+- **ODPT のトークンを URL 以外の場所に出さない**：トークン付き URL を組み立てるのは `apps/web/lib/jobs/odpt-fetch.ts` だけにし、`Response` をモジュールの外へ出さない（`res.url` に触れる経路を作らない）。捕捉した例外は再送出せず `{ phase, http_status, error_name }` に詰め替え（undici の `cause` は URL を抱える）、記録する文字列は `redact()` を通す。CI が `res.url` の使用を検出する。
 - **Python（`apps/ml`）**：`uv`、`ruff`、`mypy --strict`、`pytest`。型ヒント必須、`polars`/`pyarrow` で列指向に処理、ノートブックの成果は必ずモジュールへ移す。
 - **Swift（`apps/ios`）**：Swift 6（strict concurrency）、`@Observable`、`URLSession` + `Codable`（`/v1` スキーマから生成）、Swift Testing、SwiftLint/SwiftFormat。
 - **品質ゲート**：**lint / typecheck / unit test を必ず回す**。**境界値・エッジケース**（空フィード、重複 ID、`capacity=0`、文字列容量、BBox 外座標、`last_updated` 後退、欠損区間、Cron 二重起動）のテストを厚く書く。**ゴールデンテスト**（固定フィクスチャからの特徴量・予測の差分検知）と**契約テスト**（`/v1` スキーマ ↔ iOS `Codable`）を維持する。テストデータは `fixtures/gbfs/` の実データ縮約サンプルを使う。
