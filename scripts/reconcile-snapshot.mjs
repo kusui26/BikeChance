@@ -91,13 +91,26 @@ const normalize = (doc) => {
 
 const MISSING = -1;
 
-/** 配列の位置 idx+1 と、生 JSON から作った期待値を 1 ポートずつ比べる。 */
+/**
+ * 配列の位置 idx+1 と、生 JSON から作った期待値を 1 ポートずつ比べる。
+ *
+ * **台帳の全件とは比べない。** 配列の長さは「そのスナップショットを取り込んだ時点で
+ * 登録済みだったポート数」で、過去の行は当時の長さのままである（§11.1）。ドコモは
+ * ポート ID が出入りするため台帳は少しずつ伸びる。古いスナップショットを今の台帳と
+ * 比べると、後から登録されたポートの分だけ「不一致」に見えてしまう。
+ * 比較の対象は `idx < 配列長` のポートだけ。
+ */
 const compare = (stations, snapshot, expected) => {
   const mismatches = [];
   let present = 0;
   let missing = 0;
+  let registeredLater = 0;
 
   for (const { station_id, idx } of stations) {
+    if (idx >= snapshot.bikes.length) {
+      registeredLater += 1;
+      continue;
+    }
     const want = expected.get(station_id);
     const got = {
       bikes: snapshot.bikes[idx],
@@ -120,7 +133,7 @@ const compare = (stations, snapshot, expected) => {
       }
     }
   }
-  return { mismatches, present, missing };
+  return { mismatches, present, missing, registeredLater };
 };
 
 const main = async () => {
@@ -166,11 +179,17 @@ const main = async () => {
   if (raw.last_updated * 1000 !== Date.parse(snapshot.observed_at)) {
     problems.push(`observed_at が生 JSON の last_updated と一致しない`);
   }
-  if (snapshot.bikes.length !== stations.length) {
-    problems.push(`配列長 ${snapshot.bikes.length} が台帳の ${stations.length} と一致しない`);
+  // 配列は台帳を超えない。等しくないのは「その後にポートが登録された」だけで正常
+  if (snapshot.bikes.length > stations.length) {
+    problems.push(`配列長 ${snapshot.bikes.length} が台帳の ${stations.length} を超えている`);
   }
   if (snapshot.n_stations !== expected.size) {
     problems.push(`n_stations ${snapshot.n_stations} が重複排除後の ${expected.size} と一致しない`);
+  }
+  if (snapshot.bikes.length < snapshot.n_stations) {
+    problems.push(
+      `配列長 ${snapshot.bikes.length} が n_stations ${snapshot.n_stations} を下回っている`,
+    );
   }
   for (const key of ["docks", "flags", "reported_age_s"]) {
     if (snapshot[key].length !== snapshot.bikes.length) {

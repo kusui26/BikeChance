@@ -11,7 +11,7 @@
 - **PR 分割の方針**：1 つの PR は「1 つの関心事」「20〜40 分で読める分量」「単独で検証でき、マージしても本番が壊れない」を満たすこと。`main` へのマージは Vercel の本番デプロイを意味するため、**壊れた状態を main に置かない**ことを最優先にする。
 - **参照の表記**：本文書内の章節は `§4.2` のように書く。上位文書を指す場合は必ず「開発プラン §5.3」のように前置きする。
 - **この文書の読み方**：§4 で実測にもとづく設計判断を示し、§5 に検証で見つかった問題と修正を、§6 に **8 本の PR**（0・A・C・B・D・E1・E2・F）を定義する。§6 は実行順に並べてある。実装時は §6 の各 PR の「完了条件」を満たしたら次に進む。§11 の付録に、複数の PR にまたがる契約（RPC のシグネチャ・配列の意味・`feed_state` の書き込み規律）を置いた。ここが PR B と PR C・D の合意点になる。
-- **変更履歴**：v1.0（2026-09-05）初版。**v1.1（2026-09-06）前提から疑う検証を行い、27 件の問題を修正**（§5）。主な変更は、`stations` への毎分書き込みの廃止、`feed_state` の書き込み規律による取りこぼし防止、DEFAULT パーティション、`station_status_latest` の `is_present` と `last_changed_at`、`begin_fetch` による原子的な claim、PR D への 5 分毎カナリア Cron、エラー時の 500 応答、環境ファイルの使い分け。M0 を 9/9 から 9/10 に 1 日遅らせ、カナリア運転を挟んだ。あわせて ODPT の認証方式とレート制限を追測し、初稿で提案していた D-04 の入れ替え（公開を正にする）を**取り下げ、認証付きを正のまま**とした。トークンの漏洩面は W1-21 の仕組みで閉じる（§4.2b、§5 末尾）。**v1.2（2026-09-06）実装順序を見直した**（§5.1）。生データの保全だけを切り出した **PR 0** を段 0 に置き、**蓄積開始を 9/9 から 9/7 に前倒し**した。PR B と PR C の順序を入れ替え、PR E を **E1（監視）→ E2（毎分化）** に分割した。マイルストーンの日付は変えていない。**PR C の実装中に実データで 2 件の問題が見つかり**（§5.2）、§11.1 の「GBFS の台数に負値は存在しない」という前提を訂正し、生 JSON の保存を検証より先に行うよう §6.6 の手順を入れ替えた（W1-25〜W1-27）。**PR B の実装中にさらに 2 件**（§5.3）：後退したスナップショットから最新値を守る条件が行ごとの `last_changed_at` では機能しないことが分かり、フィード単位の `feed_state.last_observed_at` と比べる形に直した。**PR D の実装中にさらに 2 件**（§5.4）：`fetch` の `cache` を `"no-cache"` にしないと ODPT が 304 を返さず、W1-4 の転送削減が黙って失われることが分かった（W1-28）。照合スクリプトが PostgREST の `max_rows` に当たり、台帳を 1,000 件と誤認していた。
+- **変更履歴**：v1.0（2026-09-05）初版。**v1.1（2026-09-06）前提から疑う検証を行い、27 件の問題を修正**（§5）。主な変更は、`stations` への毎分書き込みの廃止、`feed_state` の書き込み規律による取りこぼし防止、DEFAULT パーティション、`station_status_latest` の `is_present` と `last_changed_at`、`begin_fetch` による原子的な claim、PR D への 5 分毎カナリア Cron、エラー時の 500 応答、環境ファイルの使い分け。M0 を 9/9 から 9/10 に 1 日遅らせ、カナリア運転を挟んだ。あわせて ODPT の認証方式とレート制限を追測し、初稿で提案していた D-04 の入れ替え（公開を正にする）を**取り下げ、認証付きを正のまま**とした。トークンの漏洩面は W1-21 の仕組みで閉じる（§4.2b、§5 末尾）。**v1.2（2026-09-06）実装順序を見直した**（§5.1）。生データの保全だけを切り出した **PR 0** を段 0 に置き、**蓄積開始を 9/9 から 9/7 に前倒し**した。PR B と PR C の順序を入れ替え、PR E を **E1（監視）→ E2（毎分化）** に分割した。マイルストーンの日付は変えていない。**PR C の実装中に実データで 2 件の問題が見つかり**（§5.2）、§11.1 の「GBFS の台数に負値は存在しない」という前提を訂正し、生 JSON の保存を検証より先に行うよう §6.6 の手順を入れ替えた（W1-25〜W1-27）。**PR B の実装中にさらに 2 件**（§5.3）：後退したスナップショットから最新値を守る条件が行ごとの `last_changed_at` では機能しないことが分かり、フィード単位の `feed_state.last_observed_at` と比べる形に直した。**PR D の実装中にさらに 2 件**（§5.4）：`fetch` の `cache` を `"no-cache"` にしないと ODPT が 304 を返さず、W1-4 の転送削減が黙って失われることが分かった（W1-28）。照合スクリプトが PostgREST の `max_rows` に当たり、台帳を 1,000 件と誤認していた。**PR E1 の実装中にさらに 4 件**（§5.5）：§8.6 の照合が「後から登録されたポート」を不一致として数えていた。psql の `\getenv` は 16 以降で開発機では使えなかった。pgTAP が Vault の中身という周囲の状態に依存していた。日次 QA の集計が横結合の直積で件数の二乗になっていた。監視の閾値は手で切り替えず `collect_interval_s` から導出することにした（W1-29〜W1-31）。
 - **開発プラン本体との関係**：本文書は W1 の実装詳細のみを扱う。設計の根拠・代替案・決定記録は開発プランにある。実装中に設計判断が変わった場合は、**開発プランの該当章と §15 を先に更新**してから実装する（CLAUDE.md §2 の原則 10）。v1.1 で開発プランと食い違いが生じた箇所（§5 末尾）は PR A のマージ後に開発プラン側を追随させる。
 
 ## 1. Week 1 のゴールと完了条件
@@ -212,6 +212,14 @@ RPC にまとめれば往復は 1 回になるため、実際はこれより速�
 |---|---|---|---|
 | **W1-28** | 条件付き取得の実現方法 | ODPT への `fetch` に **`cache: "no-cache"`** を指定する。他の値（未指定を含む）では 304 が返らない | Fetch 仕様が `If-None-Match` の存在を見て cache モードを no-store に倒し、要求に `Cache-Control: no-cache` を付ける。ODPT はそれを見て条件付き取得を無視する。`no-cache` モードだけが `max-age=0` を送り 304 になる（§5.4 の 36）。Next.js 16 のキャッシュは `force-cache` だけがオプトインなので、`no-cache` を指定しても Next 側のキャッシュには載らない |
 
+### 4.2f PR E1 で追加した決定
+
+| ID | 論点 | 決定 | 根拠 |
+|---|---|---|---|
+| **W1-29** | 監視の閾値と収集周期の関係 | 収集周期を **`app_config.collect_interval_s`** に置き、ウォッチドッグの閾値を `collect_interval_s × 2 + 30` 秒、フィード停滞の閾値を `max(expected_cadence_s × 3, collect_interval_s × 3)` 秒として**導出する** | v1.2 の初稿は「E1 の間はドコモの停滞検知を手で無効化し、E2 で戻す」としていた。手順に頼ると戻し忘れる。導出にすると、E2 は `vercel.json` と設定 1 行を変えるだけで両方の閾値が追随し、**E1 でのドコモの誤報も自動的に消える**（収集 5 分なら閾値が 15 分に緩む） |
+| **W1-30** | pg_cron ジョブのアドバイザリロック | **ジョブごとに別の `object_id`** を使う（8423, 1〜5） | v1.2 の初稿は全ジョブで `(8423, 0)` を共有としていた。それだと毎分動くウォッチドッグが、数分かかる日次の保守にブロックされる。守りたいのは各ジョブの自己多重起動であって、ジョブ間の排他ではない |
+| **W1-31** | 失敗の記録 | 各ジョブは例外を握って `job_runs` に `failed` として記録し、**関数自体は正常に返す** | plpgsql の例外はトランザクションを巻き戻すため、再送出すると `job_runs` の行ごと消える。「失敗した事実」が残らないと監視できない。pg_cron 側の `job_run_details` にも残るが、こちらの方が中身が濃い |
+
 ### 4.3 実装時に踏みやすい落とし穴
 
 調査で判明した、放置すると必ず詰まる点。各 PR の受け入れ条件に組み込む。
@@ -346,6 +354,15 @@ v1.1 を「この順で作って本当に最短か」という観点で読み直
 | **`no-cache`** | `Cache-Control: max-age=0` | **304** |
 | `force-cache` | なし | 304。ただし Next 側が応答をキャッシュするため採らない |
 | `node:https`（低水準 API） | 指定したものだけ | 304 |
+
+### 5.5 段 4 の検証と PR E1 の実装中に見つかった問題
+
+| # | 重大度 | 問題 | 修正 | 反映 |
+|---|---|---|---|---|
+| 38 | 中 | **§8.6 の照合スクリプトが誤検知していた。** 過去のスナップショットの配列を「現在の台帳」と比べていたが、§11.1 のとおり配列長は取り込み時点の登録数で、後から伸ばさない。ドコモはポート ID が出入りして台帳が伸びるため、**古いスナップショットほど不一致に見える**。本番の 6 件中 1 件がこれで落ちた | 比較対象を `idx < 配列長` のポートに限り、「このスナップショットより後に登録された数」を別に表示する。配列長は台帳を**超えない**ことだけを検査する | `reconcile-snapshot.mjs` |
+| 39 | 軽微 | psql の `\getenv` は **psql 16 以降**。開発機は 14 系で使えず、Vault 登録スクリプトが動かなかった | 値をドル引用符（タグは実行のたびに乱数）で囲んで標準入力から渡す。値はコマンドライン引数に載らない | `setup-vault.sh` |
+| 40 | 中 | **pgTAP が「Vault が空であること」を暗黙の前提にしていた。** ウォッチドッグの失敗記録（W1-31）を「秘密が無いから失敗する」という周囲の状態に頼って検査していたため、§11.7 の手順どおり `setup-vault.sh` をローカルに流した開発機では 3 件落ちた。作業テーブルを消す密閉化はしていたが、**Vault と `app_config` は消し忘れていた** | テストが Vault の中身も自分で決める（冒頭で `vault.secrets` から該当の名前を消し、必要な場面で偽の値を `vault.create_secret` で置く。どちらも rollback で戻り、外の本物には触れない）。ついでに未検査だった閾値導出も覆い、ウォッチドッグの検査を 3 → 13 件に増やした | `0007_ops_functions.sql` |
+| 41 | 中 | **`compute_daily_quality` の集計が件数の二乗になっていた。** 欠損時間を出す副問い合わせを `left join lateral (...) on true` で足していたが、この横結合はスナップショット 1 件につき 1 行を返すため、既にスナップショットと結合した行と**直積**になる。本番の実測で 6 件が 36 件（6²）と数えられた。`n_anomalous` も件数に比例して膨らむ（`max_gap_s` だけは最大値なので偶然正しい）。pgTAP は範囲内に 1 件しか置いていなかったため 1² = 1 で見逃していた | 範囲の切り出し・欠損の計算・件数の集計を CTE に分け、システムごとに 1 行へ畳んでから結合する。テストは範囲内に 3 件（うち異常 1 件）を置き、二乗なら 9 と 3 になることで落ちるようにした。0009 は既に本番へ適用済みのため、書き換えではなく追補の 0011 で置き換える | `0011_fix_daily_quality.sql`、`0007_ops_functions.sql` |
 
 ## 6. PR の分割と各 PR の定義
 
@@ -741,19 +758,20 @@ vercel.json                            # crons を */5 * * * * に一時的に�
 **変更ファイル**
 
 ```
-supabase/migrations/<ts>_0008_alert_state.sql      # alert_state(alert_key pk, first_seen_at, last_sent_at, last_value jsonb)
+supabase/migrations/<ts>_0008_alert_state.sql      # alert_state ＋ collect_interval_s / alert_webhook_kind の設定
 supabase/migrations/<ts>_0009_ops_functions.sql    # send_alert / watchdog_collect / monitor_feeds / run_maintenance / refresh_station_activity / compute_daily_quality
 supabase/migrations/<ts>_0010_cron_jobs.sql        # cron.schedule（名前つき。同名は上書き）
+supabase/migrations/<ts>_0011_fix_daily_quality.sql # compute_daily_quality の直積を修正（§5.5 の 41）
 supabase/tests/0007_ops_functions.sql
-scripts/setup-vault.ts                             # .env を読み vault.create_secret を実行（node の pg、パラメータ化クエリ。値をコマンドラインに載せない）
-docs/260904_dev_plan.md                            # §15 に W1-13〜W1-24 を転記し、§5.3 の DDL を本文書 §11 に追随させる
+scripts/setup-vault.sh                             # .env を読み Vault に登録（値は標準入力からドル引用符で渡し、引数に載せない。§5.5 の 39）
+docs/260904_dev_plan.md                            # §15 に W1-13〜W1-31 を転記し、§5.3 の DDL と実装の食い違いを明記する
 ```
 
 **pg_cron のジョブ（すべて UTC）**
 
 | 名前 | スケジュール | 内容 |
 |---|---|---|
-| `watchdog_collect` | `* * * * *` | `feed_state.last_fetch_at` が 150 秒より古いシステムについて、`app_config.project_base_url` ＋ `/api/jobs/collect/{system}?source=watchdog` を `net.http_get` で叩く。`Authorization` は Vault の `cron_secret`。`timeout_milliseconds := 10000` を明示（§4.3 の 7）。**収集が `*/5` の間は常時発火するため、E1 の間だけ閾値を 400 秒にしておき、E2 で 150 秒に戻す** |
+| `watchdog_collect` | `* * * * *` | `feed_state.last_fetch_at` が閾値より古いシステムについて、`app_config.project_base_url` ＋ `/api/jobs/collect/{system}?source=watchdog` を `net.http_get` で叩く。`Authorization` は Vault の `cron_secret`。`timeout_milliseconds := 10000` を明示（§4.3 の 7）。**閾値は `collect_interval_s × 2 + 30` 秒で導出する**（E1 で 630 秒、E2 で 150 秒。W1-29） |
 | `monitor_feeds` | `*/5 * * * *` | 下表の検知を行い、`alert_state` で重複を抑えて `net.http_post` で Webhook に送る |
 | `maintain_partitions` | `0 18 * * *`（03:00 JST） | `ensure_snapshot_partitions(2)`、`drop_expired_snapshot_partitions(60)`、`feed_fetch_log` 30 日超と `cron.job_run_details` 7 日超の削除 |
 | `refresh_station_activity` | `30 18 * * *`（03:30 JST） | 直近 25 時間のスナップショットの配列を `unnest with ordinality` で展開し、`stations.last_seen_at` を更新。72 時間見えないポートを `is_active=false`、再出現で `true` |
@@ -763,7 +781,7 @@ docs/260904_dev_plan.md                            # §15 に W1-13〜W1-24 を�
 
 | 検知 | 条件 | 抑制 |
 |---|---|---|
-| フィードの停滞 | `now() - feed_state.last_observed_at` が HELLO 15 分・ドコモ 4 分を超える | 同じ `alert_key` は 60 分に 1 回 |
+| フィードの停滞 | `now() - feed_state.last_observed_at` が `max(expected_cadence_s × 3, collect_interval_s × 3)` を超える（E1 では両システムとも 15 分、E2 では HELLO 15 分・ドコモ 4 分。W1-29） | 同じ `alert_key` は 60 分に 1 回 |
 | 収集器の連続失敗 | `consecutive_errors >= 5` | 同上 |
 | 収集器の無反応 | `now() - last_fetch_at > 10 分`（ウォッチドッグでも復帰しない） | 同上 |
 | 異常スナップショット | 直近 1 時間に `is_anomalous` が 1 件以上 | 同上 |
@@ -771,9 +789,9 @@ docs/260904_dev_plan.md                            # §15 に W1-13〜W1-24 を�
 | ポート数の急変 | 最新スナップショットの `n_stations` が 24 時間前の中央値から ±5% 以上ずれる | 同上 |
 | DB 容量 | `pg_database_size` が 6 GB を超える（Pro の 8 GB に対する早期警告） | 日 1 回 |
 
-ドコモのフィード停滞（4 分）は、収集が `*/5` の E1 の間は必ず発火する。**E1 の間はドコモの停滞検知だけ無効化しておき、E2 と同時に有効化する。**
+ドコモの停滞閾値（期待周期 80 秒 × 3 ＝ 4 分）は、収集が `*/5` の E1 の間なら必ず超えてしまう。**手で無効化するのではなく、閾値を `collect_interval_s × 3` で下支えして自動的に緩める**（W1-29）。E2 で設定を 60 に変えれば、閾値も一緒に 4 分へ戻る。戻し忘れが起きない。
 
-Webhook が未設定（Vault に `alert_webhook_url` が無い）でも `alert_state` には記録し、ジョブは失敗させない。本文の形式は `app_config.alert_webhook_kind`（`discord` → `{"content"}`、`slack` → `{"text"}`、`generic` → そのまま）で切り替える。時刻は JST で書く。pg_cron から呼ぶ関数はすべて開始・終了・結果を `job_runs` に記録し、`pg_try_advisory_xact_lock(8423, 0)` で多重起動を避ける。
+Webhook が未設定（Vault に `alert_webhook_url` が無い）でも `alert_state` には記録し、ジョブは失敗させない。本文の形式は `app_config.alert_webhook_kind`（`discord` → `{"content"}`、`slack` → `{"text"}`、`generic` → そのまま）で切り替える。時刻は JST で書く。pg_cron から呼ぶ関数はすべて開始・終了・結果を `job_runs` に記録し、`pg_try_advisory_xact_lock(8423, <ジョブ固有の番号>)` で自分自身の多重起動を避ける（W1-30）。
 
 **ウォッチドッグの補足**：Vercel Cron が正常なら `last_fetch_at` は常に 60 秒以内に更新されるため、ウォッチドッグは発火しない。発火するのは Cron が 2 回以上欠けたとき。`net.http_get` は応答を待たない（fire-and-forget）ので、結果は次の分の `feed_state` で判断する。Deployment Protection が Cron を弾く場合でも、本番ドメイン `https://bike-chance.vercel.app` への直接要求は公開されているため、ウォッチドッグは通る。
 
@@ -785,8 +803,8 @@ Webhook が未設定（Vault に `alert_webhook_url` が無い）でも `alert_s
 **完了条件**
 
 - pgTAP 全通過。ウォッチドッグと通知の強制発火に成功
-- `monitor_feeds` が誤報を出していない（E1 用の閾値調整が効いている）
-- 開発プラン §15 に W1-13〜W1-24 を転記し、§5.3 の DDL を本文書 §11 に追随させた
+- `monitor_feeds` が誤報を出していない（W1-29 の閾値の導出が効いている）
+- 開発プラン §15 に W1-13〜W1-31 を転記し、§5.3 の DDL と実装の食い違いを明記した
 
 ### 6.8 PR E2：毎分化（M0）
 
