@@ -127,7 +127,12 @@ select has_index(
 -- ────────────────────────────────────────────────────────────────
 select is((select count(*)::int from public.systems), 2, 'systems が 2 行');
 select is((select count(*)::int from public.feed_state), 2, 'feed_state が 2 行（begin_fetch が claim できる）');
-select is((select count(*)::int from public.app_config), 1, 'app_config が 1 行');
+-- 行数ではなくキーの有無で見る。設定は後の PR で増える（PR E1 で監視の設定が加わった）
+select ok(
+  (select bool_and(exists (select 1 from public.app_config where key = k))
+     from unnest(array['project_base_url']) k),
+  'app_config にウォッチドッグの叩き先がある'
+);
 select is(
   (select expected_cadence_s from public.systems where system_id = 'hellocycling'),
   300, 'HELLO の期待周期は 300 秒'
