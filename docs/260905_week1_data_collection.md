@@ -11,7 +11,7 @@
 - **PR 分割の方針**：1 つの PR は「1 つの関心事」「20〜40 分で読める分量」「単独で検証でき、マージしても本番が壊れない」を満たすこと。`main` へのマージは Vercel の本番デプロイを意味するため、**壊れた状態を main に置かない**ことを最優先にする。
 - **参照の表記**：本文書内の章節は `§4.2` のように書く。上位文書を指す場合は必ず「開発プラン §5.3」のように前置きする。
 - **この文書の読み方**：§4 で実測にもとづく設計判断を示し、§5 に v1.1 の検証で見つかった問題と修正を、§6 に 6 本の PR を定義する。実装時は §6 の各 PR の「完了条件」を満たしたら次に進む。§11 の付録に、複数の PR にまたがる契約（RPC のシグネチャ・配列の意味・`feed_state` の書き込み規律）を置いた。ここが PR B と PR C・D の合意点になる。
-- **変更履歴**：v1.0（2026-09-05）初版。**v1.1（2026-09-06）前提から疑う検証を行い、27 件の問題を修正**（§5）。主な変更は、`stations` への毎分書き込みの廃止、`feed_state` の書き込み規律による取りこぼし防止、DEFAULT パーティション、`station_status_latest` の `is_present` と `last_changed_at`、`begin_fetch` による原子的な claim、PR D への 5 分毎カナリア Cron、エラー時の 500 応答、環境ファイルの使い分け。M0 を 9/9 から 9/10 に 1 日遅らせ、カナリア運転を挟んだ。
+- **変更履歴**：v1.0（2026-09-05）初版。**v1.1（2026-09-06）前提から疑う検証を行い、27 件の問題を修正**（§5）。主な変更は、`stations` への毎分書き込みの廃止、`feed_state` の書き込み規律による取りこぼし防止、DEFAULT パーティション、`station_status_latest` の `is_present` と `last_changed_at`、`begin_fetch` による原子的な claim、PR D への 5 分毎カナリア Cron、エラー時の 500 応答、環境ファイルの使い分け。M0 を 9/9 から 9/10 に 1 日遅らせ、カナリア運転を挟んだ。あわせて ODPT の認証方式とレート制限を追測し、初稿で提案していた D-04 の入れ替え（公開を正にする）を**取り下げ、認証付きを正のまま**とした。トークンの漏洩面は W1-21 の仕組みで閉じる（§4.2b、§5 末尾）。
 - **開発プラン本体との関係**：本文書は W1 の実装詳細のみを扱う。設計の根拠・代替案・決定記録は開発プランにある。実装中に設計判断が変わった場合は、**開発プランの該当章と §15 を先に更新**してから実装する（CLAUDE.md §2 の原則 10）。v1.1 で開発プランと食い違いが生じた箇所（§5 末尾）は PR A のマージ後に開発プラン側を追随させる。
 
 ## 1. Week 1 のゴールと完了条件
@@ -136,6 +136,8 @@ RPC にまとめれば往復は 1 回になるため、実際はこれより速�
 |---|---|
 | Supabase Data API の本文サイズ | 176 KB・636 KB・**3,384 KB** のいずれも PostgREST まで到達（`PGRST202` が返る）。241 KB のペイロードは安全 |
 | ODPT の条件付きリクエスト | 認証付き・公開の**両方**が `ETag` を返し、`If-None-Match` で **HTTP 304 / 0 バイト** |
+| ODPT の認証方式（2026-09-06 追測） | キーを受け付けるのは**クエリ `acl:consumerKey` のみ**。`Authorization: Bearer`・`x-api-key`・`acl:consumerKey` ヘッダーはいずれも **403**。認証付きを使う限り、トークンが URL に載ること自体は避けられない |
+| ODPT のレート制限（2026-09-06 追測） | **認証付きだけが `X-RateLimit-*` を返す**：分 **60** / 時 **3,600** / 日 **24,000**（残量も併記される）。公開エンドポイントは返さない。同時刻の応答は本文がバイト単位で一致し `ETag` も同一 |
 | PostgreSQL | 17.6。`pg_cron` 1.6.4・`pg_net` 0.20.4・`pg_partman` 5.3.1・`pgtap` 1.3.3・`postgis` 3.3.7 が利用可能。`supabase_vault` と `pgcrypto` は導入済み |
 | `statement_timeout` | `anon` 3 秒 / `authenticated` 8 秒 / `authenticator` 8 秒 / `service_role` は設定なし（`authenticator` の **8 秒を継承**）／`postgres` 2 分 |
 | Deployment Protection | 本番ドメイン `bike-chance.vercel.app` は 200。生成デプロイ URL は Vercel SSO へ 302 |
@@ -171,6 +173,16 @@ RPC にまとめれば往復は 1 回になるため、実際はこれより速�
 | **W1-18** | 異常なフィードの扱い | 出現ポート数が登録済みの 50% 未満なら保存はするが `is_present` の反転はしない | 空や大幅欠落のフィードで全ポートを「不在」にしない（§5 の 7） |
 | **W1-19** | 本番稼働の段取り | PR D で **5 分毎のカナリア Cron**、PR E で毎分化 | Cron の到達性（最大のリスク）を 1 日早く、低い負荷で確認する（§5 の 8） |
 | **W1-20** | エラー時の HTTP ステータス | **500** を返す（成功・未更新・スキップは 200） | Vercel Observability のエラー率検知を効かせる（§5 の 9） |
+| **W1-21** | ODPT のエンドポイントとトークンの扱い | **開発プラン D-04 を維持**（認証付きを正、公開をフォールバック）。トークンの漏洩面は規律ではなく**仕組み**で閉じる（下記 4 点） | 認証付きだけが日 24,000 の残量ヘッダーを返す。公開に替えるとこの可視性が消え、開発プラン R9 が数値で追えなくなる（§4.1 (d)、§5 末尾） |
+
+**W1-21 の「仕組み」の中身**（PR D で実装する）
+
+1. **URL を 1 箇所に閉じ込める**：トークン付き URL を組み立てるのは `odpt-fetch.ts` の中だけにし、`Response` オブジェクトをモジュールの外へ出さない。呼び出し側が受け取るのは `{ http_status, etag, bytes, body, endpoint, ratelimit_remaining_day }` だけで、`res.url` に触れる経路を作らない
+2. **例外を包み直す**：捕捉した例外はそのまま再送出せず、`{ phase, http_status, error_name }` だけを持つエラーに詰め替える。undici の例外は `cause` に URL を抱えることがあるため、`cause` を連結しない
+3. **伏字化を通す**：ログ・エラー本文に出る文字列はすべて `redact()` を通し、`acl:consumerKey=[^&\s]+` を `acl:consumerKey=***` に置換する。1 と 2 をすり抜けた場合の最後の網
+4. **CI で検出する**：既存の機密チェックに `apps/web/lib/jobs/**` での `res.url` / `response.url` の使用検出を足し、再発を仕組みで止める
+
+あわせて、認証付きの利点を実際の運用に変える。`X-RateLimit-Remaining-day` を `feed_fetch_log.ratelimit_remaining_day` に記録し、残量が減り続けたら気づけるようにする（想定は 1 日 2,880 回＝上限の 12%）。
 
 ### 4.3 実装時に踏みやすい落とし穴
 
@@ -253,7 +265,13 @@ v1.0 を「前提から疑う」姿勢で読み直し、実データと本番環
 
 **上位文書（開発プラン）への提案**
 
-- **D-04 の再考**：認証付きエンドポイントを正にすると、トークンが URL のクエリに載る。エラーメッセージや URL のログに紛れて漏れる経路が常に存在する。内容と ETag は公開エンドポイントと完全に同一で、User-Agent に連絡先を入れれば ODPT から見た識別性も保てる。**公開を正・認証付きをフォールバック**に入れ替えることを提案する。W1 の実装はどちらでも 1 行の順序差なので、判断はマージ前で構わない。
+- **D-04 は維持する**（本文書 v1.1 の初稿から結論を変更した）。初稿では「トークンが URL のクエリに載る」ことを理由に、公開を正・認証付きをフォールバックへ入れ替えることを提案していた。2026-09-06 の追測で結論を変えた。理由は 2 つある。
+  - **URL に載ること自体は避けられない**。ODPT はクエリ以外でキーを受け付けない（`Authorization: Bearer`・`x-api-key`・`acl:consumerKey` ヘッダーはいずれも 403）。したがって「入れ替えれば漏洩面が消える」のは正しいが、「認証付きのままヘッダーに移して安全にする」という第三の道は存在しない。
+  - **認証付きだけがレート制限の残量を返す**（分 60 / 時 3,600 / 日 24,000）。想定使用量は 1 日 2,880 回で上限の 12% にあたる。公開に替えるとこの数値が消え、開発プラン R9「ODPT への過負荷とみなされる」（影響=高）が測定可能なものから勘に戻る。しかも残量は認証付きリクエストのみを数えるため、「普段は公開、たまに認証付きで残量を確認」という折衷は成立しない。
+
+  収集を止めないことが最優先である以上、上限までの距離を数値で持てる利点は、規律で閉じられる漏洩面より重い。**認証付きを正のまま**とし、漏洩面は W1-21 の仕組み（§4.2b）で閉じる。公開エンドポイントは従来どおりフォールバックに置き、トークン失効時の退避路も兼ねる。
+- **トークンは通信経路では漏れない**。HTTPS はクエリ文字列を含むリクエスト行全体を暗号化するため、経路上の第三者には見えない（見えるのはホスト名のみ）。漏れるのは自分のコードや基盤が URL を記録したときだけで、経路は 4 つに限られる：`res.url` をログや例外に入れる、undici の例外の `cause` をそのまま連結する、Next.js の fetch 計装が作るトレース属性に載る、将来のエラートラッカーがリクエスト URL を収集する。W1-21 はこの 4 つを対象にしている。
+- 開発プラン §15 の D-04 に、上記のレート制限とヘッダー認証不可の実測値を追記する（決定そのものは変更しない）。
 - 開発プラン §5.3 の DDL は本文書の §11 と食い違う箇所がある（`gap` 列、`station_status_latest` の列名、`feed_state` の列、`systems.lock_key`）。PR A のマージ後に開発プランを追随させる。
 
 ## 6. PR の分割と各 PR の定義
@@ -327,7 +345,7 @@ package.json                          # scripts: db:start / db:reset / db:test /
 | `status_snapshots` | `(system_id, observed_at) pk`、`fetched_at`、`n_stations`、**`is_anomalous boolean not null default false`**、`bikes` / `docks` / `flags` / `reported_age_s smallint[]`、`raw_path text not null`。**月次 RANGE パーティション ＋ `status_snapshots_default`** |
 | `station_status_latest` | `(system_id, station_id) pk`、`bikes`、`docks`、`flags`、**`is_present boolean not null`**、**`last_changed_at timestamptz not null`** |
 | `feed_state` | `system_id pk`、`last_fetch_at`、`last_success_at`、`last_observed_at`、`last_etag`、`consecutive_errors int not null default 0` |
-| `feed_fetch_log` | `id bigint generated always as identity`、`system_id`、`fetched_at`、**`source`（`cron` / `watchdog` / `manual`）**、`endpoint`（`token` / `public`）、`http_status`、`result`、`ok boolean`、`bytes`、`duration_ms`、`n_stations`、`error text`、`warnings jsonb`。30 日で削除 |
+| `feed_fetch_log` | `id bigint generated always as identity`、`system_id`、`fetched_at`、**`source`（`cron` / `watchdog` / `manual`）**、`endpoint`（`token` / `public`）、`http_status`、`result`、`ok boolean`、`bytes`、`duration_ms`、`n_stations`、`error text`、`warnings jsonb`、**`ratelimit_remaining_day int`**（ODPT の日次残量。W1-21）。30 日で削除 |
 | `job_runs` | `job_name`、`started_at`、`finished_at`、`status`、`detail jsonb` |
 | `daily_quality` | `(system_id, quality_date) pk`（**JST の日付**）、`n_snapshots`、`n_expected`、`max_gap_s`、`n_errors`、`n_anomalous`、`db_bytes_delta` |
 | `app_config` | `key text pk`、`value text`、`updated_at`。W1 では `project_base_url` のみ |
@@ -546,15 +564,18 @@ packages/gbfs-core/
 apps/web/app/api/jobs/collect/[system]/route.ts
 apps/web/lib/jobs/
   auth.ts             # CRON_SECRET の timingSafeEqual 比較
-  odpt-fetch.ts       # 条件付き取得・UA・フォールバック・タイムアウト
+  odpt-fetch.ts       # 条件付き取得・UA・フォールバック・タイムアウト。トークン付き URL を組み立てる唯一の場所（W1-21）
+  redact.ts           # acl:consumerKey=... を伏字化する純粋関数（W1-21）
   storage.ts          # gzip して gbfs-raw に保存（409 は成功扱い）
   collect.ts          # 一連の手順（下記）
   supabase.ts         # service_role クライアント（サーバー専用）
 apps/web/test/jobs/collect.test.ts     # fetch と supabase をモックし、結果の分岐をすべて通す
+apps/web/test/jobs/redact.test.ts      # 伏字化の単体テスト（W1-21）
 apps/web/.env.local.example
 scripts/reconcile-raw.ts               # Storage と DB の件数を UTC 日で突き合わせる
 scripts/reconcile-snapshot.ts          # 生 JSON 1 件と DB の配列を idx で突き合わせる
 vercel.json                            # crons: 2 本、*/5 * * * *
+.github/workflows/ci.yml               # 機密チェックに res.url / response.url の使用検出を追加（W1-21）
 ```
 
 **一連の手順（`collect.ts`）**
@@ -562,13 +583,13 @@ vercel.json                            # crons: 2 本、*/5 * * * *
 1. `Authorization: Bearer` を `CRON_SECRET` と定数時間比較。不一致 → 401（**DB には何も書かない**。スキャナの試行でログを埋めないため）
 2. `system` を `SYSTEM_IDS` で検証。未知 → 400。クエリの `source`（`cron` / `watchdog` / `manual`、既定 `cron`）を検証し、ログに記録する
 3. `begin_fetch(system)` を呼ぶ。`claimed=false` → `finish_fetch(skipped_recent)` → 200
-4. ODPT を取得。`If-None-Match: <last_etag>`、`User-Agent: BikeChance/0.1 (+CONTACT_EMAIL)`、`AbortSignal.timeout(20_000)`。認証付きが失敗（ネットワーク・5xx・タイムアウト）なら公開エンドポイントに 1 回だけフォールバック（ETag は同一なので 304 の最適化は失われない）
+4. ODPT を取得。`If-None-Match: <last_etag>`、`User-Agent: BikeChance/0.1 (+CONTACT_EMAIL)`、`AbortSignal.timeout(20_000)`。**認証付きを正**（開発プラン D-04、W1-21）とし、失敗（ネットワーク・5xx・タイムアウト）なら公開エンドポイントに 1 回だけフォールバック（ETag は同一なので 304 の最適化は失われない）。トークン付き URL の組み立てとこの `fetch` は `odpt-fetch.ts` の中で完結させ、**`Response` を外に返さない**。呼び出し側が受け取るのは `{ http_status, etag, bytes, body, endpoint, ratelimit_remaining_day }` のみ。`X-RateLimit-Remaining-day` はここで読み取る
 5. 304 → `finish_fetch(unchanged, ok=true)` → 200
 6. 200 → `gbfs-core` で検証・正規化。`last_updated` が `last_observed_at` **以下**（同じか、後退している）→ `finish_fetch(unchanged)` → 200。後退したスナップショットは取り込まない
 7. **受信したバイト列を gzip** し、§11.5 のパスに `contentType: 'application/gzip'`・`upsert: false` で保存。409 は成功扱い
 8. `ingest_snapshot(...)` を呼ぶ。`inserted` / `duplicate` / `locked` はいずれも正常系
 9. `finish_fetch(result, ok=true)` → 200
-10. どこかで例外 → `finish_fetch(error, ok=false, message)` → **500**。`message` に URL を含めない
+10. どこかで例外 → `finish_fetch(error, ok=false, message)` → **500**。捕捉した例外は再送出せず `{ phase, http_status, error_name }` に詰め替える（undici の `cause` は URL を抱えるため連結しない）。`message` は `redact()` を通してから記録する（W1-21）
 
 ```ts
 export const dynamic = "force-dynamic";
@@ -593,7 +614,7 @@ HELLO は 5 分周期なので 5 分毎でもほぼ全スナップショット�
 
 **テスト**
 
-- 単体（vitest）：`result` の 8 分岐（`inserted` / `duplicate` / `unchanged`（304）/ `unchanged`（同一 `last_updated`）/ `skipped_recent` / `locked` / `error` / 401 / 400）をモックで通す。`error` のとき `finish_fetch` が `ok=false` で呼ばれ、応答が 500 であること。エラーメッセージに `consumerKey` が含まれないこと
+- 単体（vitest）：`result` の 8 分岐（`inserted` / `duplicate` / `unchanged`（304）/ `unchanged`（同一 `last_updated`）/ `skipped_recent` / `locked` / `error` / 401 / 400）をモックで通す。`error` のとき `finish_fetch` が `ok=false` で呼ばれ、応答が 500 であること。**エラーメッセージ・応答本文・`finish_fetch` の引数のいずれにも `consumerKey` が含まれないこと**（undici 風の `cause` 付き例外を注入した場合も含む）。`redact()` が `acl:consumerKey=` に続く値を伏字にすること。認証付きの応答から `ratelimit_remaining_day` が読み取られ、公開へフォールバックしたときは `null` になること
 - 統合（手動、ローカル Supabase）：`pnpm dev` で `curl -H "Authorization: Bearer $CRON_SECRET" localhost:3000/api/jobs/collect/hellocycling` → `inserted`。直後に再実行 → `skipped_recent`。31 秒後 → `unchanged`。ローカルの Storage に gzip がある。`reconcile-snapshot.ts` で不一致 0
 
 **マージ後の確認（段 4 のゲート）**
@@ -1029,7 +1050,9 @@ gbfs-raw/{system_id}/{YYYY}/{MM}/{DD}/station_information_{fetched_at_epoch}.jso
   "bytes": 4204793, "duration_ms": 1284, "endpoint": "token", "source": "cron" }
 ```
 
-`error` の場合は `message` に文脈（phase、HTTP ステータス、例外名）を入れるが、**URL とトークンは含めない**。`response.url` もログに出さない（クエリにトークンが載っている）。
+`error` の場合は `message` に文脈（phase、HTTP ステータス、例外名）を入れるが、**URL とトークンは含めない**。`response.url` もログに出さない（クエリにトークンが載っている）。この規律はコードの作法ではなく仕組みで守る（W1-21、§4.2b）：URL を組み立てるのは `odpt-fetch.ts` だけ、`Response` はモジュールの外へ出さない、記録する文字列はすべて `redact()` を通す、`res.url` の使用を CI で検出する。
+
+認証付きエンドポイントを使ったときは `X-RateLimit-Remaining-day` を `feed_fetch_log.ratelimit_remaining_day` に記録する（公開へフォールバックした回は `null`）。上限は日 24,000 で想定使用量は 2,880 回のため、この値が想定より速く減っていれば取得経路の異常に気づける。
 
 ### 11.7 環境変数と設定値の一覧（W1 時点）
 
@@ -1123,3 +1146,9 @@ W1 の実装で判断が分かれた点について、実際に読んだ、あ�
 - HELLO の `station_id`：13 スナップショットで常に 14,861 件、出入り 0
 - `last_updated` の後退：両システムとも 60 回の取得で 0 回
 - ETag：`api-public.odpt.org` と `api.odpt.org`（認証付き）で同一の値（両システム）
+
+**D-04 の再検討のための追測（2026-09-06、`system_information.json` と `station_status.json`）**
+
+- **認証方式**：`api.odpt.org` に対し、キーなし・`Authorization: Bearer`・`x-api-key`・`acl:consumerKey` ヘッダーの 4 通りはいずれも **403**。クエリ `?acl:consumerKey=` のみ **200**。ODPT v4 はクエリ以外でキーを受け付けない
+- **レート制限**：認証付きの応答のみ `X-RateLimit-Limit-minute: 60` / `-hour: 3600` / `-day: 24000` と各残量を返す。公開エンドポイントは同ヘッダーを返さない
+- **応答の同一性**：同時刻のドコモ `station_status.json` を両エンドポイントから取得し、**902,443 バイトが SHA-256 まで完全一致**。`ETag` と `Cache-Control: max-age=60` も同一
