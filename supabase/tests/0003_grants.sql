@@ -64,14 +64,20 @@ select ok(
   'anon はパーティション削除関数を実行できない'
 );
 -- 個別の関数名を並べるのではなく、**例外が 1 つも無いこと**を固定する。
--- PR B 以降で RPC を足したとき、grant を書き忘れればここが落ちる
+-- PR B 以降で RPC を足したとき、grant を書き忘れればここが落ちる。
+--
+-- イベントトリガ関数は除く。戻り値が event_trigger の関数は直接呼び出せず
+-- （'can only be called in an event trigger' になる）、PostgREST も公開しない。
+-- 本番には Supabase の自動 RLS が作る rls_auto_enable がこの形で存在し、
+-- anon に EXECUTE が付いているが、呼べないので実害がない（ローカルには無い）。
 select is(
   (select count(*)::int
      from pg_proc p
      join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public'
+      and p.prorettype <> 'pg_catalog.event_trigger'::regtype
       and has_function_privilege('anon', p.oid, 'execute')),
-  0, 'public に anon が実行できる関数は 1 つも無い'
+  0, 'public に anon が呼び出せる関数は 1 つも無い（イベントトリガ関数を除く）'
 );
 
 -- ────────────────────────────────────────────────────────────────
