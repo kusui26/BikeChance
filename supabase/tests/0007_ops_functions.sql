@@ -48,7 +48,8 @@ $$;
 -- ────────────────────────────────────────────────────────────────
 -- 設定値
 -- ────────────────────────────────────────────────────────────────
-select is(public.config_int('collect_interval_s', 60), 300, 'E1 の収集周期は 300 秒');
+-- 既定値を -1 にしておくと、設定行が消えたときに素通りしない
+select is(public.config_int('collect_interval_s', -1), 60, '出荷時の収集周期は 60 秒（0012）');
 select is(public.config_int('存在しない', 42), 42, '未設定なら既定値を返す');
 
 -- ────────────────────────────────────────────────────────────────
@@ -103,7 +104,9 @@ select is(pg_temp.job_status('watchdog_collect'), 'failed', '送り先が無い�
 insert into public.app_config (key, value)
   select 'project_base_url', value from saved_base_url;
 
--- 停滞しているシステムを叩き直す
+-- 停滞しているシステムを叩き直す。
+-- **周期はこのブロックが決める。** 出荷値（0012 の 60 秒）に暗黙に依存させない
+update public.app_config set value = '300' where key = 'collect_interval_s';
 update public.feed_state set last_fetch_at = null;
 select is(public.watchdog_collect(), 2, '一度も取得できていない 2 システムを叩き直す');
 select is(pg_temp.job_status('watchdog_collect'), 'ok', '成功も job_runs に残る');
@@ -129,7 +132,7 @@ select is(
   0, '走りっぱなしの記録は残らない（成功も失敗も必ず閉じる）'
 );
 
-update public.app_config set value = '300' where key = 'collect_interval_s';
+-- 収集周期は出荷値（60）のまま次のブロックへ渡す
 update public.feed_state set last_fetch_at = null;
 
 -- ────────────────────────────────────────────────────────────────
@@ -137,6 +140,7 @@ update public.feed_state set last_fetch_at = null;
 -- ────────────────────────────────────────────────────────────────
 -- ドコモの期待周期は 80 秒なので素朴な閾値は 4 分。しかし収集が 5 分間隔の E1 では
 -- 必ず超えてしまう。閾値を収集周期の 3 倍で下支えすると、手で無効化しなくても消える
+update public.app_config set value = '300' where key = 'collect_interval_s';
 update public.feed_state set last_observed_at = now() - interval '6 minutes';
 select is(public.monitor_feeds(), 0, 'E1（収集 300 秒）では 6 分前の観測でも誤報を出さない');
 select is(pg_temp.alerts(), 'k1,k2', '停滞の通知は増えていない');
@@ -165,7 +169,7 @@ select is(
   (select count(*)::int from public.alert_state where alert_key = 'feed_stalled:hellocycling'),
   0, 'HELLO は 6 分では停滞としない（期待周期 300 秒 × 3）'
 );
-update public.app_config set value = '300' where key = 'collect_interval_s';
+update public.app_config set value = '60' where key = 'collect_interval_s';
 
 -- ────────────────────────────────────────────────────────────────
 -- monitor_feeds：その他の検知
