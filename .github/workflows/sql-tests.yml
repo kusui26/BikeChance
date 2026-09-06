@@ -1,0 +1,41 @@
+name: SQL tests
+
+# supabase start は初回にイメージを取得するため 2〜4 分かかる。既存の ci.yml に混ぜず
+# 別ワークフローにし、supabase/ が変わった PR だけで動かす（W1 プラン §6.3）。
+on:
+  pull_request:
+    paths:
+      - "supabase/**"
+      - ".github/workflows/sql-tests.yml"
+
+concurrency:
+  group: sql-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sql-tests:
+    name: マイグレーション適用と pgTAP
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      # 収集にもテストにも要らないサービスは起こさない（起動を速くする）
+      - name: ローカルスタックを起動
+        run: supabase start -x realtime,edge-runtime,logflare,vector,imgproxy,studio,mailpit,supavisor
+
+      # マイグレーションを最初から流し直し、seed.sql（pgTAP の有効化）まで通す。
+      # 「本番と同じ順序で流して壊れないか」をここで担保する
+      - name: マイグレーションを適用し直す
+        run: supabase db reset
+
+      - name: pgTAP
+        run: supabase test db
+
+      - name: 失敗したときのログ
+        if: failure()
+        run: supabase status || true
