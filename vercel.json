@@ -18,11 +18,11 @@
   "crons": [
     {
       "path": "/api/jobs/collect/hellocycling",
-      "schedule": "*/5 * * * *"
+      "schedule": "* * * * *"
     },
     {
       "path": "/api/jobs/collect/docomo-cycle",
-      "schedule": "*/5 * * * *"
+      "schedule": "* * * * *"
     }
   ]
 }
