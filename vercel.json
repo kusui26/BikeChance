@@ -7,9 +7,22 @@
       "framework": "nextjs"
     }
   },
-  "rewrites": [{ "source": "/(.*)", "destination": { "service": "web" } }],
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "web"
+      }
+    }
+  ],
   "crons": [
-    { "path": "/api/jobs/collect/hellocycling", "schedule": "* * * * *" },
-    { "path": "/api/jobs/collect/docomo-cycle", "schedule": "* * * * *" }
+    {
+      "path": "/api/jobs/collect/hellocycling",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/jobs/collect/docomo-cycle",
+      "schedule": "*/5 * * * *"
+    }
   ]
 }

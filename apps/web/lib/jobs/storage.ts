@@ -22,7 +22,7 @@ import {
   type SystemId,
 } from "@bikechance/shared";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { JobError, toJobFailure } from "./errors";
+import { JobError, isJobError, toJobFailure } from "./errors";
 
 const gzipAsync = promisify(gzip);
 
@@ -78,6 +78,10 @@ export const createSupabaseUploader =
     throw new JobError(toJobFailure({ phase: "storage", cause: error }));
   };
 
+/**
+ * 失敗は必ず `storage` フェーズの JobError にして返す。
+ * 素の例外のまま上げると、呼び出し側でどの段の失敗か分からなくなる。
+ */
 export const saveRawFeed = async (params: {
   readonly upload: RawUploader;
   readonly system_id: SystemId;
@@ -90,7 +94,11 @@ export const saveRawFeed = async (params: {
     feed: params.feed,
     epoch_s: params.epoch_s,
   });
-  const gzipped = await gzipAsync(params.body);
-  const { duplicate } = await params.upload({ path, gzipped });
-  return { result: duplicate ? "duplicate" : "saved", path, gzip_bytes: gzipped.byteLength };
+  try {
+    const gzipped = await gzipAsync(params.body);
+    const { duplicate } = await params.upload({ path, gzipped });
+    return { result: duplicate ? "duplicate" : "saved", path, gzip_bytes: gzipped.byteLength };
+  } catch (cause) {
+    throw isJobError(cause) ? cause : new JobError(toJobFailure({ phase: "storage", cause }));
+  }
 };

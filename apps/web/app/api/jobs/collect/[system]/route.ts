@@ -1,19 +1,21 @@
 /**
- * GET /api/jobs/collect/{system} — 生フィードを Storage に保存する（W1 プラン §6.2、PR 0）。
+ * GET /api/jobs/collect/{system} — GBFS を取得して保存し、DB に取り込む（W1 プラン §6.6、PR D）。
  *
- * Vercel Cron が毎分叩く。DB には一切書かない。PR D がこのルートを育てて、
- * ETag による条件付き取得・重複排除・RPC による取り込みを足す。
+ * PR 0 は Storage までだった。ここに ETag による条件付き取得、検証・正規化、
+ * RPC による取り込みが加わる。手順そのものは `lib/jobs/collect.ts` にある。
  *
  * ステータスコードの方針（§11.6、W1-20）：
- *   200 保存した / 既にあった   401 CRON_SECRET 不一致   400 未知のシステム   500 失敗
+ *   200 inserted / duplicate / unchanged / skipped_recent / locked
+ *   401 CRON_SECRET 不一致   400 未知のシステム・未知の source   500 失敗
  * エラーを 500 にするのは Vercel Observability のエラー率検知を効かせるため。
  * Cron はリダイレクトを追わないので 3xx は返さない（CLAUDE.md §3）。
  */
 import { SYSTEM_IDS, type FeedName, type SystemId } from "@bikechance/shared";
 import { isAuthorizedCronRequest } from "@/lib/jobs/auth";
-import { collectRawFeed, type CollectSummary } from "@/lib/jobs/collect-raw";
+import { collect, isCollectSource, type CollectSummary } from "@/lib/jobs/collect";
 import { readCollectorEnv } from "@/lib/jobs/env";
 import { toJobFailure } from "@/lib/jobs/errors";
+import { createSupabaseIngestPort } from "@/lib/jobs/ingest-port";
 import { createSupabaseUploader } from "@/lib/jobs/storage";
 import { createServiceClient } from "@/lib/jobs/supabase";
 
@@ -29,7 +31,7 @@ import { createServiceClient } from "@/lib/jobs/supabase";
  */
 export const maxDuration = 60;
 
-/** PR 0 が収集するのは status のみ。station_information は PR F の日次ジョブが扱う。 */
+/** PR D が収集するのは status のみ。station_information は PR F の日次ジョブが扱う。 */
 const COLLECTED_FEED: FeedName = "station_status";
 
 const NO_STORE = { "Cache-Control": "no-store" } as const;
@@ -51,22 +53,31 @@ export const GET = async (request: Request, context: RouteContext): Promise<Resp
     return problem(401, "unauthorized", "CRON_SECRET が一致しません。");
   }
 
-  // 2. パスの検証
+  // 2. パスとクエリの検証
   const { system } = await context.params;
   if (!isSystemId(system)) {
     return problem(400, "unknown_system", `未知のシステムです: ${system}`);
   }
+  // ウォッチドッグ（PR E1）は ?source=watchdog を付けて叩く（§5 の 25）
+  const source = new URL(request.url).searchParams.get("source") ?? "cron";
+  if (!isCollectSource(source)) {
+    return problem(400, "unknown_source", `未知の source です: ${source}`);
+  }
 
-  // 3. 環境変数 → 取得 → gzip → Storage
+  // 3. 環境変数 → 取得 → 保存 → 取り込み
   //    設定漏れも 500 にする。メッセージには変数名しか載らない（env.ts）
   try {
     const env = readCollectorEnv(process.env);
-    const summary = await collectRawFeed({
-      upload: createSupabaseUploader(
-        createServiceClient({ url: env.SUPABASE_URL, secret_key: env.SUPABASE_SECRET_KEY }),
-      ),
+    const client = createServiceClient({
+      url: env.SUPABASE_URL,
+      secret_key: env.SUPABASE_SECRET_KEY,
+    });
+    const summary = await collect({
+      db: createSupabaseIngestPort(client),
+      upload: createSupabaseUploader(client),
       system_id: system,
       feed: COLLECTED_FEED,
+      source,
       token: env.ODPT_ACCESS_TOKEN,
       contact_email: env.CONTACT_EMAIL,
       now: new Date(),
@@ -75,7 +86,7 @@ export const GET = async (request: Request, context: RouteContext): Promise<Resp
   } catch (cause) {
     const failure = toJobFailure({ phase: "validate", cause });
     return Response.json(
-      { ok: false, system, result: "error", error: failure },
+      { ok: false, system, result: "error", source, error: failure },
       { status: 500, headers: NO_STORE },
     );
   }
