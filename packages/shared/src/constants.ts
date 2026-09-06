@@ -73,3 +73,33 @@ export const JAPAN_BBOX = {
   lon_min: 122,
   lon_max: 154,
 } as const;
+
+/**
+ * 収集の設定。W1 プラン §6.2・§11.5 に対応する。
+ * 単位は変数名に含める（CLAUDE.md 3）。
+ */
+
+/** GBFS のフィード名。W1 で収集するのは status（毎分）と information（日次）の 2 つ。 */
+export const FEED_NAMES = ["station_status", "station_information"] as const;
+export type FeedName = (typeof FEED_NAMES)[number];
+
+/** ODPT の認証付きエンドポイント。キーはクエリ acl:consumerKey でしか受け付けない（開発プラン D-04）。 */
+export const ODPT_TOKEN_BASE_URL = "https://api.odpt.org/api/v4/gbfs";
+
+/** ODPT の公開エンドポイント。認証付きが失敗したときのフォールバック。応答は認証付きと同一。 */
+export const ODPT_PUBLIC_BASE_URL = "https://api-public.odpt.org/api/v4/gbfs";
+
+/** ODPT への 1 回の取得のタイムアウト。認証付き → 公開の 2 回で最悪 40 秒。 */
+export const ODPT_FETCH_TIMEOUT_MS = 20_000;
+
+/** 生データを置く Storage バケット。非公開で、サービスロールからのみ読み書きする。 */
+export const RAW_BUCKET = "gbfs-raw";
+
+/** 生データの gzip に付ける Content-Type。省略すると text/plain になる（W1 プラン §4.3 の 9）。 */
+export const GZIP_CONTENT_TYPE = "application/gzip";
+
+/** ODPT から見て誰の取得かが分かるようにする。連絡先は環境変数で差し替える（§5.1 の 18）。 */
+export const USER_AGENT_PRODUCT = "BikeChance/0.1";
+
+/** 収集ジョブの最大実行時間（秒）。Vercel の maxDuration に渡す。 */
+export const COLLECT_MAX_DURATION_S = 60;

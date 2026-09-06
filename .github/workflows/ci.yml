@@ -47,8 +47,37 @@ jobs:
       - uses: actions/checkout@v7
       - name: トークン・鍵らしき文字列を検出
         run: |
-          if git grep -nIE '(acl:consumerKey=[A-Za-z0-9_-]{8}|sb_secret_[A-Za-z0-9]|service_role[^s]|gh[pousr]_[A-Za-z0-9]{20}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' -- . ':!*.md' ':!.github/workflows/ci.yml'; then
+          # 資格情報「そのものの形」を探す。ロール名 service_role のような
+          # 語そのものは対象にしない（SQL の grant や Supabase の生成設定に正当に現れ、
+          # 誤検知で CI が止まるため）。実際の鍵は sb_secret_ か JWT の形で現れる。
+          if git grep -nIE '(acl:consumerKey=[A-Za-z0-9_-]{8}|sb_secret_[A-Za-z0-9]|eyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' -- . ':!*.md' ':!.github/workflows/ci.yml'; then
             echo "::error::機密情報らしき文字列が含まれています"
+            exit 1
+          fi
+          echo "OK: 検出なし"
+
+      - name: 応答 URL の記録を検出（W1-21）
+        # ODPT はキーをクエリ acl:consumerKey でしか受け付けないため、認証付きで取得する限り
+        # トークンは URL に載る（開発プラン D-04）。`res.url` / `response.url` を読むと、
+        # そこからログ・例外・トレースへ漏れる経路ができる。ジョブの実装では使わせない。
+        # URL の組み立てと fetch は apps/web/lib/jobs/odpt-fetch.ts の中だけで完結させる。
+        run: |
+          # \b は macOS の git で効かないため、前後を文字クラスで表現して移植性を保つ
+          if git grep -nIE '(^|[^A-Za-z0-9_$.])(res|response|resp)\.url([^A-Za-z0-9_]|$)' -- 'apps/web/lib/jobs' 'apps/web/app/api' ':!*.test.ts'; then
+            echo "::error::res.url はトークン付き URL を含み得ます。odpt-fetch.ts の外へ Response を出さないでください（W1-21）"
+            exit 1
+          fi
+          echo "OK: 検出なし"
+
+      - name: ODPT への fetch が 1 箇所に閉じているか（W1-21）
+        # 上の検査は res / response / resp という名前に依存するため、別名の変数はすり抜ける。
+        # 本質的な不変条件は「外向きの fetch を呼ぶのは odpt-fetch.ts だけ」であり、
+        # そこから Response を返さない限りトークン付き URL は外に出ない。こちらを機械で守る。
+        run: |
+          if git grep -nIE '(^|[^A-Za-z0-9_$.])fetch\(' \
+              -- 'apps/web/lib/jobs' 'apps/web/app/api' \
+                 ':!*.test.ts' ':!apps/web/lib/jobs/odpt-fetch.ts'; then
+            echo "::error::外向きの fetch は apps/web/lib/jobs/odpt-fetch.ts の中だけで呼んでください（W1-21）"
             exit 1
           fi
           echo "OK: 検出なし"
