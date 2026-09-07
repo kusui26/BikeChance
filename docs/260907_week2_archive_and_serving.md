@@ -443,44 +443,88 @@ vercel.json                                        # crons に 1 本（7 * * * *
 
 **目的**：iOS と Web が叩ける最初の読み出し経路を開く。予測はまだ無いので**現在値だけ**を返す。
 
-**変更ファイル**
+**変更ファイル**（実装後に確定した構成。0017 と 0009 は取得済みだったので番号がずれた）
 
 ```
-supabase/migrations/<ts>_0017_public_views.sql   # 読み取りビュー＋匿名への grant
-supabase/tests/0009_public_views.sql             # 匿名が基底テーブルを読めないことを固定する
-packages/shared/src/api.ts                       # /v1/stations の応答スキーマ
-apps/web/lib/api/stations.ts                     # bbox の検証と問い合わせ
-apps/web/app/v1/stations/route.ts
-apps/web/app/v1/meta/route.ts                    # feed_state に接続（stale を実装する）
+supabase/migrations/20260907232019_0018_public_views.sql  # 2 つのビュー＋索引＋匿名への grant
+supabase/tests/0010_public_views.sql             # 匿名が基底テーブルを読めないことを固定する
+packages/shared/src/bbox.ts                      # 純粋：bbox の解釈・上限・格子への丸め
+packages/shared/src/freshness.ts                 # 純粋：鮮度の判定（監視と同じ式）
+packages/shared/src/api.ts                       # /v1/stations と Problem Details のスキーマ
+apps/web/lib/api/view-query.ts                   # 純粋：読む先・列・絞り込みの組み立て
+apps/web/lib/api/read-port.ts                    # 副作用：supabase-js に渡すだけの薄い層
+apps/web/lib/api/stations.ts                     # 手順：検証 → 問い合わせ → 応答
+apps/web/lib/api/meta.ts                         # 手順：鮮度の要約（DB が落ちても 200）
+apps/web/lib/api/problem.ts                      # RFC 9457 の応答
+apps/web/lib/api/env.ts                          # /v1 が要る環境変数だけを要求する
+apps/web/app/v1/stations/route.ts、apps/web/app/v1/meta/route.ts
 ```
 
-**読み取りビュー**（W2-13）
+**ビューを 2 つに分けた**：プランの案は 1 つのビューに `feed_state.last_observed_at` を
+含めていたが、鮮度は**フィード単位**の値で、ポート単位のビューに入れると 2 万行に同じ値が
+並ぶ。`v1_feeds`（2 行）と `v1_stations_current` に分け、`/v1/stations` は 2 本を並列に引く。
+`/v1/meta` は `v1_feeds` だけを読む。
+
+**内部の約束をビューの外に漏らさない**：`-1`（登録済みだが未観測）は **NULL** に、`flags` の
+ビット和は真偽値 3 つに開く。**この変換をビュー側でやる**ので、匿名が直接ビューを読んでも
+同じ意味になる。TypeScript 側だけで直していたら、経路によって意味が変わっていた。
+
+**`?system=` 以外のパラメータは受け取らない**：開発プラン §8.3 の `zoom` / `at` / `in_min` は
+予測とグリッド集約が入ってから（W4 以降）。W2 は現在値だけを返す。
+
+**読み取りビュー**（W2-13。実装した形）
 
 ```sql
-create view public.v1_stations_current with (security_invoker = false) as
+create view public.v1_stations_current as
 select l.system_id, l.station_id, a.name, a.lat, a.lon, a.capacity,
-       l.bikes, l.docks, l.flags, l.is_present, l.last_changed_at, f.last_observed_at
+       nullif(l.bikes, -1) as bikes,            -- 未観測は NULL。0（本当に 0 台）と区別する
+       nullif(l.docks, -1) as docks,
+       case when l.flags < 0 then null else (l.flags & 1) > 0 end as is_installed,
+       case when l.flags < 0 then null else (l.flags & 2) > 0 end as is_renting,
+       case when l.flags < 0 then null else (l.flags & 4) > 0 end as is_returning,
+       l.is_present, l.last_changed_at
   from public.station_status_latest l
-  join public.station_attributes a
+  join public.systems sy on sy.system_id = l.system_id and sy.is_active
+  -- 属性は left join。新しいポートは最大 1 日属性を持たない（開発プラン §8.3）
+  left join public.station_attributes a
     on a.system_id = l.system_id and a.station_id = l.station_id and a.valid_to is null
-  join public.feed_state f on f.system_id = l.system_id
- where not a.geo_suspect;         -- 壊れた座標は地図に出さない（開発プラン §14）
+ where coalesce(a.geo_suspect, false) = false;  -- 壊れた座標は地図に出さない（開発プラン §14）
 ```
 
-匿名には**このビューにだけ** SELECT を与える。基底テーブルの権限は与えない。
+`security_invoker` は既定の `false` のまま。実行はビューの所有者（postgres）の権限で
+行われ、所有者は基底テーブルの RLS を迂回する。「匿名は絞り込まれたビューだけを読める」を
+実現する唯一の形なので、pgTAP で `security_invoker` が false のままであることも固定した。
+
+**停止したシステム（`systems.is_active = false`）を出さない**のは、収集が止まったあとの
+古い値を「現在値」として出さないため。`v1_feeds` も同じ条件で絞る。
+
+匿名には**この 2 つのビューにだけ** SELECT を与える。基底テーブルの権限は与えない。
+`authenticated` にも与えない（認証の仕組みがまだ無く、到達し得るのは `anon` だけ）。
+
+**索引**：`station_attributes (lat, lon) where valid_to is null and not geo_suspect`。
+索引が無いと bbox の絞り込みが現在有効な属性行（実測 20,742 行）を毎回全件走査する
+（実測 10.6 ms のうち 6.9 ms）。
 
 **`/v1/stations` の仕様**
 
 | 項目 | 内容 |
 |---|---|
 | パラメータ | `bbox=west,south,east,north`（必須）、`system`（任意） |
-| 上限 | bbox の面積に上限。超えたら 400（§4 の 11）。初期値は緯度 0.5° × 経度 0.5°（東京 23 区が入る） |
+| 上限 | 1 辺 0.5 度まで（超えたら 400）。**加えて件数の上限 1,000 件**。実測で 0.5° 四方の東京は 8,792 件・約 3 MB になり、辺の上限だけでは応答の大きさを縛れない（§10.7） |
+| 丸め | **サーバー側で 0.01 度の格子に外側へ丸めてから問い合わせる。** 細かい位置は問い合わせにも記録にも残らず（CLAUDE.md §5）、同じ矩形は同じ URL になって CDN が効く。実効的な矩形は応答の `bbox` に入れて返す |
 | 応答 | ポート配列（id・名称・座標・容量・bikes・docks・貸出可・返却可・観測時刻）、`stale`、`attribution` |
-| 鮮度 | `feed_state.last_observed_at` が期待周期の 3 倍を超えたら `stale: true`。**ttl 超過の値を「現在値」として出さない**（CLAUDE.md §2 の 8） |
-| キャッシュ | `public, s-maxage=60, stale-while-revalidate=120`。bbox はタイル境界に量子化する |
+| 鮮度 | `last_observed_at` が `greatest(期待周期 × 3, 取得間隔 × 3) + 取得間隔` を超えたら `stale`（監視の 0013 と同じ式）。閾値そのものも `stale_after_s` として返す。**値は返すが、観測時刻を必ず添える**（CLAUDE.md §2 の 7・8） |
+| 不在のポート | `is_present: false` のポートも返すが、`observed_at` は **null**。値がいつのものか分からないため。落とすより「分からない」と言うほうが正しい |
+| キャッシュ | `public, s-maxage=60, stale-while-revalidate=120` |
 | 予測 | **返さない**。`p_bike` / `p_dock` は W4 |
+| エラー | RFC 9457 Problem Details（`application/problem+json`）。`type` は相対 URI、機械が分岐する `code` を拡張メンバに置く。**誤りの応答はキャッシュさせない** |
+| 上限超過 | 切り捨てずに 400。**該当件数を返す**ので「どれだけ狭めればよいか」が分かる。穴の開いた地図を黙って返さない |
 
-**`/v1/meta`**：`feed_state` から `data_updated_at` を入れ、`stale` を実際に計算する。いまは `stale: true` の固定値を返している。
+**`/v1/meta`**：`v1_feeds` から `data_updated_at` を入れ、`stale` を実際に計算する。
+
+- **`stale` の意味を変えた**：これまでのスキーマは「予測が古い、または未生成」だったが、W2 時点ではモデルが無いので常に true になり、何も伝えない値だった。**「いずれかのフィードの観測が途切れている」**に改める。予測の有無は `model_version` を見れば分かる。
+- **鮮度の閾値は監視（migration 0013）と同じ式**にする：`greatest(expected × 3, poll × 3) + poll`。単純な 3 倍だとドコモが 243 秒になり、実測の最悪値 244 秒（W1-42）で false positive が出る。閾値そのものを `stale_after_s` として応答に載せ、クライアントが同じ判定をできるようにする。
+- **DB に届かなくても 200 を返す**。鮮度を伝える経路が鮮度を伝えられずに 500 で落ちると、クライアントは表示条件を判断できない。取れないときは「分からない＝古い」として返す。
 
 **完了条件**
 
@@ -968,6 +1012,56 @@ W1 の実測（`station_status_latest` の `is_present` が HELLO 14,921/14,922�
 `bikes = 0` / `docks = 0` の割合は開発プラン §3.4b の観測（「空は空のまま」「ドコモの返却枠は
 運用設定でほぼ決まる」）と整合する。**アーカイブは W1 で分かっていた性質をそのまま保っている。**
 
+### 10.7 PR E の実測（2026-09-08、本番の DB に対して）
+
+**ポートの密度**（現在有効な属性行 20,742、`geo_suspect` 1 件、座標なし 0 件）
+
+| 1 辺 | 最も混んでいるセル | 応答の見込み（348 B/件） |
+|---|---|---|
+| 0.01°（丸めの刻み） | **31 件** | 11 KB |
+| 0.02°（丸めで最大になる 2×2） | **96 件** | 33 KB |
+| 0.05° | 327 件 | 114 KB |
+| 0.10° | 866 件 | 301 KB |
+| 0.20° | 2,936 件 | 1.0 MB |
+| 0.50°（1 辺の上限） | 8,612 件（東京駅中心の実測で 8,792 件） | **3.0 MB** |
+
+1 ポートあたりの JSON は**平均 348 バイト・最大 432 バイト**（全 20,741 件で実測）。
+
+ここから 2 つ決めた。
+
+1. **辺の上限だけでは応答の大きさを縛れない。** 0.5° 四方の東京は 3 MB になる。
+   件数の上限（1,000 件 ≒ 340 KB）を別に置き、超えたら 400 で該当件数を返す。
+2. **丸めの刻み（0.01°）が実効的な最小の矩形になる。** 点のような要求でも 2×2 セルまで
+   広がるので、最悪 96 件。上限 1,000 件に対して **10 倍の余裕**があり、「狭めても通らない」
+   状態は起きない。
+
+**問い合わせの所要**（本番、索引を入れる前）
+
+```
+Limit (actual time=0.082..10.533 rows=376)
+  -> Seq Scan on station_attributes  (actual time=0.018..6.924 rows=376)
+       Rows Removed by Filter: 20373
+Execution Time: 10.633 ms
+```
+
+全件走査が 6.9 ms を占めるので、部分索引 `(lat, lon) where valid_to is null and not geo_suspect`
+を足した。**いまの規模なら索引なしでも間に合うが、ポートが 10 倍になると 70 ms になる。**
+
+**ローカルでの一気通し**（`next dev` ＋ ローカル Supabase、12 ポート）
+
+| 確かめたこと | 結果 |
+|---|---|
+| bbox の丸め | `139.7654,35.6743,139.7712,35.6821` → `139.76,35.67,139.78,35.69` |
+| `geo_suspect` のポート | 応答に出ない |
+| 未観測のポート | `bikes` / `docks` / `is_renting` がすべて null |
+| 不在（`is_present: false`）のポート | `observed_at` が null |
+| `flags = 1` のポート | `is_installed: true` / `is_renting: false` |
+| システム別の観測時刻 | HELLO と ドコモで別々の `observed_at` |
+| 鮮度 | HELLO（40 秒前）false / ドコモ（20 分前）true |
+| 誤りの応答 | 5 種類すべてが 400 と `application/problem+json`、`Cache-Control: no-store` |
+| 件数の上限 | 1,112 件で 400・`too_many_stations`・**該当件数を本文に含む** |
+| 所要 | 22〜46 ms（開発モード・ローカル DB） |
+
 ## 11. この文書の更新方針
 
 W1 プランと同じ運用にする。
@@ -998,6 +1092,12 @@ W1 の 46 番から続けて採番する。
 | 59 | 軽微 | **`pyarrow` は型情報（`py.typed`）を配布していない**（実測：25.0.1 に `py.typed` も `.pyi` も無い）。`mypy --strict` が `import-untyped` で落ちる | 第三者スタブ（`pyarrow-stubs`）は依存が増えるので入れず、**`pyarrow.*` に限って** `ignore_missing_imports` を許す。境界の型はこちらで持つ（`SCHEMA` が列と型の契約、`Snapshot` / `StationRow` が入力の型）ので、失われるのは pyarrow の内部だけ | `apps/ml/pyproject.toml` |
 | 60 | 軽微 | **ruff の `ARG` は「テストの代役」と相性が悪い。** `FakePort` は本物と同じ引数を取らなければ `Protocol` を満たせず、使わない引数が必ず残る（12 件） | `tests/*` に限って `ARG001` / `ARG002` / `ARG005` を許す。代役の署名を歪めるほうが害が大きい。**本体側では有効なまま**にして、未使用引数は検出し続ける | `apps/ml/pyproject.toml` |
 | 61 | 軽微 | Parquet のバイト列を作るのに `pa.BufferOutputStream().getvalue().to_pybytes()` を使うと、mypy が `Any` を返すと言って落ちる（`warn_return_any`） | `bytes(buffer)` にする。`pa.Buffer` はバッファプロトコルを実装しているので、標準の `bytes()` で写せて型も付く | `jobs/snapshot_table.py` |
+| 62 | **中** | **1 辺の上限（0.5°）だけでは応答の大きさを縛れない。** 東京駅を中心にした 0.5° 四方には **8,792 ポート**が入り、JSON は約 3 MB になる（1 件あたり実測 348 バイト）。Vercel の応答上限 4.5 MB に迫り、p75 500 ms も守れない | **件数の上限（1,000 件）を別に置く**。超えたら切り捨てずに 400 を返し、**該当件数を本文に入れる**ので「どれだけ狭めればよいか」が分かる。低ズーム向けの格子集約は開発プラン §8.3 にあるが W2 では作らない | `bbox.ts`、`stations.ts` |
+| 63 | **中** | **`station_status_latest` には `-1`（登録済みだが一度も観測されていない）が実在する**（本番でドコモ 2 件）。そのまま返すと「-1 台」という値が API に出る。`flags = -1` は真偽値に開けない | **ビュー側で NULL に開く**（`nullif`、`case when flags < 0`）。TypeScript 側だけで直すと、匿名がビューを直接読んだときに意味が変わる。**内部の約束はビューの外に出さない** | migration 0018 |
+| 64 | 中 | **入力の検証より先に DB クライアントを組み立てると、設定の誤りが入力の誤りを覆い隠す。** 環境変数が無い環境で `?bbox=` を忘れた要求が 503 になり、呼び出し側は自分の誤りに気づけない | ポートを**関数で受け取り**、`bbox` の検証が通ってから初めて組み立てる。テストで「設定が壊れていても入力の誤りは 400」を固定した | `stations.ts`、`route.ts` |
+| 65 | 軽微 | **`SupabaseClient` の偽物をテストで作るには `as` が要る**（CLAUDE.md §3 で禁止）。既存の `*-port.ts` にテストが無いのも同じ理由だった | 判断の入る部分（読む先・列・bbox から絞り込みへの写像・行の検査）を**純粋なモジュール `view-query.ts` に出し**、`read-port.ts` は supabase-js に渡すだけにした。偽物が要らなくなり、取り違えやすい南北・東西の対応も固定できた | `view-query.ts` |
+| 66 | 軽微 | HELLO には `capacity = 1000`・`docks = 999` のポートが実在する（横浜の広場など。実測 5 件）。異常値に見えるが**提供側の正当な値**で、丸めてはいけない | そのまま返す。表示側の判断に委ねる。データ辞書（PR F）に書く | 運用メモ |
+| 67 | 軽微 | `/v1/meta.stale` の定義が「予測が古い、または未生成」で、モデルの無い W2 では**常に true** になり何も伝えない値だった | **「いずれかのフィードの観測が途切れている」**に改めた。予測の有無は `model_version` で分かる。閾値も `stale_after_s` として返し、クライアントが同じ判定をできるようにした | `api.ts`、`meta.ts` |
 
 **実装で足したもの**（§5.3 の変更ファイル一覧に対する差分）
 
@@ -1018,3 +1118,14 @@ W1 の 46 番から続けて採番する。
 | `apps/ml/tests/test_supabase_io.py` | `httpx.MockTransport` で「鍵が URL に載らない」「例外に秘密が残らない」「ページ送りが最後まで回る」を固定する |
 | `.github/workflows/ci.yml`（変更） | **外向きの通信が `apps/ml/bikechance_ml/io/` に閉じている**ことの検査を追加。web 側の `fetch` 閉じ込めと同じ規律を Python にも掛ける |
 | `.github/workflows/python.yml`（変更） | `uv pip install -e '.[dev]'` から `uv sync --frozen` に変更。**pyproject と `uv.lock` が食い違ったら落ちる**ようにした |
+
+**PR E で足したもの**（§5.7 の変更ファイル一覧に対する差分）
+
+| ファイル | 理由 |
+|---|---|
+| `packages/shared/src/freshness.ts` | 鮮度の判定を監視（0013）と 1 つの式に揃える。片方だけ変えると「API は古いと言うのに監視は鳴らない」が起きる |
+| `packages/shared/src/bbox.ts` | bbox の規則を 1 箇所に置く。iOS が同じ規則で組み立てられるようにする |
+| `apps/web/lib/api/view-query.ts` | 読む先・列・絞り込みを純粋な形にする。**bbox の 4 辺を列と演算子に写す部分**は取り違えても型が通るので、機械で固定する |
+| `apps/web/lib/api/problem.ts` | RFC 9457。`/api/jobs/*` の内部向けの形とは分ける |
+| `apps/web/lib/api/env.ts` | `/v1` は `ODPT_ACCESS_TOKEN` を要らない。収集用の検証を使い回すと、無関係な設定漏れで読み取りが落ちる |
+| `packages/shared/src/constants.ts`（変更） | `SystemDefinition` に `capacity_is_dynamic` を追加（DB に届かないときの控え） |

@@ -41,6 +41,13 @@ export type SystemDefinition = {
   readonly expected_cadence_s: number;
   /** 収集のポーリング間隔（秒）。 */
   readonly poll_interval_s: number;
+  /**
+   * `capacity` が固定のラック数ではなく `bikes + docks` の動的値であること（開発プラン §3.6）。
+   *
+   * **正は DB の `systems.capacity_is_dynamic`**（migration 0014）で、`/v1` は
+   * `v1_feeds` から読む。ここは DB に届かないときの控えとして持つ。
+   */
+  readonly capacity_is_dynamic: boolean;
 };
 
 export const SYSTEMS: Readonly<Record<SystemId, SystemDefinition>> = {
@@ -53,6 +60,8 @@ export const SYSTEMS: Readonly<Record<SystemId, SystemDefinition>> = {
     license_url: "https://creativecommons.org/licenses/by/4.0/deed.ja",
     expected_cadence_s: 300,
     poll_interval_s: 60,
+    // 非標準の vehicle_capacity（文字列）を数値化した固定の定員
+    capacity_is_dynamic: false,
   },
   "docomo-cycle": {
     system_id: "docomo-cycle",
@@ -65,6 +74,8 @@ export const SYSTEMS: Readonly<Record<SystemId, SystemDefinition>> = {
     // 1 周期とばす回が 16 回あり平均は 81 秒になる（W1 プラン §5.6 の 43）
     expected_cadence_s: 81,
     poll_interval_s: 60,
+    // capacity は bikes + docks で毎回動く。SCD2 の比較から外してある（W1 プラン §5.6 の 45）
+    capacity_is_dynamic: true,
   },
 };
 
@@ -217,3 +228,19 @@ export const COMPACT_CRON = "7 * * * *";
  * 見込みは 1 回 10 秒未満（44 万行）。ネットワークの揺れを見込んで 120 秒とる。
  */
 export const COMPACT_MAX_DURATION_S = 120;
+
+/**
+ * 公開 API `/v1` の設定（開発プラン §8.3、W2 プラン §5.7）。
+ */
+
+/** `/v1` の応答の CDN キャッシュ。1 分保持し、その後 2 分は古い値を返しつつ裏で更新する。 */
+export const V1_CACHE_CONTROL = "public, s-maxage=60, stale-while-revalidate=120";
+
+/**
+ * `/v1` のハンドラの最大実行時間（秒）。
+ * DB が詰まったときに 300 秒（Vercel の既定）待たされないよう、短く切る。
+ */
+export const V1_MAX_DURATION_S = 10;
+
+/** `/v1` から DB へ 1 回問い合わせるときのタイムアウト。maxDuration の内側に収める。 */
+export const V1_QUERY_TIMEOUT_MS = 5_000;
