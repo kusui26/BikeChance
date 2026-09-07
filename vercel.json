@@ -23,6 +23,14 @@
     {
       "path": "/api/jobs/collect/docomo-cycle",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/jobs/sync-stations/hellocycling",
+      "schedule": "0 19 * * *"
+    },
+    {
+      "path": "/api/jobs/sync-stations/docomo-cycle",
+      "schedule": "0 19 * * *"
     }
   ]
 }

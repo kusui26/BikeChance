@@ -11,7 +11,7 @@
 - **PR 分割の方針**：1 つの PR は「1 つの関心事」「20〜40 分で読める分量」「単独で検証でき、マージしても本番が壊れない」を満たすこと。`main` へのマージは Vercel の本番デプロイを意味するため、**壊れた状態を main に置かない**ことを最優先にする。
 - **参照の表記**：本文書内の章節は `§4.2` のように書く。上位文書を指す場合は必ず「開発プラン §5.3」のように前置きする。
 - **この文書の読み方**：§4 で実測にもとづく設計判断を示し、§5 に検証で見つかった問題と修正を、§6 に **8 本の PR**（0・A・C・B・D・E1・E2・F）を定義する。§6 は実行順に並べてある。実装時は §6 の各 PR の「完了条件」を満たしたら次に進む。§11 の付録に、複数の PR にまたがる契約（RPC のシグネチャ・配列の意味・`feed_state` の書き込み規律）を置いた。ここが PR B と PR C・D の合意点になる。
-- **変更履歴**：v1.0（2026-09-05）初版。**v1.1（2026-09-06）前提から疑う検証を行い、27 件の問題を修正**（§5）。主な変更は、`stations` への毎分書き込みの廃止、`feed_state` の書き込み規律による取りこぼし防止、DEFAULT パーティション、`station_status_latest` の `is_present` と `last_changed_at`、`begin_fetch` による原子的な claim、PR D への 5 分毎カナリア Cron、エラー時の 500 応答、環境ファイルの使い分け。M0 を 9/9 から 9/10 に 1 日遅らせ、カナリア運転を挟んだ。あわせて ODPT の認証方式とレート制限を追測し、初稿で提案していた D-04 の入れ替え（公開を正にする）を**取り下げ、認証付きを正のまま**とした。トークンの漏洩面は W1-21 の仕組みで閉じる（§4.2b、§5 末尾）。**v1.2（2026-09-06）実装順序を見直した**（§5.1）。生データの保全だけを切り出した **PR 0** を段 0 に置き、**蓄積開始を 9/9 から 9/7 に前倒し**した。PR B と PR C の順序を入れ替え、PR E を **E1（監視）→ E2（毎分化）** に分割した。マイルストーンの日付は変えていない。**PR C の実装中に実データで 2 件の問題が見つかり**（§5.2）、§11.1 の「GBFS の台数に負値は存在しない」という前提を訂正し、生 JSON の保存を検証より先に行うよう §6.6 の手順を入れ替えた（W1-25〜W1-27）。**PR B の実装中にさらに 2 件**（§5.3）：後退したスナップショットから最新値を守る条件が行ごとの `last_changed_at` では機能しないことが分かり、フィード単位の `feed_state.last_observed_at` と比べる形に直した。**PR D の実装中にさらに 2 件**（§5.4）：`fetch` の `cache` を `"no-cache"` にしないと ODPT が 304 を返さず、W1-4 の転送削減が黙って失われることが分かった（W1-28）。照合スクリプトが PostgREST の `max_rows` に当たり、台帳を 1,000 件と誤認していた。**PR E1 の実装中にさらに 4 件**（§5.5）：§8.6 の照合が「後から登録されたポート」を不一致として数えていた。psql の `\getenv` は 16 以降で開発機では使えなかった。pgTAP が Vault の中身という周囲の状態に依存していた。日次 QA の集計が横結合の直積で件数の二乗になっていた。監視の閾値は手で切り替えず `collect_interval_s` から導出することにした（W1-29〜W1-31）。**PR E2 は W1-29 の効果で Cron 式と設定値の 2 箇所だけになった**（§6.8）。両者が食い違ったまま気づかない事故を防ぐため、`vercel.json` の Cron 式を `poll_interval_s` と突き合わせるテストを足した。あわせて本番での容量実測を §8.4 と開発プラン §5.2 に記録した。**M0 は 9/6 20:07 JST に達成**（当初予定の 9/10 から 4 日前倒し）。段 7 の判定を `scripts/verify-m1.sql` にまとめ、観測窓とベースラインを §7.1 に記録した。**M1 は 9/7 20:56 JST に合格**（当初予定 9/11 から 4 日前倒し）。判定の過程で監視の欠陥を 2 件見つけて直した（§5.6）。停滞の閾値に検知の遅れが入っておらず、実測の最遅 244 秒が閾値 240 秒を超えていた。ドコモの期待周期 80 秒も 1.1% 楽観的だった。
+- **変更履歴**：v1.0（2026-09-05）初版。**v1.1（2026-09-06）前提から疑う検証を行い、27 件の問題を修正**（§5）。主な変更は、`stations` への毎分書き込みの廃止、`feed_state` の書き込み規律による取りこぼし防止、DEFAULT パーティション、`station_status_latest` の `is_present` と `last_changed_at`、`begin_fetch` による原子的な claim、PR D への 5 分毎カナリア Cron、エラー時の 500 応答、環境ファイルの使い分け。M0 を 9/9 から 9/10 に 1 日遅らせ、カナリア運転を挟んだ。あわせて ODPT の認証方式とレート制限を追測し、初稿で提案していた D-04 の入れ替え（公開を正にする）を**取り下げ、認証付きを正のまま**とした。トークンの漏洩面は W1-21 の仕組みで閉じる（§4.2b、§5 末尾）。**v1.2（2026-09-06）実装順序を見直した**（§5.1）。生データの保全だけを切り出した **PR 0** を段 0 に置き、**蓄積開始を 9/9 から 9/7 に前倒し**した。PR B と PR C の順序を入れ替え、PR E を **E1（監視）→ E2（毎分化）** に分割した。マイルストーンの日付は変えていない。**PR C の実装中に実データで 2 件の問題が見つかり**（§5.2）、§11.1 の「GBFS の台数に負値は存在しない」という前提を訂正し、生 JSON の保存を検証より先に行うよう §6.6 の手順を入れ替えた（W1-25〜W1-27）。**PR B の実装中にさらに 2 件**（§5.3）：後退したスナップショットから最新値を守る条件が行ごとの `last_changed_at` では機能しないことが分かり、フィード単位の `feed_state.last_observed_at` と比べる形に直した。**PR D の実装中にさらに 2 件**（§5.4）：`fetch` の `cache` を `"no-cache"` にしないと ODPT が 304 を返さず、W1-4 の転送削減が黙って失われることが分かった（W1-28）。照合スクリプトが PostgREST の `max_rows` に当たり、台帳を 1,000 件と誤認していた。**PR E1 の実装中にさらに 4 件**（§5.5）：§8.6 の照合が「後から登録されたポート」を不一致として数えていた。psql の `\getenv` は 16 以降で開発機では使えなかった。pgTAP が Vault の中身という周囲の状態に依存していた。日次 QA の集計が横結合の直積で件数の二乗になっていた。監視の閾値は手で切り替えず `collect_interval_s` から導出することにした（W1-29〜W1-31）。**PR E2 は W1-29 の効果で Cron 式と設定値の 2 箇所だけになった**（§6.8）。両者が食い違ったまま気づかない事故を防ぐため、`vercel.json` の Cron 式を `poll_interval_s` と突き合わせるテストを足した。あわせて本番での容量実測を §8.4 と開発プラン §5.2 に記録した。**M0 は 9/6 20:07 JST に達成**（当初予定の 9/10 から 4 日前倒し）。段 7 の判定を `scripts/verify-m1.sql` にまとめ、観測窓とベースラインを §7.1 に記録した。**M1 は 9/7 20:56 JST に合格**（当初予定 9/11 から 4 日前倒し）。判定の過程で監視の欠陥を 2 件見つけて直した（§5.6）。停滞の閾値に検知の遅れが入っておらず、実測の最遅 244 秒が閾値 240 秒を超えていた。ドコモの期待周期 80 秒も 1.1% 楽観的だった。**PR F の実装で 3 件**（§5.7）：`station_attributes` に `geo_suspect` 列が無く、ドコモの壊れた座標（経度 39.55）を正しい属性として保存し続けるところだった。ドコモの動的 `capacity` を SCD2 の比較に入れると属性の履歴が容量の変更ログになる（2 分で 154 版、全部が容量のみ）ため、`systems.capacity_is_dynamic` で比較から外した。
 - **開発プラン本体との関係**：本文書は W1 の実装詳細のみを扱う。設計の根拠・代替案・決定記録は開発プランにある。実装中に設計判断が変わった場合は、**開発プランの該当章と §15 を先に更新**してから実装する（CLAUDE.md §2 の原則 10）。v1.1 で開発プランと食い違いが生じた箇所（§5 末尾）は PR A のマージ後に開発プラン側を追随させる。
 
 ## 1. Week 1 のゴールと完了条件
@@ -388,6 +388,20 @@ v1.1 を「この順で作って本当に最短か」という観点で読み直
 - ドコモの公開間隔の分布は 60〜99 秒が 1,051 回、**100〜139 秒が 0 回**、140〜179 秒が 15 回、180 秒以上が 1 回。取り逃していれば 160 秒前後（80 秒の 2 倍）に固まるはずで、実際その位置にあるのは 16 回だけ。これは提供側が 1 周期とばした回であって、我々が落とした回ではない
 - Storage の生 JSON と DB の行数が完全一致（ドコモ 1,067/1,067、HELLO 288/288）
 - §8.6 の照合が 6/6 で不一致 0
+
+### 5.7 段 8（PR F）の実装中に見つかった問題
+
+| # | 重大度 | 問題 | 修正 | 反映 |
+|---|---|---|---|---|
+| 44 | 中 | **`station_attributes` に `geo_suspect` 列が無かった。** 開発プラン §14 は「日本 BBox 外は `geo_suspect=true` として地図非表示、時系列は保持」と対処まで決めていて、§5.3 の DDL 案にも列があったのに、実装した 0003 で落ちていた。§5.3 の「実装が正」注記にも書き漏れていた。**しかも対象は実在する**：ドコモの `4826`「アートフォーラムあざみ野」（横浜市青葉区）は経度が 139.553764 ではなく **39.553764** で、先頭の 1 が落ちている。列が無いままなら、壊れた座標を「正しい属性」として保存し続けていた | 0014 で列を追加し、判定は `gbfs-core` が行う（BBox の定義を SQL と TypeScript に二重化しない）。フィクスチャに対する単体テストで 1 件だけ立つことを固定した。提供側が直せばテストが落ちるので気づける | `0014`、`station-attributes.ts` |
+| 45 | **高** | **ドコモの動的 `capacity` を SCD2 の比較に入れると、属性の履歴が容量の変更ログになる。** プラン §6.9 は比較対象を `(name, lat, lon, capacity)` としていたが、ドコモの `capacity` は固定ラック数ではなく `bikes + docks`（開発プラン §3.6）。**2 分あけて 2 回同期しただけで 154 版が増え、その 154 件すべてが容量のみの変更**（名前・座標の変更は 0 件）。日次で回せば 1 日約 5,000 版、1 年で 180 万行になり、SCD2 にした意味が消える | `systems.capacity_is_dynamic` を足し、true のシステムでは比較から `capacity` を外す。列には版の開始時点の値をそのまま入れる（プランの「そのまま保存」に沿う）。動的な最新値は `status_snapshots` の `bikes + docks` から得られるので失われるものは無い。修正後、ドコモの 2 回目は `n_changed=0` になった | `0014`、`0008_station_attributes.sql` |
+| 46 | 軽微 | **`create temp table ... as select` は同じトランザクションの 2 回目で落ちる**（`relation "incoming" already exists`）。pgTAP は 1 トランザクションで RPC を何度も呼ぶため、そのままでは 1 度しか検査できなかった | 定義と投入を分け、`to_regclass` で存在を見て `truncate` する。`if not exists` は毎回 NOTICE を出すので使わない。名前も `incoming_station_attributes` に具体化した | `0014` |
+
+**設計の要点（問題ではないが、実装で判断したこと）**
+
+- **`stations` の `idx` 採番は `ingest_snapshot` と同じロック（クラス 8421）を取る。** 別のロックにすると、毎分の収集と同時に走ったとき両方が同じ `max(idx)` を読み、`unique (system_id, idx)` 違反になる。日次ジョブなので `try` ではなく**待つ**。自分自身の多重起動はクラス 8422 で弾く
+- **記録先は `feed_fetch_log` ではなく `job_runs`。** `feed_fetch_log` は status 専用で `feed` 列を持たず、属性同期を混ぜると取得率・誤検知・`consecutive_errors` の指標が汚れる
+- **条件付き取得（ETag）を使わない。** 1 日 1 回なので節約の意味が薄く、`feed_state.last_etag` は status のもの。同じ `last_updated` なら Storage のパスが同じになり、重複は正常系として扱われるので冪等性は保たれる
 
 ## 6. PR の分割と各 PR の定義
 
@@ -883,24 +897,59 @@ W1-29 で監視の閾値を `collect_interval_s` から導出するようにし�
 ```
 apps/web/app/api/jobs/sync-stations/[system]/route.ts
 apps/web/lib/jobs/sync-stations.ts
-supabase/migrations/<ts>_0012_station_attributes_rpc.sql   # upsert_station_attributes
+apps/web/lib/jobs/attributes-port.ts                       # RPC の差し替え点（IngestPort と同じ形）
+packages/gbfs-core/src/station-attributes.ts               # 容量の解決と BBox 判定（純粋関数）
+supabase/migrations/<ts>_0014_station_attributes_rpc.sql   # upsert_station_attributes ほか
 supabase/tests/0008_station_attributes.sql
+scripts/import-station-information.mjs                     # 段 0 のベースラインを後から取り込む
 vercel.json                                                # crons に 2 本追加（0 19 * * * = 04:00 JST）
 ```
+
+番号が 0012 でなく 0014 なのは、0012（毎分化）と 0013（停滞閾値）が先に入ったため。
 
 **`upsert_station_attributes(p_system_id, p_fetched_at, p_rows jsonb) returns jsonb`**
 
 - `pg_try_advisory_xact_lock(8422, lock_key)`
 - 入力に含まれるが `stations` に無いポートは登録する（`idx` を採番）。FK の親行を先に作る
-- 現在有効な行（`valid_to is null`）と `(name, lat, lon, capacity)` を比べ、変わっていれば旧行の `valid_to` を閉じて新行を追加。同じなら何もしない
+- 現在有効な行（`valid_to is null`）と `(name, lat, lon, capacity)` を比べ、変わっていれば旧行の `valid_to` を閉じて新行を追加。同じなら何もしない。**ただし `systems.capacity_is_dynamic` が true のシステム（ドコモ）では `capacity` を比較から外す**（動的値なので、入れると属性の履歴が容量の変更ログになる。§5.7 の 45）
 - 入力に含まれないポートの有効行は**閉じない**（フィードの一時的な欠落で属性を失わないため）。閉じるのは W2 以降の判断
-- 戻り値：`{"n_input", "n_new_stations", "n_changed", "n_unchanged"}`
+- 戻り値：`{"status", "n_input", "n_new_stations", "n_changed", "n_unchanged", "n_versions_added", "n_geo_suspect", "n_skipped_older", "capacity_is_dynamic"}`。`n_skipped_older` は「有効行より古い時刻で取り込もうとして反映しなかった件数」で、ベースラインを日次同期より後に入れると 0 でなくなる
 - ドコモの `capacity`（動的）はそのまま保存し、意味の解釈は特徴量側で行う。HELLO は `capacity` が無く `vehicle_capacity`（文字列）のみのため、数値に変換できたら `capacity` に入れる
 - 生 JSON は `gbfs-raw/{system}/{YYYY}/{MM}/{DD}/station_information_{fetched_at_epoch}.json.gz` に保存
+- 日本の外接矩形の外にある座標は `geo_suspect` を立てて保存する（開発プラン §14。§5.7 の 44）。判定は `gbfs-core` が行い、RPC は受け取って保存するだけ（BBox を SQL と TypeScript に二重化しない）
+- **`stations` の登録は `ingest_snapshot` と同じロック（クラス 8421）を取る。** 別ロックだと毎分の収集と競合して `unique (system_id, idx)` 違反になる
+- **記録は `job_runs`（`sync_stations:{system}`）に残す。** `feed_fetch_log` は status 専用で `feed` 列を持たず、混ぜると取得率と誤検知の指標が汚れる
 
 **段 0 のベースラインを取り込む**：PR F が動き出すまで `station_information` を取得するものが無いため、**段 0 で各システム 1 回だけ手で取得し Storage に保存しておく**（§7 の段 0）。PR F の初回実行時にそのファイルも取り込めば、属性履歴の起点が 9/7 になり、W1 中の属性変化を失わない。
 
 **テスト**：初回で全件が新規。同じ入力の 2 回目で `n_changed=0`。座標を 1 件変えた入力で 1 件だけ新しい `valid_from` の行ができ、旧行の `valid_to` が閉じる。入力から 1 件消しても有効行が残る。`stations` に無い ID を含む入力で登録が行われる。
+
+
+**ローカルでの実行結果（実データ、2026-09-07）**
+
+| | HELLO | ドコモ |
+|---|---|---|
+| ポート数 | 14,921 | 5,807 |
+| 受信バイト / gzip 後 | 7.81 MB / 893 KB | 741 KB / 190 KB |
+| 1 回の所要 | 6.1 秒（初回）／3.5 秒（2 回目） | 1.9 秒 ／ 1.3 秒 |
+| 2 回目の `n_changed` | **0** | **0** |
+| `geo_suspect` | 0 | **1**（`4826` の経度） |
+| 重複した station_id | 0 | 11〜15（先頭を残す） |
+
+初回は全件が新規、2 回目は両システムとも変更 0。`maxDuration` は 120 秒にしてあり、
+最も重い HELLO の初回でも 6 秒で収まっている。
+
+**ベースラインの取り込み手順**（段 0 で手で保存した分。**日次同期より先に**行う）
+
+```
+node scripts/import-station-information.mjs .env \
+  hellocycling/2026/09/06/station_information_1788678460.json.gz
+node scripts/import-station-information.mjs .env \
+  docomo-cycle/2026/09/06/station_information_1788678462.json.gz
+```
+
+SCD2 は有効行より新しい取り込みしか反映しない。逆順にすると起点が今日になり、
+ベースラインは `n_skipped_older` に出るだけで捨てられる。
 
 **完了条件**：本番で 2 回実行し、2 回目の `n_changed=0`。`station_attributes` の有効行数が HELLO 14,861・ドコモ 5,800 前後。status にしか現れないポート（ドコモ 11 件）に属性が無いことを確認し、将来の API がそれを許容する旨を開発プラン §8.3 に追記。
 
@@ -1314,6 +1363,25 @@ create function public.ingest_snapshot(
 
 `feed_fetch_log` に 1 行入れる（`source` を含む）。`p_log.result` が `inserted` / `duplicate` / `unchanged` なら `last_success_at = now()`・`consecutive_errors = 0`。`p_log.ok` が偽なら `consecutive_errors + 1`。`skipped_recent` / `locked` はログだけで `feed_state` を変えない。`p_log` の中身は §11.6 の応答と同じ項目（URL とトークンは含めない）。
 
+**4. `public.upsert_station_attributes(p_system_id text, p_fetched_at timestamptz, p_rows jsonb) returns jsonb`**（PR F）
+
+`p_rows` は `[{station_id, name, lat, lon, capacity, geo_suspect, raw}, ...]`。`capacity` は null 可、`raw` は GBFS のオブジェクト全体（必須）。
+
+```json
+{ "status": "ok", "n_input": 14921, "n_new_stations": 0, "n_changed": 0,
+  "n_unchanged": 14921, "n_versions_added": 0, "n_geo_suspect": 0,
+  "n_skipped_older": 0, "capacity_is_dynamic": false }
+```
+
+| 規律 | 内容 |
+|---|---|
+| 比較する列 | `(name, lat, lon, capacity)`。ただし `systems.capacity_is_dynamic` が true なら `capacity` を外す（§5.7 の 45） |
+| 入力に無いポート | 有効行を**閉じない**。フィードの一時的な欠落で属性を失わないため |
+| 未登録ポート | `stations` に `idx` を採番して登録する。**`ingest_snapshot` と同じロックを取る**（§11.4） |
+| 古い時刻の取り込み | 有効行の `valid_from` 以降の時刻でなければ反映せず、`n_skipped_older` に数える |
+| 契約違反 | 重複した `station_id`、空の `station_id`、`raw` の欠落は `22023` で弾く |
+| 記録先 | `job_runs`（`sync_stations:{system}`）。`feed_fetch_log` は status 専用（§5.7） |
+
 **`station_status_latest` の意味**
 
 | 列 | 意味 |
@@ -1328,11 +1396,17 @@ create function public.ingest_snapshot(
 
 同時実行の抑止に使うキーは、`hashtext()` のような文書化されていない内部関数に依存させない。`systems` テーブルに **`lock_key smallint not null unique`** を持たせ（`hellocycling` = 1、`docomo-cycle` = 2）、2 引数形式の `pg_try_advisory_xact_lock(class_id, object_id)` を使う。
 
-| 用途 | `class_id` | `object_id` |
-|---|---|---|
-| 取り込み（`ingest_snapshot`） | 8421 | `systems.lock_key` |
-| 属性同期（`upsert_station_attributes`） | 8422 | `systems.lock_key` |
-| パーティション保守・日次集計 | 8423 | 0 |
+| 用途 | `class_id` | `object_id` | 取り方 |
+|---|---|---|---|
+| 取り込み（`ingest_snapshot`） | 8421 | `systems.lock_key` | try（取れなければ `locked`） |
+| 属性同期の `idx` 採番（`upsert_station_attributes`） | 8421 | `systems.lock_key` | **待つ**（下記） |
+| 属性同期の多重起動（同上） | 8422 | `systems.lock_key` | try（取れなければ `locked`） |
+| pg_cron の各ジョブ | 8423 | ジョブごとに 1〜5（W1-30） | try |
+
+**属性同期が 8421 も取る理由**：`stations` の `idx` 採番は `max(idx) + 行番号` で行うため、
+毎分の収集と同時に走ると両方が同じ `max(idx)` を読み、`unique (system_id, idx)` 違反になる。
+**同じ資源には同じロック**を使う。日次ジョブなので `try` ではなく待って構わない
+（収集側は 30 秒の `statement_timeout` を持つので、待ち時間はそれで頭打ちになる）。
 
 `begin_fetch` の claim はアドバイザリロックではなく `feed_state` の行更新そのものが排他になるため、ロックを使わない。
 
