@@ -6,7 +6,7 @@
 -- 保守ジョブが失敗し、やがて収集が止まる。
 
 begin;
-select plan(24);
+select plan(30);
 
 -- このファイルはトランザクション内で完結し rollback するので、ここでの削除は外に影響しない。
 -- ベンチマークや手動確認でデータが残っていても同じ結果になるよう、作業テーブルを空にしてから始める
@@ -140,6 +140,34 @@ select throws_ok(
   $$select public.drop_expired_snapshot_partitions(0)$$,
   'p_keep_days は 1 以上である必要があります (0)',
   '保持日数 0 は弾く（誤って全部消さない）'
+);
+
+-- ────────────────────────────────────────────────────────────────
+-- snapshot_partition_exists（W2 の PR B。再構築が DEFAULT に落とさないための確認）
+-- ────────────────────────────────────────────────────────────────
+select ok(
+  public.snapshot_partition_exists(now()),
+  '現行月のパーティションは存在する'
+);
+select ok(
+  public.snapshot_partition_exists(now() + interval '1 month'),
+  '翌月も存在する（ensure_snapshot_partitions が先に作っている）'
+);
+select ok(
+  not public.snapshot_partition_exists(now() - interval '13 months'),
+  '13 か月前は存在しない（過去月は作られない。§4 の 3）'
+);
+select ok(
+  not public.snapshot_partition_exists(now() + interval '13 months'),
+  '13 か月先も存在しない'
+);
+select ok(
+  not has_function_privilege('anon', 'public.snapshot_partition_exists(timestamptz)', 'execute'),
+  '匿名からは実行できない'
+);
+select ok(
+  has_function_privilege('service_role', 'public.snapshot_partition_exists(timestamptz)', 'execute'),
+  'service_role からは実行できる'
 );
 
 select * from finish();

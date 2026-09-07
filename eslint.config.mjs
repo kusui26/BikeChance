@@ -39,4 +39,13 @@ export default tseslint.config(
       "no-var": "error",
     },
   },
+  {
+    // TypeScript で書いたスクリプトも道具。**この上書きは TS のブロックより後に置く**
+    // （flat config は後に書いたものが勝つ）。再構築スクリプトは進捗を出さないと
+    // 数百件の取り込みで何が起きているか分からない
+    files: ["scripts/**/*.ts"],
+    rules: {
+      "no-console": "off",
+    },
+  },
 );

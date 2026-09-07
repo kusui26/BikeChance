@@ -12,7 +12,7 @@
     "lint": "eslint .",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
-    "typecheck": "pnpm -r --if-present typecheck",
+    "typecheck": "tsc --noEmit -p tsconfig.scripts.json && pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "db:start": "supabase start",
     "db:stop": "supabase stop",
@@ -21,10 +21,14 @@
     "db:test": "supabase test db"
   },
   "devDependencies": {
+    "@bikechance/gbfs-core": "workspace:*",
+    "@bikechance/shared": "workspace:*",
     "@eslint/js": "^10.0.1",
+    "@types/node": "^26.4.1",
     "eslint": "^10.10.0",
     "prettier": "^3.9.6",
     "supabase": "2.116.0",
+    "tsx": "^4.20.6",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.69.0"
   }
