@@ -218,6 +218,20 @@ vercel.json                                        # crons に 1 本追加（17 
 
 **巻き戻し**：`vercel.json` から Cron の 1 行を消して再デプロイする。収集の Cron には触れない。
 
+**ローカルでの実行結果（実データ、2026-09-07）**：120 格子（2 分割）で通した。
+
+| 項目 | 実測 |
+|---|---|
+| 所要 | **2.1 秒**（2 分割）。595 格子なら 6 分割で約 6 秒の見込み |
+| 受信バイト | 456,711 B（2 モデル）／294,067 B（1 モデルのとき） |
+| gzip 後 | **31,863 B**（圧縮比 14:1） |
+| 595 格子での 1 日の見込み | 約 **3.8 MB/日**（GBFS の 69 MB/日に対して十分小さい） |
+| 冪等性 | 同じ時間の 2 回目は `n_saved 0 / n_duplicate 2` で成功 |
+| 保存された中身 | 2 モデル × 5 変数 × 48 時間。`precipitation_probability_best_match` は 48/48 が非 null、`_jma_msm` は 0/48 |
+
+**モデルを 2 つ取る理由**：`jma_msm` は**降水確率を返さない**（実測で全件 null）。`best_match` だけが返す。決定論的な値は日本では両者一致する。後から遡って足せない入力なので、両方を保存して W4 で選ぶ（§12 の 47）。
+
+
 ### 5.4 PR B：スナップショット再構築
 
 **目的**：**生 JSON から `status_snapshots` を作り直せることを、実データで証明する。** CLAUDE.md §6 が求めている「常に動く再構築スクリプト」を用意し、PR 0 期の積み残しを取り込む。
@@ -549,14 +563,15 @@ psql "$SUPABASE_DB_URL" -v from_at='<24 時間前>' -v baseline_bytes=<開始時
 ### 9.1 天気アーカイブのパス規約
 
 ```
-weather-raw/{YYYY}/{MM}/{DD}/jma_msm_{fetched_epoch_s}_{batch:02d}.json.gz
-例: weather-raw/2026/09/08/jma_msm_1788800220_00.json.gz
+weather-raw/{YYYY}/{MM}/{DD}/jma_msm_{hour_epoch_s}_{batch:02d}.json.gz
+例: weather-raw/2026/09/08/jma_msm_1788800400_00.json.gz
 ```
 
 - 日付は **UTC**（`gbfs-raw` と同じ。W1 プラン §11.5）
-- `fetched_epoch_s` は**取得を開始した時刻**（応答に発行時刻が無いため、これが「いつ入手したか」の記録になる）
+- `hour_epoch_s` は**取得を開始した時刻を「時」に丸めた値**（§12 の 48）。応答に発行時刻が無いため、これが「いつ入手したか」の記録になる。丸めるのは**同じ時間の再実行を同じパスに写像する**ためで、取り直しが 409 として畳まれ、1 時間 1 個という数え方も崩れない
 - `batch` は分割の連番（00〜05）。応答に `latitude` / `longitude` が含まれるので、どの格子かは中身で分かる
-- 中身は **Open-Meteo の応答そのまま**。整形も並べ替えもしない
+- ファイル名の `jma_msm` は**保存先の規約としての名前**で、中身のモデルが増えても変えない
+- 中身は **Open-Meteo の応答そのまま**。整形も並べ替えもしない。**2 モデル分**（`jma_msm` と `best_match`）が接尾辞つきの系列で入る（§12 の 47）
 
 **格子の丸め**：`lat` は 0.05°、`lon` は 0.0625° 刻み（jma_msm の格子。実測で確認）。
 
@@ -677,3 +692,23 @@ W1 プランと同じ運用にする。
 - 実装中に見つかった問題は §12 として追記し、番号は W1 の 46 から続けて 47 番から採る
 - 各 PR の完了条件を満たしたら、本番の実測値を §5 の該当節に書き足す
 - W2 が終わったら §1 の合格基準に対する結果を記録して閉じる
+
+## 12. 実装中に見つかった問題
+
+W1 の 46 番から続けて採番する。
+
+| # | 重大度 | 問題 | 修正 | 反映 |
+|---|---|---|---|---|
+| 47 | **中** | **`jma_msm` は降水確率を返さない。** `precipitation_probability` を要求しても全件 null だった（実測 960/960 が null）。開発プラン §6.3 の `precip_prob_fcst` はこのモデルだけでは作れない。モデル未指定（`best_match`）なら値が入る。**後から遡って足せない入力なので、気づかないまま 1 か月アーカイブしていたら、その期間の降水確率は永久に失われていた** | `models=jma_msm,best_match` の 2 モデルを 1 要求で取る。応答の系列名にモデル名の接尾辞が付く（`precipitation_jma_msm` / `precipitation_best_match`）。日本では決定論的な値は両者一致し、`best_match` だけが降水確率を持つ。応答は約 1.5 倍になるが gzip 後で +27%（1 日 3.8 MB の見込み）。**迷ったら取る**方に倒した | `constants.ts`、`weather-fetch.ts` |
+| 48 | 軽微 | 取得時刻をそのままパスに使うと、**同じ時間に 2 回動いたとき別のオブジェクトができる**。取り直しが重複を生み、1 時間 1 個という数え方も崩れる | パスの時刻を**「時」に丸める**（§9.1）。同じ時間の再実行は同じパスに写像され、`upsert: false` で 409 として畳まれる。実測で 2 回目は `n_saved 0 / n_duplicate 2` になった | `weather-path.ts` |
+| 49 | 軽微 | 分割の失敗理由に `error_name` が入らず、`phase: message` だけだった。`LocationCountMismatch` のような**種別が記録に残らない** | `phase/error_name: message` にした。後から `job_runs` を grep できる | `archive-weather.ts` |
+| 50 | 軽微 | `storage.objects` を SQL で直接 delete できない（`storage.protect_delete()` に弾かれる）。ローカルで取り直すときに詰まる | Storage の REST API（`DELETE /storage/v1/object/{bucket}/{path}`）を使う。**本番のオブジェクト削除は確認が要る操作**なので（CLAUDE.md §6）、この経路を使うのはローカルだけ | 運用メモ |
+
+**実装で足したもの**（§5.3 の変更ファイル一覧に対する差分）
+
+| ファイル | 理由 |
+|---|---|
+| `apps/web/lib/jobs/weather-port.ts` | 格子の取得と `job_runs` の記録を差し替え可能にする。`IngestPort` / `AttributesPort` と同じ形 |
+| `apps/web/lib/jobs/storage.ts`（変更） | `createSupabaseUploader` にバケットを引数で渡せるようにした。既定は `gbfs-raw` なので収集側は変わらない |
+| `.github/workflows/ci.yml`（変更） | `fetch` の閉じ込めガードに `weather-fetch.ts` を追加。**そのぶん「weather-fetch.ts にトークンが混ざらない」検査を新設**して、緩めた分を埋めた |
+| `supabase/tests/0009_weather_grid.sql` | 格子の丸めと除外（`geo_suspect`・閉じた属性行）を固定する |
