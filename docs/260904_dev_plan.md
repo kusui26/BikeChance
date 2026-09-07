@@ -1263,19 +1263,19 @@ BikeChance/
 └─ .github/workflows/           # ci.yml（lint/typecheck/test）、retrain.yml（週次）、drive-mirror.yml（週次）
 ```
 
-`vercel.json` の骨子：
+`vercel.json` の骨子（**2026-09-08 にスキーマで確認して訂正**：`services.<name>` は `additionalProperties: false` で `functions` を受け付けない。`maxDuration` はトップレベルの `functions` に glob で書く。`framework` には `fastapi` プリセットがある。W2 プラン §12 の 54）：
 
 ```json
 {
   "services": {
     "web": { "root": "apps/web" },
-    "ml":  { "root": "apps/ml", "entrypoint": "bikechance_ml.api:app",
-             "functions": { "bikechance_ml/api.py": { "maxDuration": 300 } } }
+    "ml":  { "root": "apps/ml", "framework": "fastapi" }
   },
   "rewrites": [
     { "source": "/ml/(.*)", "destination": { "service": "ml" } },
     { "source": "/(.*)",    "destination": { "service": "web" } }
   ],
+  "functions": { "apps/ml/**": { "maxDuration": 300 } },
   "crons": [
     { "path": "/api/jobs/collect/hellocycling",  "schedule": "* * * * *" },
     { "path": "/api/jobs/collect/docomo-cycle",  "schedule": "* * * * *" },
