@@ -61,9 +61,11 @@ jobs:
         # トークンは URL に載る（開発プラン D-04）。`res.url` / `response.url` を読むと、
         # そこからログ・例外・トレースへ漏れる経路ができる。ジョブの実装では使わせない。
         # URL の組み立てと fetch は apps/web/lib/jobs/odpt-fetch.ts の中だけで完結させる。
+        # 対象は web の全コード（`/v1` を足したので `lib/jobs` と `app/api` に限定しない）。
         run: |
           # \b は macOS の git で効かないため、前後を文字クラスで表現して移植性を保つ
-          if git grep -nIE '(^|[^A-Za-z0-9_$.])(res|response|resp)\.url([^A-Za-z0-9_]|$)' -- 'apps/web/lib/jobs' 'apps/web/app/api' ':!*.test.ts'; then
+          if git grep -nIE '(^|[^A-Za-z0-9_$.])(res|response|resp)\.url([^A-Za-z0-9_]|$)' \
+              -- 'apps/web/lib' 'apps/web/app' ':!*.test.ts'; then
             echo "::error::res.url はトークン付き URL を含み得ます。odpt-fetch.ts の外へ Response を出さないでください（W1-21）"
             exit 1
           fi
@@ -81,7 +83,7 @@ jobs:
         # 3 つ目を足すときは、なぜそこから外へ出す必要があるかをこのコメントに書くこと。
         run: |
           if git grep -nIE '(^|[^A-Za-z0-9_$.])fetch\(' \
-              -- 'apps/web/lib/jobs' 'apps/web/app/api' \
+              -- 'apps/web/lib' 'apps/web/app' \
                  ':!*.test.ts' \
                  ':!apps/web/lib/jobs/odpt-fetch.ts' \
                  ':!apps/web/lib/jobs/weather-fetch.ts'; then
