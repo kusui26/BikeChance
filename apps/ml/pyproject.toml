@@ -1,0 +1,59 @@
+[project]
+name = "bikechance-ml"
+version = "0.0.0"
+description = "BikeChance の ML サービス（FastAPI）。W2 は疎通だけ。"
+requires-python = ">=3.12"
+
+# **本番の依存はここだけ。** W2 の PR C は「Vercel Services に Python を足しても
+# 収集が止まらないか」だけを確かめる回なので、pyarrow や polars、Supabase の
+# クライアントは入れない。依存を増やすと、失敗したときに
+# 「ランタイムの問題か依存の問題か」を切り分けられなくなる（W2 プラン §5.5）。
+dependencies = ["fastapi>=0.115,<1"]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.9", "mypy>=1.14", "pytest>=8.3", "httpx>=0.28"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bikechance_ml"]
+
+# ── ruff ─────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# CLAUDE.md §3 の規約に対応するものを選ぶ。
+#   E,W,F  基本    I  import 順    N  命名    UP  新しい書き方
+#   B      バグの温床    A  組み込み名の影         C4  内包表記
+#   SIM    冗長な分岐    RET 早期 return         ARG 未使用引数
+#   PTH    os.path より pathlib   RUF  ruff 固有
+select = ["E", "W", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RET", "ARG", "PTH", "RUF"]
+
+# このリポジトリのコメントと docstring は日本語で書く（CLAUDE.md の方針）。
+# RUF002 / RUF003 は「ASCII に似た全角文字」を疑うルールで、日本語の約物は
+# すべて引っかかる。**ルールごと切らずに、実際に使う約物だけを許可する。**
+# 表意文字空白（U+3000）はここに入れない。目に見えない空白は本当に事故のもとで、
+# 検出され続けてほしい。
+allowed-confusables = ["（", "）", "：", "、", "。", "！", "？", "〜", "・"]
+
+[tool.ruff.lint.per-file-ignores]
+# テストでは assert を使う（S101 は未選択だが意図を明示しておく）
+"tests/*" = []
+
+# ── mypy ─────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+strict = true
+# CLAUDE.md §3「any 禁止」を機械で守る
+disallow_any_explicit = true
+warn_unreachable = true
+files = ["bikechance_ml", "tests", "main.py"]
+
+# ── pytest ───────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
