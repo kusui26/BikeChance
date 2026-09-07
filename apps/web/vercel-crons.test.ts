@@ -9,11 +9,19 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { ARCHIVE_WEATHER_CRON, SYNC_STATIONS_CRON, SYSTEMS, SYSTEM_IDS } from "@bikechance/shared";
+import {
+  ARCHIVE_WEATHER_CRON,
+  COMPACT_CRON,
+  COMPACT_MAX_DURATION_S,
+  SYNC_STATIONS_CRON,
+  SYSTEMS,
+  SYSTEM_IDS,
+} from "@bikechance/shared";
 
 const COLLECT_PATH_PREFIX = "/api/jobs/collect/";
 const SYNC_PATH_PREFIX = "/api/jobs/sync-stations/";
 const WEATHER_PATH = "/api/jobs/archive-weather";
+const COMPACT_PATH = "/ml/compact";
 
 type CronEntry = {
   readonly path: string;
@@ -110,5 +118,56 @@ describe("vercel.json の天気アーカイブ Cron", () => {
     expect(minute).not.toBe("*");
     expect(minute).not.toBe("0");
     expect(minute).not.toBe("7");
+  });
+});
+
+describe("vercel.json の Parquet 化 Cron", () => {
+  it("ちょうど 1 本ある", () => {
+    expect(readCrons(COMPACT_PATH)).toHaveLength(1);
+  });
+
+  it("スケジュールが共有定数と一致する", () => {
+    expect(readCrons(COMPACT_PATH)[0]?.schedule).toBe(COMPACT_CRON);
+  });
+
+  it("前 1 時間を畳むので、時刻の先頭から十分に離す", () => {
+    // ドコモの停滞閾値は最大 4 分強（W1-42）。その時間帯の観測が入り終わる前に
+    // 畳むと、後から行が増えて 2 回目と食い違う
+    const minute = Number(readCrons(COMPACT_PATH)[0]?.schedule.split(" ")[0]);
+    expect(minute).toBeGreaterThanOrEqual(5);
+  });
+
+  it("天気アーカイブと同じ分に重ならない", () => {
+    const weather = readCrons(WEATHER_PATH)[0]?.schedule.split(" ")[0];
+    const compact = readCrons(COMPACT_PATH)[0]?.schedule.split(" ")[0];
+    expect(compact).not.toBe(weather);
+  });
+});
+
+describe("vercel.json の ml サービス", () => {
+  /** services.<name>.functions は glob → 設定。glob は**サービスの root からの相対**。 */
+  const readMlFunctions = (): Record<string, unknown> => {
+    const file = fileURLToPath(new URL("../../vercel.json", import.meta.url));
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    if (!isRecord(parsed) || !isRecord(parsed["services"])) {
+      throw new Error("vercel.json に services がありません");
+    }
+    const ml: unknown = parsed["services"]["ml"];
+    if (!isRecord(ml) || !isRecord(ml["functions"])) {
+      throw new Error("services.ml に functions がありません");
+    }
+    return ml["functions"];
+  };
+
+  it("maxDuration が共有定数と一致する", () => {
+    // Python には route segment config が無い。maxDuration の指定はここだけ
+    const settings = Object.values(readMlFunctions());
+    expect(settings).toHaveLength(1);
+    const first: unknown = settings[0];
+    expect(isRecord(first) && first["maxDuration"]).toBe(COMPACT_MAX_DURATION_S);
+  });
+
+  it("glob が Python のファイルを指す", () => {
+    expect(Object.keys(readMlFunctions())).toEqual(["**/*.py"]);
   });
 });

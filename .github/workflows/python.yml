@@ -34,15 +34,14 @@ jobs:
         run: pip install --upgrade uv
 
       - name: Python 3.12 を用意する
-        run: |
-          uv python install 3.12
-          uv venv --python 3.12
+        run: uv python install 3.12
 
-      # 依存の宣言は pyproject.toml の 1 箇所。ローカルで venv + pip を使っても同じ
-      # ものが入る。**ロックファイルはまだ置かない**（W2 の PR C の依存は fastapi
-      # 1 つで版の範囲も狭い）。実依存が増える PR D で uv.lock を入れる
-      - name: 依存を入れる
-        run: uv pip install -e '.[dev]'
+      # 宣言は pyproject.toml、解決結果は uv.lock。`--frozen` は「ロックを更新せず、
+      # 書いてあるとおりに入れる」の意味で、**pyproject とロックが食い違ったらここで
+      # 落ちる**。pyarrow は 48 MB のホイールを引くので、版が勝手に動くと Vercel の
+      # 関数の大きさにも効く（PR D）
+      - name: 依存を入れる（uv.lock どおり）
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: ruff（lint）
         run: uv run ruff check .

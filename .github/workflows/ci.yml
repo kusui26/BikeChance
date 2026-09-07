@@ -90,6 +90,18 @@ jobs:
           fi
           echo "OK: 検出なし"
 
+      - name: ml サービスの外向き通信が io/ に閉じているか
+        # apps/ml も同じ規律に入れる。ここは ODPT のトークンを扱わないが、
+        # 「外向きの通信を一望できる状態を保つ」意味は同じで、副作用を io/ に集める
+        # 規約（CLAUDE.md §3）を機械で守れる。Supabase のキーはヘッダにだけ載せる。
+        run: |
+          if git grep -nIE '(^|[^A-Za-z0-9_.])httpx\.' \
+              -- 'apps/ml/bikechance_ml' ':!apps/ml/bikechance_ml/io'; then
+            echo "::error::外向きの通信は apps/ml/bikechance_ml/io/ の中だけで行ってください"
+            exit 1
+          fi
+          echo "OK: 検出なし"
+
       - name: ODPT のトークンが天気の取得に混ざっていないか
         # weather-fetch.ts を fetch の例外にしたぶん、そこにトークンが流れ込まないことを
         # 別に確かめる。Open-Meteo にキーは要らないので、参照があれば設計の誤り。

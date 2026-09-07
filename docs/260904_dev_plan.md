@@ -1026,7 +1026,7 @@ LSTM / Transformer / GNN は、以下を **すべて** 満たした時点で検�
 |---|---|
 | 配置 | Vercel プロジェクト内の **サービス `ml`**（`apps/ml`、FastAPI、Python 3.12）。`vercel.json` の `services` に `root: "apps/ml"`, `entrypoint: "bikechance_ml.api:app"`。公開ルートは `rewrites` で `/ml/(.*)` を `ml` サービスへ |
 | 依存 | `pyproject.toml` ＋ `uv.lock`（Vercel は uv をゼロ設定で使う）。LightGBM・numpy・polars・psycopg・boto3（S3 互換 API）。バンドルは約 200 MB（上限 500 MB） |
-| 実行環境 | Fluid compute、Standard（2 GB / 1 vCPU）。`functions` で `apps/ml/bikechance_ml/api.py` に `maxDuration: 300`。バイトコード事前コンパイルでコールドスタートは 1〜2 秒 |
+| 実行環境 | Fluid compute、Standard（2 GB / 1 vCPU）。`services.ml.functions` の `**/*.py` に `maxDuration`（W2 は 120 秒）。バイトコード事前コンパイルでコールドスタートは 1〜2 秒 |
 | 起動 | Vercel Cron：`/ml/infer/hellocycling` を `4-59/5 * * * *`、`/ml/infer/docomo-cycle` を `1-59/5 * * * *`。`/ml/profiles`（長期モデル）を `30 * * * *`。認証は `CRON_SECRET` |
 | 冪等性・同時実行 | `inference_log` に unique (system_id, base_observed_at)。同じスナップショットに対する二重推論はスキップ。`pg_try_advisory_lock('infer:' || system)` で同時実行を抑止 |
 | ウォッチドッグ | pg_cron（5 分毎）：`station_forecasts` の max(generated_at) が 12 分より古ければ `net.http_post` で `/ml/infer/{system}` を起動 |
@@ -1263,19 +1263,22 @@ BikeChance/
 └─ .github/workflows/           # ci.yml（lint/typecheck/test）、retrain.yml（週次）、drive-mirror.yml（週次）
 ```
 
-`vercel.json` の骨子（**2026-09-08 にスキーマで確認して訂正**：`services.<name>` は `additionalProperties: false` で `functions` を受け付けない。`maxDuration` はトップレベルの `functions` に glob で書く。`framework` には `fastapi` プリセットがある。W2 プラン §12 の 54）：
+`vercel.json` の骨子（**2026-09-08 に公式スキーマと Services のドキュメントで確認**：`maxDuration` は `services.<name>.functions` に書く。glob は**サービスの root からの相対**で、Python なら `**/*.py`。Services を使うときは `functions` / `framework` / 各種コマンドをサービスの中へ移す、というのが公式の指示。`framework` には `fastapi` プリセットがある。W2 プラン §12 の 54・57）：
 
 ```json
 {
   "services": {
-    "web": { "root": "apps/web" },
-    "ml":  { "root": "apps/ml", "framework": "fastapi" }
+    "web": { "root": "apps/web", "framework": "nextjs" },
+    "ml":  {
+      "root": "apps/ml",
+      "framework": "fastapi",
+      "functions": { "**/*.py": { "maxDuration": 300 } }
+    }
   },
   "rewrites": [
     { "source": "/ml/(.*)", "destination": { "service": "ml" } },
     { "source": "/(.*)",    "destination": { "service": "web" } }
   ],
-  "functions": { "apps/ml/**": { "maxDuration": 300 } },
   "crons": [
     { "path": "/api/jobs/collect/hellocycling",  "schedule": "* * * * *" },
     { "path": "/api/jobs/collect/docomo-cycle",  "schedule": "* * * * *" },
