@@ -372,17 +372,39 @@ apps/web/vercel-rewrites.test.ts  # rewrites の順序を固定する
 
 **目的**：Postgres の 60 日保持から独立した、学習用のアーカイブを作り始める。
 
-**変更ファイル**
+**変更ファイル**（実装後に確定した構成）
 
 ```
-supabase/migrations/<ts>_0016_parquet_bucket.sql   # gbfs-parquet バケット
-apps/ml/bikechance_ml/jobs/compact.py              # 前 1 時間 → Parquet
-apps/ml/bikechance_ml/storage.py                   # Storage への読み書き（S3 互換 or REST）
-apps/ml/bikechance_ml/db.py                        # Postgres からの読み出し
-apps/ml/bikechance_ml/main.py                      # /ml/compact を追加
-apps/ml/tests/test_compact.py
-vercel.json                                        # crons に 1 本追加（7 * * * *）
+supabase/migrations/20260907220043_0017_parquet_bucket.sql  # gbfs-parquet バケット（0016 は取得済み）
+apps/ml/bikechance_ml/jobs/snapshot_table.py       # 純粋：配列 → 長形式の表
+apps/ml/bikechance_ml/jobs/compact.py              # 手順：前 1 時間を畳む
+apps/ml/bikechance_ml/io/supabase.py               # 副作用：PostgREST と Storage
+apps/ml/bikechance_ml/json_shape.py                # 純粋：JSON の形の検査（型ガード）
+apps/ml/bikechance_ml/redact.py                    # 純粋：記録から秘密を落とす
+apps/ml/bikechance_ml/api.py                       # /ml/compact を追加
+apps/ml/tests/{test_compact,test_snapshot_table,test_supabase_io,test_json_shape}.py
+apps/ml/uv.lock                                    # PR C で見送った分（実依存が増えた）
+packages/shared/src/constants.ts                   # PARQUET_BUCKET / COMPACT_CRON / COMPACT_MAX_DURATION_S
+vercel.json                                        # crons に 1 本（7 * * * *）と services.ml.functions
 ```
+
+**`db.py` / `storage.py` に分けなかった理由**：入口はどちらも Supabase の REST で、認証も
+エラーの詰め替えも共通である。分けると同じヘッダ組み立てと `redact()` が 2 か所に増える。
+副作用を `io/` に閉じるという規約（CLAUDE.md §3）はファイル数ではなくディレクトリで守る。
+
+**`psycopg` を入れない**：Postgres は PostgREST 越しに読む。1 時間ぶんは 60 行に満たず
+（HELLO 12 ＋ ドコモ 45）、JSON の上乗せは 5 MB 程度で済む。直接接続を足すと経路が 2 本になり、
+依存も 30 MB 増える。**pyarrow を選んだのも実測が理由**で、polars 211 MB に対し pyarrow 139 MB
+だった（§10.5）。
+
+**アドバイザリロックを取らない**：PostgREST は 1 要求 1 トランザクションなので、
+`pg_try_advisory_xact_lock` を RPC 越しに取っても戻った時点で解放される。代わりに
+**構造で冪等にする** — 同じ時間帯は同じパスに写像し、内容ごと上書きする。二重起動は
+同じバイト列を 2 回書くだけで終わる。
+
+**`?hour=` で畳み直せる**：`GET /ml/compact?hour=2026-09-08T04:00:00Z`。再構築で過去の
+スナップショットを後から入れた場合や、取りこぼした時間帯の埋め戻しに使う。**正時でなければ
+400**、まだ終わっていない時間帯も 400（区間が重なった Parquet が同じパスに書かれるのを防ぐ）。
 
 **Parquet のスキーマ**（§9.2 に契約として置く）
 
@@ -399,6 +421,10 @@ vercel.json                                        # crons に 1 本追加（7 *
 - **配列長より外側の `idx` は行にしない**（当時まだ台帳に無いポート。行を作ると「観測されなかった」と区別できなくなる）
 
 **冪等性**：同じ時間帯を 2 回処理したら同じ内容を上書きする。`job_runs` に行数とバイト数を記録する。
+
+**観測が 0 件の時間帯にはファイルを作らない**：空のファイルを置くと「収集していない」と
+「畳んでいない」を見分けられなくなる。`job_runs.detail.n_empty` に数だけ残す。収集の欠落は
+`monitor_feeds` が別途通知するので、ここで二重に鳴らさない。
 
 **完了条件**
 
@@ -567,12 +593,31 @@ node scripts/reconcile-snapshot.mjs .env docomo-cycle  <再構築した observed
 ### 7.4 Parquet
 
 ```sql
+-- 1 時間ごとの結果（行数・バイト数・所要）。job_runs から見るのがいちばん早い
+select started_at, status,
+       detail->>'hour_start' as 時間帯,
+       detail->>'n_rows'     as 行数,
+       detail->>'bytes'      as バイト,
+       detail->>'duration_ms' as 所要ms,
+       detail->>'n_empty'    as 空
+  from public.job_runs
+ where job_name = 'compact_parquet'
+ order by started_at desc limit 10;
+
 -- 1 日分の合計サイズ（見込み 5〜10 MB、合格 20 MB 以下）
 select sum((metadata->>'size')::bigint) from storage.objects
  where bucket_id = 'gbfs-parquet' and name like '%date=2026-09-10%';
 ```
 
-冪等性は、同じ時間帯を 2 回処理して行の集合が一致することで見る。Parquet はメタデータに書き込み時刻が入るのでバイト単位では一致しないことがある。**行の集合で判定する。**
+冪等性は、**同じ時間帯を明示して 2 回目を走らせ**、行の集合が一致することで見る。
+
+```bash
+# 同じ時間帯をもう一度畳む（?hour= は正時・タイムゾーン必須）
+curl -sS -H "Authorization: Bearer ${CRON_SECRET}" \
+  "https://<本番>/ml/compact?hour=2026-09-10T04:00:00Z" | jq '{n_rows, bytes, systems}'
+```
+
+Parquet はメタデータに書き込み時刻が入るのでバイト単位では一致しないことがある。**行の集合で判定する。**
 
 **合格ライン**：1 時間分が約 44 万行、1 日 20 MB 以下、2 回目の実行で行の集合が同一。
 
@@ -655,6 +700,8 @@ gbfs-parquet/{system}/date=YYYY-MM-DD/hour=HH/part.parquet     ← 日時は UTC
 
 - ソート：`station_id, observed_at`。圧縮：zstd
 - **配列長より外側の `idx`（当時まだ台帳に無いポート）は行にしない。** 行を作ると `-1`（登録済みだが未出現）と区別できなくなる
+- **観測が 1 件も無い時間帯にはファイルを置かない。** 空のファイルは「収集していない」と「畳んでいない」を混同させる。読む側は「そのパスが無い＝その時間の観測が無い」と解釈してよい
+- 同じ時間帯は同じパスに写像し、内容ごと上書きする。**後から再構築で行が増えたら `?hour=` で畳み直す**（§5.6）
 
 ### 9.3 再構築の手順
 
@@ -787,6 +834,44 @@ DB は 60 MB。ジョブ失敗 0・取得エラー 0・異常スナップショ�
 | `vercel.json` の `rewrites` | `/(.*)` → `web` の 1 本のみ。`services` は `web` だけ |
 | `/v1/meta` | 本番で 200。ただし **DB 未接続で `stale: true` を返す** |
 
+### 10.5 PR D の実測（2026-09-08）
+
+**依存の大きさ**（macOS arm64 の仮想環境で `du -sh`）
+
+| 組み合わせ | 大きさ | 判断 |
+|---|---|---|
+| `fastapi` のみ | 26 MB | PR C の状態 |
+| ＋ `httpx` | 28 MB | Supabase の REST を叩くのに要る |
+| ＋ `pyarrow` | **133 MB**（うち pyarrow 123 MB） | Parquet の読み書き。Linux のホイールは 48 MB 圧縮 |
+| `polars` を選んだ場合 | 211 MB | **pyarrow より大きい**（予想と逆だった） |
+| 開発用まで入れた場合 | 235 MB | CI だけ。本番の関数には入らない |
+
+Vercel の Python 関数の上限は 500 MB（開発プラン §4.1）。**133 MB は余裕がある**が、
+`lightgbm` と `numpy` が乗る W6 で再測する。
+
+**ローカルでの一気通し**（`supabase start` に対して実際に PostgREST と Storage を叩いた）
+
+| 確かめたこと | 結果 |
+|---|---|
+| 半開区間のクエリ（`and=(...)`）| 期待どおり 1 時間ぶんだけ返る |
+| 配列 → 長形式 | 2 スナップショット × 2 ポート ＝ 4 行 |
+| `-1` の扱い | そのまま残る（`n_missing` に 2 と記録された） |
+| 観測 0 件のシステム | ファイルを作らず `n_empty: 1` |
+| Storage への書き込み | `hellocycling/date=.../hour=21/part.parquet`、2,228 バイト |
+| 読み返したスキーマ | 契約（§9.2）と一致。7 列・型も一致 |
+| 2 回目の実行 | 同じパスに上書きされ、**行の集合が完全に一致** |
+| `job_runs` | `compact_parquet` が `ok` で 2 行。`detail.n_rows` は 4 |
+
+**PostgREST の挙動**（同じ列に 2 条件）
+
+| 書き方 | 結果 |
+|---|---|
+| `expected_cadence_s=gte.80&expected_cadence_s=lt.100` | 1 行（AND として解釈される） |
+| `and=(expected_cadence_s.gte.80,expected_cadence_s.lt.100)` | 1 行（同じ） |
+
+どちらでも動く。**`and=(...)` を選んだのは Python 側の `dict` に同じキーを 2 つ置けないため**で、
+両端を 1 つの値にまとめておけば片方だけ書き換える事故が起きない（§12 の 58）。
+
 ## 11. この文書の更新方針
 
 W1 プランと同じ運用にする。
@@ -809,9 +894,14 @@ W1 の 46 番から続けて採番する。
 | 51 | 中 | **再構築したスナップショットの配列長は「再構築した時点の台帳」で決まる。時系列で単調に増えるとは限らない。** 実測：再構築した 15:51〜18:39 JST の行は配列長 14,922（現在の台帳）だが、当時そのまま取り込まれた 18:41 以降の行は 14,835 から始まる。**最も古い行が最も長い配列を持つ**という逆転が起きた。開発プラン §6.7 の「古いスナップショットの配列は短い」という記述は、再構築を挟むと成り立たない | 実害は無い（増えた枠は `-1` ＝「観測されなかった」で、学習の除外規則は `-1` も `idx ≥ array_length` も同じく落とす）。ただし**「古い＝短い」という前提でローダーを書くと壊れる**ので、比較は必ず**その行の `array_length`** に対して行う。開発プラン §6.7 の記述を訂正した | 開発プラン §6.7 |
 | 52 | 中 | **性能テストが壁時計で測っていて、並列実行のたびに落ちるようになった。** 単独なら 50 ms のものが、3 プロジェクトを並列に走らせると 233 ms になり、実装を変えていないのに 150 ms の上限を超えた。CPU 時間に変えても 160 ms で、メモリ帯域の取り合いは避けられない。**閾値を上げれば通るが、それでは何を守っているのか分からなくなる** | `JSON.parse` だけの時間を同じ実行の中で測り、**その何倍か**で判定する。マシンの速さも負荷も両方に等しく効くので比は安定する。実測で単独 1.92 倍・並列でも通過。守りたいのは「パースの上に載せた処理が不相応に重くないか」であって、マシンの速さではない | `perf.test.ts` |
 | 53 | 軽微 | `tsx` を入れるだけでは動かない。依存の `esbuild` が導入時にプラットフォーム別のバイナリを置く必要があり、pnpm は既定でビルドを保留する。またルートの `package.json` がワークスペースのパッケージに依存していないため、`scripts/` から `@bikechance/gbfs-core` を解決できない | `pnpm-workspace.yaml` の `allowBuilds` で `esbuild: true` を明示し、ルートの devDependencies に 2 つのワークスペースパッケージと `@types/node` を足す。あわせて `scripts/**/*.ts` を lint と typecheck の対象に入れた（`tsconfig.scripts.json`）。**入れただけでは CI に載らない** | `pnpm-workspace.yaml`、`package.json`、`tsconfig.scripts.json`、`eslint.config.mjs` |
-| 54 | 中 | **開発プラン §12.1 の `services.ml.functions` は `vercel.json` のスキーマに無い項目だった。** スキーマ上 `services.<name>` に置けるのは `root` / `framework` / `runtime` / `entrypoint` / 各種コマンド / `bindings` だけで、`additionalProperties: false` なので**書けば検証で弾かれる**。`maxDuration` はトップレベルの `functions` に glob で指定する | PR C は `maxDuration` が要らないので入れない。実処理が入る PR D で、トップレベルの `functions` に `apps/ml/**` の形で指定する。開発プランの骨子も直す | 開発プラン §12.1 |
+| 54 | 中 | **開発プラン §12.1 の `services.ml.functions` を「スキーマに無い」と判断したが、これは誤りだった**（PR D で訂正。57 番を見よ）。PR C の時点で参照したスキーマに `functions` が見当たらず、`additionalProperties: false` から「書けば弾かれる」と結論した | PR C は `maxDuration` を必要としなかったため実害は無かった。PR D で公式スキーマとドキュメントを取り直し、`services.<name>.functions` に書く形に直した | 開発プラン §12.1 |
 | 55 | 軽微 | **ruff の `RUF002` / `RUF003` は日本語の約物をすべて誤検知する**（初回で 16 件）。全角括弧はコメントと docstring を日本語で書く限り必ず出る | ルールごと切らずに、実際に使う約物だけを `allowed-confusables` で許可する。**表意文字空白（U+3000）は入れない**。目に見えない空白は本当に事故のもとなので、検出され続けてほしい | `apps/ml/pyproject.toml` |
 | 56 | 軽微 | `eslint` と `prettier` が `apps/ml/.venv` の中に vendor された `.js` を拾って落ちた。`.gitignore` には入っているが、**どちらも `.gitignore` を見ない** | eslint の `ignores` と `.prettierignore` の両方に `.venv` を足す。Python のディレクトリが増えるたびに同じことが起きるので、`**/.venv/**` の形で書く | `eslint.config.mjs`、`.prettierignore` |
+| 57 | **中** | **54 番の訂正。`maxDuration` は `services.<name>.functions` に書くのが正しい。** 公式スキーマ（`openapi.vercel.sh/vercel.json`、2026-09-08 取得）の `services.additionalProperties.properties` に `functions` があり、ドキュメントも「Services を使うときは `functions` / `installCommand` / `buildCommand` / `framework` などを該当サービスへ移す」と明示している。**glob はサービスの root からの相対**なので、`apps/ml/**` ではなく `**/*.py` と書く | `vercel.json` を `services.ml.functions` の形にし、`vercel-crons.test.ts` に「glob が `**/*.py` である」「`maxDuration` が共有定数と一致する」の 2 つを固定した。**Python には route segment config が無く、`maxDuration` の指定はここだけ**なので、黙って外れると気づけない | `vercel.json`、`vercel-crons.test.ts`、開発プラン §12.1 |
+| 58 | 中 | **同じ列に 2 つの条件を掛けるとき、`params` を `dict` で組むと片方が黙って消える。** PostgREST 自体は同じキーの繰り返し（`observed_at=gte.X&observed_at=lt.Y`）を AND として解釈する（ローカルで実測。`and=(...)` と同じ結果になった）。落とし穴は Python 側で、`Mapping[str, str]` は同じキーを 2 つ持てない。片方だけになると**半開区間のつもりが「その時刻以降すべて」になり、1 時間ぶんのはずが全期間を読む** — 落ちずに動き続ける壊れ方 | `and=(observed_at.gte.X,observed_at.lt.Y)` の 1 キーにまとめ、**両端が必ず一緒に動く**ようにする。`MockTransport` のテストで、送り出すクエリの文字列そのものを固定した。あわせて**ローカルの Supabase に実際に投げて**構文を確かめた（モックでは構文の誤りが出ない。§10.5） | `io/supabase.py`、`test_supabase_io.py` |
+| 59 | 軽微 | **`pyarrow` は型情報（`py.typed`）を配布していない**（実測：25.0.1 に `py.typed` も `.pyi` も無い）。`mypy --strict` が `import-untyped` で落ちる | 第三者スタブ（`pyarrow-stubs`）は依存が増えるので入れず、**`pyarrow.*` に限って** `ignore_missing_imports` を許す。境界の型はこちらで持つ（`SCHEMA` が列と型の契約、`Snapshot` / `StationRow` が入力の型）ので、失われるのは pyarrow の内部だけ | `apps/ml/pyproject.toml` |
+| 60 | 軽微 | **ruff の `ARG` は「テストの代役」と相性が悪い。** `FakePort` は本物と同じ引数を取らなければ `Protocol` を満たせず、使わない引数が必ず残る（12 件） | `tests/*` に限って `ARG001` / `ARG002` / `ARG005` を許す。代役の署名を歪めるほうが害が大きい。**本体側では有効なまま**にして、未使用引数は検出し続ける | `apps/ml/pyproject.toml` |
+| 61 | 軽微 | Parquet のバイト列を作るのに `pa.BufferOutputStream().getvalue().to_pybytes()` を使うと、mypy が `Any` を返すと言って落ちる（`warn_return_any`） | `bytes(buffer)` にする。`pa.Buffer` はバッファプロトコルを実装しているので、標準の `bytes()` で写せて型も付く | `jobs/snapshot_table.py` |
 
 **実装で足したもの**（§5.3 の変更ファイル一覧に対する差分）
 
@@ -821,3 +911,14 @@ W1 の 46 番から続けて採番する。
 | `apps/web/lib/jobs/storage.ts`（変更） | `createSupabaseUploader` にバケットを引数で渡せるようにした。既定は `gbfs-raw` なので収集側は変わらない |
 | `.github/workflows/ci.yml`（変更） | `fetch` の閉じ込めガードに `weather-fetch.ts` を追加。**そのぶん「weather-fetch.ts にトークンが混ざらない」検査を新設**して、緩めた分を埋めた |
 | `supabase/tests/0009_weather_grid.sql` | 格子の丸めと除外（`geo_suspect`・閉じた属性行）を固定する |
+
+**PR D で足したもの**（§5.6 の変更ファイル一覧に対する差分）
+
+| ファイル | 理由 |
+|---|---|
+| `apps/ml/bikechance_ml/json_shape.py` | PostgREST の応答を `object` で受けてから型を付ける。TypeScript 側の型ガードと同じ役割で、`as` 相当の思い込みを禁じる（CLAUDE.md §3） |
+| `apps/ml/bikechance_ml/redact.py` | 例外の文言から秘密を落とす。**httpx の例外は要求 URL を抱えている**ので、記録する文字列は必ずここを通す |
+| `apps/ml/bikechance_ml/auth.py`・`config.py` | PR C で作ったが未使用だったものを、ここで初めて実際に使う |
+| `apps/ml/tests/test_supabase_io.py` | `httpx.MockTransport` で「鍵が URL に載らない」「例外に秘密が残らない」「ページ送りが最後まで回る」を固定する |
+| `.github/workflows/ci.yml`（変更） | **外向きの通信が `apps/ml/bikechance_ml/io/` に閉じている**ことの検査を追加。web 側の `fetch` 閉じ込めと同じ規律を Python にも掛ける |
+| `.github/workflows/python.yml`（変更） | `uv pip install -e '.[dev]'` から `uv sync --frozen` に変更。**pyproject と `uv.lock` が食い違ったら落ちる**ようにした |

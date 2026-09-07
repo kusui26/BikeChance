@@ -8,7 +8,12 @@
     },
     "ml": {
       "root": "apps/ml",
-      "framework": "fastapi"
+      "framework": "fastapi",
+      "functions": {
+        "**/*.py": {
+          "maxDuration": 120
+        }
+      }
     }
   },
   "rewrites": [
@@ -45,6 +50,10 @@
     {
       "path": "/api/jobs/archive-weather",
       "schedule": "17 * * * *"
+    },
+    {
+      "path": "/ml/compact",
+      "schedule": "7 * * * *"
     }
   ]
 }

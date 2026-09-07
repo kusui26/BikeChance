@@ -190,3 +190,30 @@ export const ARCHIVE_WEATHER_MAX_DURATION_S = 120;
  * Parquet 化（毎時 7 分）と時刻の先頭を避け、重い処理が同時に走らないようにする。
  */
 export const ARCHIVE_WEATHER_CRON = "17 * * * *";
+
+/**
+ * 毎時 Parquet 化の設定（W2 プラン §5.6、§9.2）。
+ *
+ * 実体は Python（`apps/ml`）にあり、この定数を import できない。値は
+ * `apps/ml/bikechance_ml/io/supabase.py` と `supabase/migrations/..._0017_parquet_bucket.sql`
+ * にも書かれている。**食い違いは `vercel-crons.test.ts` と本番の 404 で気づく**ので、
+ * ここは「TypeScript 側から見た正」を置く場所として使う。
+ */
+
+/** 学習用 Parquet を置く Storage バケット。非公開で、サービスロールからのみ読み書きする。 */
+export const PARQUET_BUCKET = "gbfs-parquet";
+
+/**
+ * Parquet 化の Cron（UTC）。毎時 7 分。
+ *
+ * 前 1 時間を畳むので、その時間帯の観測がすべて入り終わってから動かす必要がある。
+ * ドコモの停滞閾値（W1-42）が最大 4 分強なので、7 分あれば取りこぼさない。
+ * 天気アーカイブ（17 分）と時刻をずらし、重い処理を同時に走らせない。
+ */
+export const COMPACT_CRON = "7 * * * *";
+
+/**
+ * Parquet 化の最大実行時間（秒）。`vercel.json` の services.ml.functions に渡す。
+ * 見込みは 1 回 10 秒未満（44 万行）。ネットワークの揺れを見込んで 120 秒とる。
+ */
+export const COMPACT_MAX_DURATION_S = 120;
