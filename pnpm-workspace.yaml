@@ -1,5 +1,10 @@
 packages:
   - "apps/*"
   - "packages/*"
+# tsx（再構築スクリプトの TypeScript 実行系）が使う esbuild は、導入時に
+# プラットフォーム別のバイナリを配置する必要がある。pnpm は既定でビルドを保留するので
+# ここで明示的に許可する。dev 専用で、本番の成果物には入らない。
+allowBuilds:
+  esbuild: true
 minimumReleaseAgeExclude:
   - eslint@10.10.0
