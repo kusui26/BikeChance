@@ -61,7 +61,9 @@ export const SYSTEMS: Readonly<Record<SystemId, SystemDefinition>> = {
     operator_name_ascii: "DOCOMO BIKESHARE, INC.",
     dataset_name: "ドコモ・バイクシェア バイクシェア関連情報",
     license_url: "https://creativecommons.org/licenses/by/4.0/deed.ja",
-    expected_cadence_s: 80,
+    // 24 時間の実測で 1,068 回公開（86,400 ÷ 1,068 ＝ 80.9 秒）。中央値は 80 秒だが、
+    // 1 周期とばす回が 16 回あり平均は 81 秒になる（W1 プラン §5.6 の 43）
+    expected_cadence_s: 81,
     poll_interval_s: 60,
   },
 };

@@ -139,7 +139,7 @@ select is(
 );
 select is(
   (select expected_cadence_s from public.systems where system_id = 'docomo-cycle'),
-  80, 'ドコモの期待周期は 80 秒'
+  81, 'ドコモの期待周期は 81 秒（24 時間の実測 86400÷1068。0013 で 80 から訂正）'
 );
 select is(
   (select count(distinct lock_key)::int from public.systems), 2, 'lock_key が重複していない'
