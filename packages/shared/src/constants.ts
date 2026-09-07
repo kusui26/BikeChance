@@ -105,3 +105,12 @@ export const USER_AGENT_PRODUCT = "BikeChance/0.1";
 
 /** 収集ジョブの最大実行時間（秒）。Vercel の maxDuration に渡す。 */
 export const COLLECT_MAX_DURATION_S = 60;
+
+/**
+ * 属性同期ジョブの最大実行時間（秒）。収集より長くとる。
+ * station_information は HELLO で 7.8 MB あり、取得・展開・14,900 件の比較を 1 回で行うため。
+ */
+export const SYNC_STATIONS_MAX_DURATION_S = 120;
+
+/** 属性同期の Cron（UTC）。04:00 JST。収集の毎分と重ならない時刻に置く。 */
+export const SYNC_STATIONS_CRON = "0 19 * * *";

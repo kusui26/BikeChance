@@ -9,9 +9,10 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { SYSTEMS, SYSTEM_IDS } from "@bikechance/shared";
+import { SYNC_STATIONS_CRON, SYSTEMS, SYSTEM_IDS } from "@bikechance/shared";
 
 const COLLECT_PATH_PREFIX = "/api/jobs/collect/";
+const SYNC_PATH_PREFIX = "/api/jobs/sync-stations/";
 
 type CronEntry = {
   readonly path: string;
@@ -33,15 +34,17 @@ const everyNMinutes = (interval_s: number): string => {
   return minutes === 1 ? "* * * * *" : `*/${minutes} * * * *`;
 };
 
-const readCollectCrons = (): readonly CronEntry[] => {
+const readCrons = (prefix: string): readonly CronEntry[] => {
   const file = fileURLToPath(new URL("../../vercel.json", import.meta.url));
   const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
   if (!isRecord(parsed) || !Array.isArray(parsed["crons"])) {
     throw new Error("vercel.json に crons の配列がありません");
   }
   const entries: readonly unknown[] = parsed["crons"];
-  return entries.filter(isCronEntry).filter((cron) => cron.path.startsWith(COLLECT_PATH_PREFIX));
+  return entries.filter(isCronEntry).filter((cron) => cron.path.startsWith(prefix));
 };
+
+const readCollectCrons = (): readonly CronEntry[] => readCrons(COLLECT_PATH_PREFIX);
 
 describe("vercel.json の収集 Cron", () => {
   it("システムごとにちょうど 1 本ある", () => {
@@ -65,5 +68,27 @@ describe("vercel.json の収集 Cron", () => {
     expect(everyNMinutes(60)).toBe("* * * * *");
     expect(everyNMinutes(300)).toBe("*/5 * * * *");
     expect(() => everyNMinutes(30)).toThrow();
+  });
+});
+
+describe("vercel.json の属性同期 Cron", () => {
+  it("システムごとにちょうど 1 本ある", () => {
+    const paths = readCrons(SYNC_PATH_PREFIX).map((cron) => cron.path);
+    expect([...paths].sort()).toEqual(
+      [...SYSTEM_IDS].map((id) => `${SYNC_PATH_PREFIX}${id}`).sort(),
+    );
+  });
+
+  it("スケジュールが共有定数と一致する（04:00 JST ＝ 19:00 UTC）", () => {
+    for (const cron of readCrons(SYNC_PATH_PREFIX)) {
+      expect(cron.schedule).toBe(SYNC_STATIONS_CRON);
+    }
+  });
+
+  it("収集の毎分と時刻が重ならない", () => {
+    // 毎分の収集が走っている最中に 7.8 MB の同期を始めると、
+    // ODPT への同時要求と Vercel の同時実行が重なる。分をずらしておく
+    const minutes = readCrons(SYNC_PATH_PREFIX).map((cron) => cron.schedule.split(" ")[0]);
+    expect(minutes.every((minute) => minute !== "*")).toBe(true);
   });
 });
