@@ -5,7 +5,7 @@
 -- 到達の確認は本番での強制発火で行う。
 
 begin;
-select plan(50);
+select plan(52);
 
 -- テストはトランザクション内で完結し rollback するので、ここでの削除は外に影響しない
 delete from public.station_status_latest;
@@ -138,18 +138,23 @@ update public.feed_state set last_fetch_at = null;
 -- ────────────────────────────────────────────────────────────────
 -- monitor_feeds：E1 の間はドコモの停滞で誤報を出さない（W1-29 の要）
 -- ────────────────────────────────────────────────────────────────
--- ドコモの期待周期は 80 秒なので素朴な閾値は 4 分。しかし収集が 5 分間隔の E1 では
--- 必ず超えてしまう。閾値を収集周期の 3 倍で下支えすると、手で無効化しなくても消える
+-- 閾値は `max(期待周期 × 3, 収集周期 × 3) + 収集周期`（W1-29 と §5.6 の 42）。
+-- 最後の項は「公開されたものを取りに行くまでの時間」で、これが無いと構造的に足りない。
+-- 収集周期の 3 倍で下支えするのは、E1 でドコモの誤報を防ぐため
 update public.app_config set value = '300' where key = 'collect_interval_s';
 update public.feed_state set last_observed_at = now() - interval '6 minutes';
 select is(public.monitor_feeds(), 0, 'E1（収集 300 秒）では 6 分前の観測でも誤報を出さない');
 select is(pg_temp.alerts(), 'k1,k2', '停滞の通知は増えていない');
 
-update public.feed_state set last_observed_at = now() - interval '20 minutes';
-select is(public.monitor_feeds(), 2, 'E1 でも 20 分の停滞は両システムとも検知する');
+update public.feed_state set last_observed_at = now() - interval '25 minutes';
+select is(public.monitor_feeds(), 2, 'E1 でも 25 分の停滞は両システムとも検知する');
 select ok(
   (select count(*)::int from public.alert_state where alert_key like 'feed_stalled:%') = 2,
   '両システムの停滞が記録された'
+);
+select is(
+  (select last_value->>'threshold_s' from public.alert_state where alert_key = 'feed_stalled:docomo-cycle'),
+  '1200', 'E1 の閾値は max(81×3, 300×3) + 300 = 1,200 秒'
 );
 
 -- 収集周期を毎分に変えると、ドコモの閾値が 4 分に戻る
@@ -167,7 +172,11 @@ select is(
 );
 select is(
   (select count(*)::int from public.alert_state where alert_key = 'feed_stalled:hellocycling'),
-  0, 'HELLO は 6 分では停滞としない（期待周期 300 秒 × 3）'
+  0, 'HELLO は 6 分では停滞としない（閾値 960 秒）'
+);
+select is(
+  (select last_value->>'threshold_s' from public.alert_state where alert_key = 'feed_stalled:docomo-cycle'),
+  '303', 'E2 のドコモの閾値は max(81×3, 60×3) + 60 = 303 秒（実測の最遅 244 秒に 24% の余裕）'
 );
 update public.app_config set value = '60' where key = 'collect_interval_s';
 
@@ -280,7 +289,7 @@ select is(
 select is(
   (select n_expected from public.daily_quality
     where system_id = 'docomo-cycle' and quality_date = '2026-09-06'),
-  1080, '期待値は 86400 / expected_cadence_s（ドコモは 1,080）'
+  1066, '期待値は 86400 / expected_cadence_s（ドコモは 81 秒なので 1,066）'
 );
 
 select * from finish();

@@ -6,6 +6,8 @@
 --                           -v baseline_bytes=22000000 -f scripts/verify-m1.sql
 --
 --   from_at        判定する窓の開始。省略すると「今から 24 時間前」
+--   to_at          判定する窓の終わり。省略すると「今」。**記録に残す判定では必ず渡す**
+--                  （省略すると実行のたびに窓が伸び、同じ数字が二度と出ない）
 --   baseline_bytes 窓の開始時点の pg_database_size。渡すと DB 増分を判定する
 --
 -- **時刻の基準を混ぜないこと。** スナップショットの件数は `observed_at`（フィードの
@@ -20,6 +22,10 @@
 \else
   \set from_at ''
 \endif
+\if :{?to_at}
+\else
+  \set to_at ''
+\endif
 \if :{?baseline_bytes}
 \else
   \set baseline_bytes ''
@@ -30,7 +36,7 @@
 
 with w as (
   select coalesce(nullif(:'from_at', '')::timestamptz, now() - interval '24 hours') as from_at,
-         now() as to_at,
+         coalesce(nullif(:'to_at', '')::timestamptz, now()) as to_at,
          nullif(:'baseline_bytes', '')::bigint as baseline_bytes
 ),
 -- 件数と欠損は観測時刻で見る（フィードが何回更新されたか）
@@ -54,9 +60,17 @@ objects as (
    group by 1
 ),
 fetches as (
-  select f.ok, f.result
+  select f.system_id, f.fetched_at, f.ok, f.result
     from public.feed_fetch_log f, w
    where f.fetched_at >= w.from_at and f.fetched_at < w.to_at
+),
+-- **取りこぼしはここで見る。** 取得数の期待値は提供側の公開回数に依存するが、
+-- 「我々が毎分叩けていたか」は我々の責任範囲だけで判定できる（§5.6 の 43）
+poll_gaps as (
+  select system_id,
+         extract(epoch from (fetched_at - lag(fetched_at)
+                 over (partition by system_id order by fetched_at)))::int as gap_s
+    from fetches
 ),
 gaps as (
   select system_id,
@@ -75,6 +89,8 @@ counted as (
     (select count(*) filter (where not ok) from fetches) as errors,
     (select count(*) from objects o full join snap_fetched s using (system_id)
       where coalesce(o.n, -1) <> coalesce(s.n, -1)) as storage_mismatch,
+    (select coalesce(max(gap_s), 0) from poll_gaps) as max_poll_gap_s,
+    public.config_int('collect_interval_s', 60) as poll_interval_s,
     (select coalesce(string_agg(coalesce(o.system_id, s.system_id) || ' '
                                 || coalesce(o.n, 0) || '/' || coalesce(s.n, 0), '、'
                                 order by coalesce(o.system_id, s.system_id)), '対象なし')
@@ -86,8 +102,8 @@ verdict as (
          hello_n || ' 件' as 実測, '≥ 287 件' as 合格ライン,
          case when hello_n >= 287 then 'PASS' else 'FAIL' end as 判定 from counted
   union all
-  select 2, 'ドコモのスナップショット取得数', docomo_n || ' 件', '≥ 1,074 件',
-         case when docomo_n >= 1074 then 'PASS' else 'FAIL' end from counted
+  select 2, 'ドコモのスナップショット取得数', docomo_n || ' 件', '≥ 1,061 件',
+         case when docomo_n >= 1061 then 'PASS' else 'FAIL' end from counted
   union all
   select 3, '連続欠損の最大長',
          to_char(max_gap, 'HH24:MI:SS'), '< 30 分',
@@ -122,6 +138,10 @@ verdict as (
   union all
   select 10, 'DEFAULT パーティションの行数', default_n || ' 行', '0 行',
          case when default_n = 0 then 'PASS' else 'FAIL' end from counted
+  union all
+  select 11, '収集の呼び出し間隔の最大（ポーリングの欠落）',
+         max_poll_gap_s || ' 秒', '< ' || (poll_interval_s * 3) || ' 秒',
+         case when max_poll_gap_s < poll_interval_s * 3 then 'PASS' else 'FAIL' end from counted
 )
 select ord as "#", 指標, 実測, 合格ライン, 判定 from verdict order by ord;
 
@@ -129,7 +149,7 @@ select ord as "#", 指標, 実測, 合格ライン, 判定 from verdict order by
 
 with w as (
   select coalesce(nullif(:'from_at', '')::timestamptz, now() - interval '24 hours') as from_at,
-         now() as to_at
+         coalesce(nullif(:'to_at', '')::timestamptz, now()) as to_at
 ),
 f as (
   select f.system_id, f.result, f.ok, f.source, f.duration_ms, f.bytes
