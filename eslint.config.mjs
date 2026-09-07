@@ -3,7 +3,16 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["**/node_modules/**", "**/.next/**", "**/dist/**", "**/coverage/**", "**/*.d.ts"],
+    ignores: [
+      "**/node_modules/**",
+      "**/.next/**",
+      "**/dist/**",
+      "**/coverage/**",
+      "**/*.d.ts",
+      // apps/ml の Python 仮想環境。中に vendor された .js があり、
+      // TypeScript の規約で測る対象ではない
+      "**/.venv/**",
+    ],
   },
   js.configs.recommended,
   {

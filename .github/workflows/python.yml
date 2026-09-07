@@ -1,0 +1,57 @@
+name: Python
+
+# apps/ml は Vercel Services の Python サービス（W2 の PR C）。
+# 既存の ci.yml に混ぜないのは、Python のセットアップが要るのは apps/ml が変わった
+# PR だけで、収集側の PR を毎回遅くする理由が無いため（sql-tests.yml と同じ方針）。
+# vercel.json を含めるのは、サービスの定義を変えたらここも通したいから。
+on:
+  pull_request:
+    paths:
+      - "apps/ml/**"
+      - ".github/workflows/python.yml"
+      - "vercel.json"
+
+concurrency:
+  group: python-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ml:
+    name: ruff / mypy / pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/ml
+    steps:
+      - uses: actions/checkout@v7
+
+      # CLAUDE.md §3 の Python ツールチェーンは uv。**サードパーティのアクションに
+      # 依存せず**、pip で uv を入れて uv 自身に Python を用意させる。
+      # 使うアクションを checkout だけにしておくと、バージョンの当たり外れで
+      # CI が壊れる面が減る。
+      - name: uv を入れる
+        run: pip install --upgrade uv
+
+      - name: Python 3.12 を用意する
+        run: |
+          uv python install 3.12
+          uv venv --python 3.12
+
+      # 依存の宣言は pyproject.toml の 1 箇所。ローカルで venv + pip を使っても同じ
+      # ものが入る。**ロックファイルはまだ置かない**（W2 の PR C の依存は fastapi
+      # 1 つで版の範囲も狭い）。実依存が増える PR D で uv.lock を入れる
+      - name: 依存を入れる
+        run: uv pip install -e '.[dev]'
+
+      - name: ruff（lint）
+        run: uv run ruff check .
+
+      - name: ruff（format）
+        run: uv run ruff format --check .
+
+      - name: mypy --strict
+        run: uv run mypy
+
+      - name: pytest
+        run: uv run pytest

@@ -5,9 +5,19 @@
     "web": {
       "root": "apps/web",
       "framework": "nextjs"
+    },
+    "ml": {
+      "root": "apps/ml",
+      "framework": "fastapi"
     }
   },
   "rewrites": [
+    {
+      "source": "/ml/(.*)",
+      "destination": {
+        "service": "ml"
+      }
+    },
     {
       "source": "/(.*)",
       "destination": {

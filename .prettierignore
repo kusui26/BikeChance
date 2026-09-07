@@ -6,3 +6,7 @@ pnpm-lock.yaml
 docs
 .claude
 *.md
+
+# apps/ml の Python 仮想環境
+.venv
+**/.venv/**
