@@ -9,10 +9,11 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { SYNC_STATIONS_CRON, SYSTEMS, SYSTEM_IDS } from "@bikechance/shared";
+import { ARCHIVE_WEATHER_CRON, SYNC_STATIONS_CRON, SYSTEMS, SYSTEM_IDS } from "@bikechance/shared";
 
 const COLLECT_PATH_PREFIX = "/api/jobs/collect/";
 const SYNC_PATH_PREFIX = "/api/jobs/sync-stations/";
+const WEATHER_PATH = "/api/jobs/archive-weather";
 
 type CronEntry = {
   readonly path: string;
@@ -90,5 +91,24 @@ describe("vercel.json の属性同期 Cron", () => {
     // ODPT への同時要求と Vercel の同時実行が重なる。分をずらしておく
     const minutes = readCrons(SYNC_PATH_PREFIX).map((cron) => cron.schedule.split(" ")[0]);
     expect(minutes.every((minute) => minute !== "*")).toBe(true);
+  });
+});
+
+describe("vercel.json の天気アーカイブ Cron", () => {
+  it("ちょうど 1 本ある", () => {
+    expect(readCrons(WEATHER_PATH)).toHaveLength(1);
+  });
+
+  it("スケジュールが共有定数と一致する", () => {
+    expect(readCrons(WEATHER_PATH)[0]?.schedule).toBe(ARCHIVE_WEATHER_CRON);
+  });
+
+  it("毎時の Parquet 化（7 分）と時刻の先頭を避ける", () => {
+    // 重い処理を同じ分に重ねない。収集は毎分なので避けようがないが、
+    // 分の先頭は保守ジョブが動く時間帯と重なりやすい
+    const minute = readCrons(WEATHER_PATH)[0]?.schedule.split(" ")[0];
+    expect(minute).not.toBe("*");
+    expect(minute).not.toBe("0");
+    expect(minute).not.toBe("7");
   });
 });

@@ -31,6 +31,10 @@
     {
       "path": "/api/jobs/sync-stations/docomo-cycle",
       "schedule": "0 19 * * *"
+    },
+    {
+      "path": "/api/jobs/archive-weather",
+      "schedule": "17 * * * *"
     }
   ]
 }

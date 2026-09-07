@@ -114,3 +114,79 @@ export const SYNC_STATIONS_MAX_DURATION_S = 120;
 
 /** 属性同期の Cron（UTC）。04:00 JST。収集の毎分と重ならない時刻に置く。 */
 export const SYNC_STATIONS_CRON = "0 19 * * *";
+
+/**
+ * 天気予報アーカイブの設定（W2 プラン §5.3、§9.1）。
+ *
+ * 学習で使うのは「その時刻に入手できた**予報**」で、過去に遡って観測できない。
+ * ここは**保存だけ**を担い、解釈（テーブル化・特徴量）は W4 で行う。
+ */
+
+/** Open-Meteo のライブ予報。アーカイブの本体はここから取る。 */
+export const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
+
+/**
+ * 取得するモデル。**2 つ要求する。**
+ *
+ * `jma_msm` は気象庁 MSM（約 5 km・1 時間値。開発プラン §6.4）で、日本の陸上では
+ * これが最も細かい。ただし**降水確率を返さない**（実測で `precipitation_probability`
+ * が全件 null）。§6.3 の `precip_prob_fcst` はこれだけでは作れない。
+ *
+ * `best_match` は Open-Meteo が地域ごとに選ぶ混合で、日本では決定論的な値が
+ * `jma_msm` と一致し（実測で降水量・気温がバイト単位で同値）、**降水確率だけが追加で入る**。
+ *
+ * 両方を保存すると応答は約 2 倍になるが、それでも 1 日 1 MB 前後。**後から遡って
+ * 足せない以上、迷ったら取る。** どちらを特徴量に使うかは W4 で決める。
+ */
+export const OPEN_METEO_MODELS = ["jma_msm", "best_match"] as const;
+
+/** アーカイブのパスに使う名前。モデルを増やしても保存先の規約は変えない。 */
+export const OPEN_METEO_MODEL = "jma_msm";
+
+/**
+ * 取得する変数。**後から遡って足せない**ので、§6.3 の天気特徴量に要るものを最初から全部取る。
+ * 複数モデルを要求すると、応答の系列名にモデル名の接尾辞が付く
+ * （`precipitation_jma_msm` / `precipitation_best_match`）。
+ */
+export const OPEN_METEO_HOURLY_VARIABLES = [
+  "precipitation",
+  "precipitation_probability",
+  "temperature_2m",
+  "wind_speed_10m",
+  "weather_code",
+] as const;
+
+/**
+ * 予報の期間（日）。短期モデルの水平は 3 時間だが、長期プロファイル（168 時間）と
+ * 「今日これから降るか」の表示に効く。実測で 100 地点 48 時間が 214 KB / 2.0 秒。
+ */
+export const OPEN_METEO_FORECAST_DAYS = 2;
+
+/**
+ * jma_msm の格子の刻み。要求した座標はこの格子に丸められて返る
+ * （実測：35.681 → 35.7、139.767 → 139.75）。**SQL 側にも同じ値を渡す**
+ * （`weather_grid_cells` の引数）ので、値の出どころはここ 1 箇所。
+ */
+export const WEATHER_GRID_LAT_STEP = 0.05;
+export const WEATHER_GRID_LON_STEP = 0.0625;
+
+/**
+ * 1 回の要求にまとめる格子の数。Open-Meteo は複数地点を配列で返す。
+ * 実測で 100 地点は HTTP 200・214 KB・2.0 秒。595 格子なら 6 要求で済む。
+ */
+export const WEATHER_BATCH_SIZE = 100;
+
+/** 1 要求のタイムアウト。6 要求を順に投げても maxDuration に収まる値。 */
+export const WEATHER_FETCH_TIMEOUT_MS = 15_000;
+
+/** 生の予報を置く Storage バケット。非公開で、サービスロールからのみ読み書きする。 */
+export const WEATHER_BUCKET = "weather-raw";
+
+/** 天気アーカイブジョブの最大実行時間（秒）。Vercel の maxDuration に渡す。 */
+export const ARCHIVE_WEATHER_MAX_DURATION_S = 120;
+
+/**
+ * 天気アーカイブの Cron（UTC）。毎時 17 分。
+ * Parquet 化（毎時 7 分）と時刻の先頭を避け、重い処理が同時に走らないようにする。
+ */
+export const ARCHIVE_WEATHER_CRON = "17 * * * *";

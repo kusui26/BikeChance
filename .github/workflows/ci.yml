@@ -69,15 +69,33 @@ jobs:
           fi
           echo "OK: 検出なし"
 
-      - name: ODPT への fetch が 1 箇所に閉じているか（W1-21）
+      - name: 外向きの fetch が指定のモジュールに閉じているか（W1-21）
         # 上の検査は res / response / resp という名前に依存するため、別名の変数はすり抜ける。
-        # 本質的な不変条件は「外向きの fetch を呼ぶのは odpt-fetch.ts だけ」であり、
+        # 本質的な不変条件は「外向きの fetch を呼ぶのは決めたモジュールだけ」で、
         # そこから Response を返さない限りトークン付き URL は外に出ない。こちらを機械で守る。
+        #
+        # 許すのは 2 つだけ。
+        #   odpt-fetch.ts    ODPT。トークンがクエリに載る（W1-21 の封じ込め対象）
+        #   weather-fetch.ts Open-Meteo。API キーが要らないため封じ込めるものは無いが、
+        #                    外向きの通信を一望できる状態を保つために同じ規律に入れる
+        # 3 つ目を足すときは、なぜそこから外へ出す必要があるかをこのコメントに書くこと。
         run: |
           if git grep -nIE '(^|[^A-Za-z0-9_$.])fetch\(' \
               -- 'apps/web/lib/jobs' 'apps/web/app/api' \
-                 ':!*.test.ts' ':!apps/web/lib/jobs/odpt-fetch.ts'; then
-            echo "::error::外向きの fetch は apps/web/lib/jobs/odpt-fetch.ts の中だけで呼んでください（W1-21）"
+                 ':!*.test.ts' \
+                 ':!apps/web/lib/jobs/odpt-fetch.ts' \
+                 ':!apps/web/lib/jobs/weather-fetch.ts'; then
+            echo "::error::外向きの fetch は odpt-fetch.ts / weather-fetch.ts の中だけで呼んでください（W1-21）"
+            exit 1
+          fi
+          echo "OK: 検出なし"
+
+      - name: ODPT のトークンが天気の取得に混ざっていないか
+        # weather-fetch.ts を fetch の例外にしたぶん、そこにトークンが流れ込まないことを
+        # 別に確かめる。Open-Meteo にキーは要らないので、参照があれば設計の誤り。
+        run: |
+          if git grep -nIE 'ODPT_ACCESS_TOKEN|acl:consumerKey|token' -- 'apps/web/lib/jobs/weather-fetch.ts'; then
+            echo "::error::weather-fetch.ts はトークンを扱いません。設計を見直してください"
             exit 1
           fi
           echo "OK: 検出なし"

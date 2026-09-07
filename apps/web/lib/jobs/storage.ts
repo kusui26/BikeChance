@@ -62,12 +62,18 @@ const isDuplicateError = (error: unknown): boolean =>
   readStatus(error, "statusCode") === DUPLICATE_STATUS_CODE ||
   readStatus(error, "status") === DUPLICATE_STATUS_CODE;
 
-/** 本番で使う実装。サービスロールのクライアントを 1 つの関数に包む。 */
+/**
+ * 本番で使う実装。サービスロールのクライアントを 1 つの関数に包む。
+ *
+ * バケットを引数にするのは、天気の生アーカイブ（W2 の PR A）が同じ規律
+ * （受信バイト列そのまま・`upsert: false`・重複は正常系）で別のバケットに書くため。
+ * 既定は GBFS の `gbfs-raw` で、収集側の呼び出しは変わらない。
+ */
 export const createSupabaseUploader =
-  (client: SupabaseClient): RawUploader =>
+  (client: SupabaseClient, bucket: string = RAW_BUCKET): RawUploader =>
   async ({ path, gzipped }) => {
     const { error } = await client.storage
-      .from(RAW_BUCKET)
+      .from(bucket)
       .upload(path, gzipped, { contentType: GZIP_CONTENT_TYPE, upsert: false });
     if (error === null) {
       return { duplicate: false };
