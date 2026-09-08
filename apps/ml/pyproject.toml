@@ -21,7 +21,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["ruff>=0.9", "mypy>=1.14", "pytest>=8.3"]
+# **numpy は dev にだけ置く**（W3-20。2026-09-08 に承認）。特徴量パイプライン（PR F）と
+# ベースライン（PR G）は手元・Colab・GitHub Actions でしか動かない。1 日 5,731 万ペアの
+# as-of とラベル付けを純 Python で回すと現実的な時間で終わらないが、Vercel の関数を
+# 太らせる理由も無い。本番依存にするかは段 8（/ml/infer）でサイズを実測してから決める。
+dev = ["ruff>=0.9", "mypy>=1.14", "pytest>=8.3", "numpy>=2.1,<3"]
 
 [build-system]
 requires = ["hatchling"]

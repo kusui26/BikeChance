@@ -11,6 +11,7 @@
 import io
 from datetime import UTC, datetime, timedelta, timezone
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -19,11 +20,14 @@ from bikechance_ml.jobs.snapshot_table import (
     SCHEMA,
     InconsistentLedgerError,
     InconsistentSnapshotError,
+    SchemaMismatchError,
     Snapshot,
     StationRow,
     count_missing,
+    has_current_schema,
     hour_window,
     parquet_path,
+    read_table,
     station_ids_by_idx,
     to_parquet_bytes,
     to_table,
@@ -224,3 +228,32 @@ def test_parquet_of_the_same_input_has_the_same_rows() -> None:
     first = pq.read_table(pa_buffer(to_parquet_bytes(to_table(SYSTEM, ["a", "b"], snapshots))))
     second = pq.read_table(pa_buffer(to_parquet_bytes(to_table(SYSTEM, ["a", "b"], snapshots))))
     assert first.to_pylist() == second.to_pylist()
+
+
+# ── 読む側の契約（W3 プラン §12 の 96）────────────────────────
+def test_read_table_rejects_a_file_with_missing_columns() -> None:
+    """**明示スキーマは「無い列を作る」ためのものではない。**
+
+    `pq.read_table(..., schema=SCHEMA)` は足りない列を黙って null で埋める。
+    `fetched_at` の無い古い形のファイルを読むと、as-of が全滅しているのに例外も
+    出ない。だから**ファイル自身の列**を先に確かめる。
+    """
+    old = pa.table(
+        {
+            name: pa.array([], type=SCHEMA.field(name).type)
+            for name in SCHEMA.names
+            if name != "fetched_at"
+        }
+    )
+    sink = pa.BufferOutputStream()
+    pq.write_table(old, sink)
+    body = bytes(sink.getvalue())
+    assert not has_current_schema(body)
+    with pytest.raises(SchemaMismatchError, match="契約と違う"):
+        read_table(body, "テスト")
+
+
+def test_read_table_accepts_the_current_schema() -> None:
+    body = to_parquet_bytes(SCHEMA.empty_table())
+    assert has_current_schema(body)
+    assert read_table(body, "テスト").schema == SCHEMA

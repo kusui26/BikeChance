@@ -44,6 +44,19 @@ def as_int(value: object, where: str) -> int:
     return value
 
 
+def as_float(value: object, where: str) -> float:
+    # bool は int の派生、int は float として通したい。**bool だけを弾く**
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ShapeError(f"{where}: 数を期待した")
+    return float(value)
+
+
+def as_bool(value: object, where: str) -> bool:
+    if not isinstance(value, bool):
+        raise ShapeError(f"{where}: 真偽値を期待した")
+    return value
+
+
 def as_int_list(value: object, where: str) -> list[int]:
     """整数の配列。`smallint[]` は要素に null を含まない（欠損は -1）。"""
     items = as_list(value, where)
