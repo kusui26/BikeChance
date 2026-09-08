@@ -31,6 +31,12 @@ SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("system_id", pa.string(), nullable=False),
         pa.field("station_id", pa.string(), nullable=False),
         pa.field("observed_at", pa.timestamp("ms", tz="UTC"), nullable=False),
+        # **as-of 結合はこの列で切る**（開発プラン §6.2、W3 プラン §9.1）。本番の推論が
+        # 使えるのは「取り込み済み」のものだけなので、`observed_at` で切ると、本番では
+        # まだ届いていないスナップショットで学習することになる（train/serve skew）。
+        # HELLO は公開遅延の中央値が 67 秒・最大 226 秒で、5 分グリッド点の約 24% が
+        # これに当たる
+        pa.field("fetched_at", pa.timestamp("ms", tz="UTC"), nullable=False),
         pa.field("bikes", pa.int16(), nullable=False),
         pa.field("docks", pa.int16(), nullable=False),
         pa.field("flags", pa.int16(), nullable=False),
@@ -57,9 +63,14 @@ class StationRow:
 
 @dataclass(frozen=True)
 class Snapshot:
-    """1 フィード更新ぶん。4 本の配列は同じ長さで、`idx` の順に並ぶ。"""
+    """1 フィード更新ぶん。4 本の配列は同じ長さで、`idx` の順に並ぶ。
+
+    `observed_at` はフィードが名乗る観測時刻、`fetched_at` は収集器が取り込みを
+    終えた時刻。**この 2 つは別物で、学習の as-of は後者で切る**（`SCHEMA` の注記）。
+    """
 
     observed_at: datetime
+    fetched_at: datetime
     bikes: Sequence[int]
     docks: Sequence[int]
     flags: Sequence[int]
@@ -125,6 +136,7 @@ def to_table(
             "system_id": pa.array([system_id] * len(columns.station_id), type=pa.string()),
             "station_id": pa.array(columns.station_id, type=pa.string()),
             "observed_at": pa.array(columns.observed_at, type=pa.timestamp("ms", tz="UTC")),
+            "fetched_at": pa.array(columns.fetched_at, type=pa.timestamp("ms", tz="UTC")),
             "bikes": pa.array(columns.bikes, type=pa.int16()),
             "docks": pa.array(columns.docks, type=pa.int16()),
             "flags": pa.array(columns.flags, type=pa.int16()),
@@ -142,6 +154,7 @@ class _Columns:
 
     station_id: list[str]
     observed_at: list[datetime]
+    fetched_at: list[datetime]
     bikes: list[int]
     docks: list[int]
     flags: list[int]
@@ -149,12 +162,13 @@ class _Columns:
 
 
 def _accumulate(station_ids: Sequence[str], snapshots: Sequence[Snapshot]) -> _Columns:
-    columns = _Columns([], [], [], [], [], [])
+    columns = _Columns([], [], [], [], [], [], [])
     for snapshot in sorted(snapshots, key=lambda one: one.observed_at):
         _check(snapshot, len(station_ids))
         length = snapshot.length()
         columns.station_id.extend(station_ids[:length])
         columns.observed_at.extend([snapshot.observed_at] * length)
+        columns.fetched_at.extend([snapshot.fetched_at] * length)
         columns.bikes.extend(snapshot.bikes)
         columns.docks.extend(snapshot.docks)
         columns.flags.extend(snapshot.flags)

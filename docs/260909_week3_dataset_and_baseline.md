@@ -371,6 +371,32 @@ public.monitor_jobs()           上を 1 つずつ例外を切り分けて呼ぶ
 
 **本番適用前の空撃ち（2026-09-08 13:45 JST）**：本番の DB に対して、`check_parquet_gap` と同じ問い合わせを読み取りだけで実行した。**対象 12 組（2 系統 × 6 時間）・欠落 0**。`check_jobs_missing` の対象 8 ジョブも、最も古い成功が 644 分前（閾値 1,800 分）で余裕がある。**適用しても誤報は出ない。**
 
+#### 本番適用後の実測（2026-09-08 13:52〜14:24 JST）
+
+`pnpm exec supabase db push` で 0020 を適用した（`--dry-run` で 1 本だけであることを確認してから）。
+
+| 見たもの | 結果 |
+|---|---|
+| 入ったもの | `monitored_jobs`（RLS 有効）＋ 5 関数（すべて `security definer`）。pg_cron 5 → **6 本** |
+| 匿名の権限 | 表も関数も**読めない・呼べない** |
+| 実行 | **7 回すべて `ok`**（13:54〜14:24）。失敗 0・検査の失敗 0 |
+| 通知 | **0 件**（`alert_state` に増えたのは疎通テストの 1 件だけ） |
+| 所要 | **最長 0 ms** |
+| `check_parquet_gap` | 毎回 12 組を照合して**欠落 0** |
+| 収集 | **無中断**（M0 以降 5,072 回、180 秒超 0 回） |
+
+**猶予が段階的に切れ、そのたびに誤報が出ないことを実際に見た。** これが `added_at` の設計が正しいことの確認になる。
+
+| 時刻 | 見たジョブ数 | 何が起きたか |
+|---|---|---|
+| 13:54〜14:04 | 0 | 全ジョブが猶予中 |
+| 14:09〜14:19 | 1 | `watchdog_collect` の猶予明け（14:07） |
+| 14:24 | 3 | `monitor_feeds` / `monitor_jobs` の猶予明け（14:22） |
+
+残りは `archive_weather` / `compact_parquet` が 16:52、日次 4 本が 09-09 19:52 から判定に入る。
+
+**通知の到達も確認した**：`send_alert` を 1 度強制発火させ、`net._http_response` が **HTTP 204**（Discord が受理）。Vault → pg_net → Discord の経路は生きている。
+
 ### 5.4 PR B：Parquet に `fetched_at` ＋既存の再圧縮
 
 **目的**：学習の as-of 結合を `fetched_at` で切れるようにする（開発プラン §6.2、W2 プラン §13 の (2)）。
@@ -378,13 +404,18 @@ public.monitor_jobs()           上を 1 つずつ例外を切り分けて呼ぶ
 ```
 apps/ml/bikechance_ml/jobs/snapshot_table.py   # SCHEMA と Snapshot に fetched_at
 apps/ml/bikechance_ml/io/supabase.py           # select に fetched_at
-apps/ml/tests/{test_snapshot_table,test_compact}.py
-docs/data_dictionary.md §7.3                   # 契約の更新
+apps/ml/tests/test_snapshot_table.py           # 契約（列の順序・往復・観測時刻との違い）
+apps/ml/tests/test_supabase_io.py              # select に入ること・欠けたら止まること
+apps/ml/tests/{test_compact,test_eda_01}.py    # フィクスチャ
+scripts/recompact-parquet.ts                   # 畳み直し（再利用できる形にする）
+docs/data_dictionary.md v1.4 §7.3              # 契約
 ```
 
 **列は `fetched_at` 1 つだけにする。** `raw_path` は `(system_id, observed_at)` から組み立て直せる（`rawObjectPath`）。`n_stations` と `is_anomalous` は Parquet から導ける（W2 プラン §13 の (10)(11)）。**導けるものは足さない。**
 
-#### 既存を同じ PR の中で再圧縮する
+**列の位置は `observed_at` の直後**。`parquet-tools` で覗いたときに並びで意味が分かるようにする。型も `observed_at` と揃える（`timestamp[ms, tz=UTC]`）。
+
+#### 既存を同じ変更の中で畳み直す
 
 **列を足すだけで再圧縮しないと、読む側が静かに壊れる**（W2 §14.3 の実測）。
 
@@ -393,14 +424,44 @@ docs/data_dictionary.md §7.3                   # 契約の更新
 | `ds.dataset(...)`（スキーマを渡さない） | **`fetched_at` が黙って消える。** 最初に見つけたファイルからスキーマを推論するため。エラーは出ず、しかも「最初」は環境で変わる |
 | `ds.dataset(..., schema=SCHEMA)` | 古いファイルの `fetched_at` が `null` になる。**気づける** |
 
-したがってこの PR で 2 つを同時にやる。
+したがって、スキーマ変更と畳み直しを**同じ変更で**行う。ただし**畳み直しは本番の `/ml/compact` を叩くので、マージして Vercel がデプロイしたあとにしか実行できない**。順序は「PR → マージ → 畳み直し → 確認」で、**列が混ざったまま放置される期間を作らない**ことが目的である。
 
-1. スキーマに列を足す（7 列 → 8 列）
-2. **アーカイブ開始（2026-09-06 06:00 UTC）から現在までを `?hour=` で再圧縮する**
+#### 畳み直しはスクリプトにする
 
-あわせて、**読む側は必ず明示スキーマを渡す**という規約をデータ辞書に書く。
+その場限りの `curl` ループにしない。**同じことがまた要る**からである。
 
-**完了条件**：全期間がファイル 8 列で読め、`fetched_at` に `null` が 1 件も無い。`schema=` を渡す読み方と渡さない読み方の**両方で同じ列**になる（比べ方は §7.3。hive のパーティション列が足されるので列数では比べない）。所要は 1 時間あたり約 3.3 秒（実測）で、着手時点（9/9 朝）の約 65 時間なら 4 分前後。
+| いつ | なぜ |
+|---|---|
+| 今回（段 2） | 47 時間（2026-09-06 06:00Z 〜 2026-09-08 04:00Z） |
+| 将来スキーマを足すとき | 同じ手順になる |
+| **2026-11-05 以降** | 9 月分が `status_snapshots` から落ち始める。**先に `rebuild-snapshots.ts` で生 JSON から戻し、それから畳み直す**（2 段階） |
+
+```bash
+pnpm exec tsx scripts/recompact-parquet.ts .env 2026-09-06T06:00:00Z --dry-run
+pnpm exec tsx scripts/recompact-parquet.ts .env 2026-09-06T06:00:00Z
+```
+
+- 開始・終了は **UTC の正時**（Parquet のパスと同じ）。両端を含む。終了を省くと「直前の完全な 1 時間」まで
+- 宛先は `app_config.project_base_url`（ウォッチドッグと同じ値。`BASE_URL` で上書きできる）
+- **1 度だけ試し直す**。連続で失敗するなら原因が別にあるので止める
+- 冪等（同じ時間帯は同じパスに上書き）なので、途中で落ちたら同じ範囲をもう一度流せばよい
+- `CRON_SECRET` は `Authorization` ヘッダにしか出さない（CLAUDE.md §5）
+
+#### テストで固定した契約
+
+| 何を | なぜ |
+|---|---|
+| **列の順序と型**（`SCHEMA.names` の完全一致、`fetched_at` の型が `observed_at` と同じ、`nullable=False`） | 位置も契約に含める |
+| **全行に値が入る**（`null_count == 0`） | スカラなのでそのスナップショットの全ポートに同じ値 |
+| **`observed_at` と違う値になる** | この 2 つを取り違えると train/serve skew になる |
+| **スナップショットごとに違う値になる** | 1 つの表に複数の取り込み時刻が混ざる |
+| **Parquet に書いて読んで消えない** | 列を足しただけで満足しない |
+| **`select` に `fetched_at` が入る** | 取り忘れると Parquet に入らず、静かに古い規約に戻る |
+| **列が返ってこなければ止まる** | `null` で埋めて先に進まない（`ShapeError` → そのシステムだけ `ok=false` で `job_runs` に残る） |
+
+あわせて、`test_eda_01.py` に 3 か所あった同じ表の組み立てを `table_of()` に集約した。**`fetched_at` を足したとき 3 か所とも直すことになった**ので、次に列が増えたときに直す場所を 1 つにする。
+
+**完了条件**：全期間がファイル 8 列で読め、`fetched_at` に `null` が 1 件も無い。`schema=` を渡す読み方と渡さない読み方の**両方で同じ列**になる（比べ方は §7.3。hive のパーティション列が足されるので列数では比べない）。所要は 1 時間あたり約 3.3 秒（実測）で、47 時間なら 3〜4 分。
 
 ### 5.5 PR C：バックアップ収集器（Edge Function）
 
@@ -825,8 +886,8 @@ gbfs-parquet/{system_id}/date={YYYY-MM-DD}/hour={HH}/part.parquet   # 日時は 
 |---|---|---|
 | `system_id` | string | `hellocycling` / `docomo-cycle` |
 | `station_id` | string | 提供側の識別子。**`idx` は書かない**（W2-10） |
-| `observed_at` | timestamp[us, tz=UTC] | フィードの `last_updated` |
-| **`fetched_at`** | **timestamp[us, tz=UTC]** | **W3 で追加。**収集器が取得を終えた時刻。**as-of 結合はこの列で切る** |
+| `observed_at` | timestamp[ms, tz=UTC] | フィードの `last_updated` |
+| **`fetched_at`** | **timestamp[ms, tz=UTC]** | **W3 で追加。**収集器が取得を終えた時刻。**as-of 結合はこの列で切る**。`observed_at` と同じ型・同じ精度 |
 | `bikes` | int16 | `-1` は「観測されなかった」。0 と区別する |
 | `docks` | int16 | 同上。HELLO の `-1`（定員超過）は収集時に 0 へ丸めてある（W1-25） |
 | `flags` | int16 | `1 = is_installed` / `2 = is_renting` / `4 = is_returning` のビット和。`-1` は欠損 |
@@ -835,6 +896,8 @@ gbfs-parquet/{system_id}/date={YYYY-MM-DD}/hour={HH}/part.parquet   # 日時は 
 **読む側の規約**
 
 - **必ず `schema=SCHEMA` を渡す。** 渡さないと pyarrow が最初に見つけたファイルからスキーマを推論し、混在時に列を黙って落とす（§4.2 の 11）。
+- **`schema=` を渡すとパーティション列（`date` / `hour`）が付かない**（§12 の 83）。要るなら `SCHEMA` に足した版を渡す。`observed_at` から導けるので、ふつうは要らない。
+- **列数で比べない**（読み方で 8 にも 10 にもなる）。名前の集合で比べる。
 - 1 つの JST 暦日を読むには、**UTC の `date=D-1/hour=15` から `date=D/hour=14` までの 24 個**を並べる（§4.2 の 14）。
 
 **互換性**：v1（7 列）のファイルは PR B の再圧縮で全て v2 に置き換わる。**v1 と v2 が混在する期間を作らない。**
@@ -1321,3 +1384,25 @@ select is(
 `check_jobs_missing` は「直近 N のあいだ `status='ok'` が 1 件も無い」を見る。**適用直後はどのジョブも「この表に載ってから」は 1 度も成功していない**ので、9 件そろって鳴る。日次ジョブに至っては、次に回るまで最大 24 時間、正しく判断できない。
 
 **`added_at` を持たせ、`now() > added_at + missing_after` になるまで見ない**ことで解決した。副作用として「新しく監視対象に足したジョブは、その閾値のあいだ盲点になる」が、これは**「まだ 1 巡していない」と「死んでいる」を区別できない**という事実そのものなので、正しい振る舞いである。
+
+### 83. 明示スキーマを渡すとパーティション列が消える（段 2）
+
+「混在で列が落ちる」を**いまの pyarrow（25.0.1）で再現**した。あわせて、`schema=` を渡す副作用が分かった。
+
+古い 7 列のファイルと新しい 8 列のファイルを 1 つのディレクトリに置いて読む。
+
+| 読み方 | 列数 | `fetched_at` |
+|---|---|---|
+| `ds.dataset(..., partitioning="hive")` | 9 | **★消える★**（エラーは出ない） |
+| `ds.dataset(..., partitioning="hive", schema=SCHEMA)` | 8 | あり。ただし**古いファイルの行が `null`** |
+
+畳み直したあと（両方 8 列）。
+
+| 読み方 | 列数 | `fetched_at` |
+|---|---|---|
+| `ds.dataset(..., partitioning="hive")` | **10** | あり・`null` 0 |
+| `ds.dataset(..., partitioning="hive", schema=SCHEMA)` | **8** | あり・`null` 0 |
+
+**新しく分かったのは下の行**である。**`schema=` を渡すと `date` / `hour` のパーティション列が付かない**（10 ではなく 8）。明示スキーマがパーティション探索より優先されるためで、「必ず `schema=SCHEMA` を渡す」という規約と「Hive で読むと列が 2 つ増える」という記述は**同時には成り立たない**。
+
+**含意**：`date` / `hour` を列として使いたいなら、`SCHEMA` にその 2 つを足した版を渡す。ただし `observed_at` から導けるので、ふつうは要らない。**「列数で比べる」検査はどちらの読み方でも書けない**（8 にも 10 にもなる）ので、名前の集合で比べる。データ辞書 §7.3 を直した。

@@ -20,6 +20,7 @@ from bikechance_ml.io.supabase import (
     SupabaseError,
     SupabaseIo,
 )
+from bikechance_ml.json_shape import ShapeError
 
 URL = "https://project-ref.supabase.co"
 KEY = "sb-secret-key-that-must-never-leak"
@@ -164,6 +165,7 @@ def test_snapshot_range_is_converted_to_utc() -> None:
 def test_snapshots_are_parsed_into_arrays() -> None:
     row = {
         "observed_at": "2026-09-08T04:00:00+00:00",
+        "fetched_at": "2026-09-08T04:01:10+00:00",
         "bikes": [1, -1],
         "docks": [2, 3],
         "flags": [7, 7],
@@ -172,7 +174,33 @@ def test_snapshots_are_parsed_into_arrays() -> None:
     io, _ = io_with(server_with([row]))
     snapshots = io.list_snapshots("hellocycling", START, END)
     assert snapshots[0].observed_at == START
+    assert snapshots[0].fetched_at == START + timedelta(seconds=70)
     assert list(snapshots[0].bikes) == [1, -1]
+
+
+def test_snapshot_select_asks_for_fetched_at() -> None:
+    """**as-of はこの列で切る。** 取り忘れると Parquet に入らず、静かに古い規約に戻る。"""
+    io, seen = io_with(server_with([]))
+    io.list_snapshots("hellocycling", START, END)
+    assert "fetched_at" in seen[0].url.params["select"]
+
+
+def test_snapshot_without_fetched_at_is_a_parse_failure() -> None:
+    """列が返ってこなければ**止まる**。null で埋めて先に進まない。
+
+    `ShapeError` は `compact_system` の外で拾われ、そのシステムだけ `ok=false` に
+    なって `job_runs` に残る（`_run_all`）。API が 400 を返す経路には乗らない。
+    """
+    row = {
+        "observed_at": "2026-09-08T04:00:00+00:00",
+        "bikes": [1],
+        "docks": [2],
+        "flags": [7],
+        "reported_age_s": [30],
+    }
+    io, _ = io_with(server_with([row]))
+    with pytest.raises(ShapeError):
+        io.list_snapshots("hellocycling", START, END)
 
 
 def test_unexpected_shape_becomes_a_parse_failure() -> None:
