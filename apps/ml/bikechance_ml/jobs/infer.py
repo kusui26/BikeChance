@@ -50,9 +50,10 @@ PROBABILITY_SCALE: Final[int] = 1000
 #: 1 回の往復で送る予測の数。20,745 行を 6 往復に刻む。
 UPSERT_BATCH: Final[int] = 4_000
 
-#: 成果物の置き場所。
-MODEL_BUCKET: Final[str] = "gbfs-parquet"
-MODEL_PREFIX: Final[str] = "models/baseline"
+#: 成果物の置き場所（0027 のバケット）。**`gbfs-parquet` には相乗りさせない**：
+#: あちらは Parquet の MIME しか許さず、寿命も作り直し方も違う（W3 プラン §12 の 106）。
+MODEL_BUCKET: Final[str] = "models"
+MODEL_PREFIX: Final[str] = "baseline"
 
 _MINUTES_PER_DAY: Final[int] = 24 * 60
 

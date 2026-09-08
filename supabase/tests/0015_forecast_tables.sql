@@ -7,7 +7,7 @@
 --   * 匿名ロールからは**何も見えない**
 
 begin;
-select plan(32);
+select plan(35);
 
 delete from public.station_forecasts where true;
 delete from public.inference_log where true;
@@ -163,6 +163,26 @@ select throws_ok(
 select throws_ok(
   $$select public.upsert_forecasts(pg_temp.forecast('unknown', array[10, 20, 30]))$$,
   '23503', null, '**台帳に無いポートは書けない**（外部キー）'
+);
+
+-- ────────────────────────────────────────────────────────────────
+-- モデル成果物の置き場所（0027）
+-- ────────────────────────────────────────────────────────────────
+-- **`gbfs-parquet` に相乗りさせない。** あちらは Parquet の MIME しか許さない。
+-- 段 8 で成果物を上げようとして 415 で弾かれた（W3 プラン §12 の 106）
+select is(
+  (select allowed_mime_types from storage.buckets where id = 'models'),
+  array['application/gzip'],
+  'models バケットは gzip を受け付ける'
+);
+select is(
+  (select public from storage.buckets where id = 'models'), false,
+  '**非公開**（読み書きはサービスロールのみ）'
+);
+select is(
+  (select allowed_mime_types from storage.buckets where id = 'gbfs-parquet'),
+  array['application/vnd.apache.parquet'],
+  'gbfs-parquet は Parquet だけのまま（成果物を混ぜない）'
 );
 
 -- ────────────────────────────────────────────────────────────────
