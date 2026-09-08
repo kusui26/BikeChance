@@ -17,7 +17,7 @@ from typing import Final
 
 import httpx
 
-from bikechance_ml.config import Config
+from bikechance_ml.config import Config, StorageConfig
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
 from bikechance_ml.json_shape import (
     ShapeError,
@@ -50,9 +50,15 @@ MAX_PAGES: Final[int] = 100
 #: 応答本文をエラーに載せる上限。全部載せると 1 行が数 MB になり得る。
 MAX_ERROR_CHARS: Final[int] = 200
 
+#: 「無い」を正常系として扱うための状態コード。
+HTTP_NOT_FOUND: Final[int] = 404
+
 #: 1 要求のタイムアウト（秒）。maxDuration 120 秒の内側に収める。
 REQUEST_TIMEOUT_S: Final[float] = 30.0
 CONNECT_TIMEOUT_S: Final[float] = 10.0
+
+#: Parquet の取得は数 MB になるので長めに取る（分析用。Cron の経路では使わない）。
+DOWNLOAD_TIMEOUT_S: Final[float] = 120.0
 
 
 @dataclass(frozen=True)
@@ -219,6 +225,32 @@ class SupabaseIo:
         )
         return as_int(response.json(), "job_started")
 
+    def download(self, bucket: str, path: str) -> bytes | None:
+        """Storage の 1 オブジェクトを取る。**無ければ None**（例外にしない）。
+
+        分析（`analysis/`）が Parquet を読むために使う。畳んでいない時間帯は
+        単に存在しないので、「無い」は正常系として扱えたほうがよい。
+        """
+        try:
+            response = self._client.request(
+                "GET",
+                f"{self._config.supabase_url}/storage/v1/object/{bucket}/{path}",
+                headers=self._headers(),
+            )
+        except httpx.HTTPError as cause:
+            raise SupabaseError(
+                SupabaseFailure("storage", None, type(cause).__name__, self._mask(str(cause)))
+            ) from None
+        if response.status_code == HTTP_NOT_FOUND:
+            return None
+        if response.is_success:
+            return response.content
+        raise SupabaseError(
+            SupabaseFailure(
+                "storage", response.status_code, "HttpStatus", self._mask(response.text)
+            )
+        )
+
     def job_finished(self, run_id: int, status: str, detail: Mapping[str, object]) -> None:
         self._request(
             "POST",
@@ -262,3 +294,21 @@ def open_supabase(config: Config) -> Iterator[SupabaseIo]:
     timeout = httpx.Timeout(REQUEST_TIMEOUT_S, connect=CONNECT_TIMEOUT_S)
     with httpx.Client(timeout=timeout) as client:
         yield SupabaseIo(config, client)
+
+
+@contextmanager
+def open_storage(
+    config: StorageConfig, timeout_s: float = DOWNLOAD_TIMEOUT_S
+) -> Iterator[SupabaseIo]:
+    """読み取りだけの組み立て。`CRON_SECRET` を要求しない（分析用）。
+
+    `cron_secret` は伏せ字の対象に空文字を渡す。**空は `redact()` が無視する**ので、
+    「短すぎる値で全部を伏せ字にする」事故は起きない。
+    """
+    full = Config(
+        supabase_url=config.supabase_url,
+        supabase_secret_key=config.supabase_secret_key,
+        cron_secret="",
+    )
+    with httpx.Client(timeout=httpx.Timeout(timeout_s, connect=CONNECT_TIMEOUT_S)) as client:
+        yield SupabaseIo(full, client)
