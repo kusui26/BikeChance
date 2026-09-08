@@ -11,6 +11,8 @@ import SwiftUI
 /// （App Store 審査ガイドライン 5.1.2、開発プラン §9.2）。
 struct MapScreen: View {
     @State var model: StationsModel
+    /// 背面に回っているあいだは取りに行かない。
+    @Environment(\.scenePhase) private var scenePhase
     @State private var camera: MapCameraPosition = .region(MapScreen.initialRegion)
     @State private var visible: [StationCurrent] = []
     @State private var feeds: [String: FeedStatus] = [:]
@@ -25,8 +27,11 @@ struct MapScreen: View {
         span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
     )
 
-    /// 「N 分前の観測」を進めるための刻み。**Combine を持ち込まない**ために
-    /// `Task.sleep` で回す（`.task` は画面が消えれば自動で止まる）。
+    /// 「N 分前の観測」を進め、頃合いなら取り直すための刻み。**Combine を持ち込まない**
+    /// ために `Task.sleep` で回す（`.task` は画面が消えれば自動で止まる）。
+    ///
+    /// 取り直す間隔は `StationsModel.refreshInterval`（60 秒）で、刻みはその半分にする。
+    /// 刻みと間隔を同じにすると、判定の境目で 1 周ぶん（最大 60 秒）遅れることがある。
     private static let tickSeconds = 30
 
     var body: some View {
@@ -73,11 +78,21 @@ struct MapScreen: View {
         .safeAreaInset(edge: .bottom) { CreditFooter(showsCredits: $showsCredits) }
         .sheet(isPresented: $showsCredits) { CreditsScreen() }
         .onChange(of: model.state) { _, state in apply(state) }
-        .task {
-            model.viewportChanged(to: Bbox(region: MapScreen.initialRegion))
+        // 最初の 1 回。カメラの位置は以降 `onMapCameraChange` が持つ
+        .task { model.viewportChanged(to: Bbox(region: MapScreen.initialRegion)) }
+        // **`id:` を付けて、場面が変わるたびに作り直す。**
+        // `.task` に閉じ込めた `@Environment` は**開始時の値のまま固まる**ので、
+        // ループの中で `scenePhase` を見ても永遠に起動時の値になる（§12 の 108）。
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.tickSeconds))
                 now = Date()
+                // **時刻を進めるだけでは値は新しくならない**（§12 の 107）。
+                // 地図を動かさない利用者には、データが古くなっていく様子だけが見えて、
+                // やがて全部が灰色になったまま戻らなかった。
+                // 前面に戻った直後にも 1 度試すよう、眠る前に呼ぶ
+                model.refreshIfDue()
+                try? await Task.sleep(for: .seconds(Self.tickSeconds))
             }
         }
     }
