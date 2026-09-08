@@ -39,6 +39,13 @@ venv/
 
 # 分析が Parquet を置く場所（再実行を速くするだけ。中身は Storage が正）
 .cache/
+
+# iOS / Swift
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.swiftpm/
 .ipynb_checkpoints/
 
 # === Xcode / Swift（apps/ios） ===

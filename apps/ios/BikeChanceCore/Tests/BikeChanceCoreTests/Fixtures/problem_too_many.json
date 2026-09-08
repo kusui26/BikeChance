@@ -1,0 +1,7 @@
+{
+    "type": "/v1/problems/too-many-stations",
+    "title": "\u8a72\u5f53\u3059\u308b\u30dd\u30fc\u30c8\u304c\u591a\u3059\u304e\u307e\u3059",
+    "status": 400,
+    "detail": "6649 \u4ef6\u304c\u8a72\u5f53\u3057\u307e\u3057\u305f\uff08\u4e0a\u9650 1000 \u4ef6\uff09\u3002bbox \u3092\u72ed\u3081\u3066\u304f\u3060\u3055\u3044\u3002",
+    "code": "too_many_stations"
+}
