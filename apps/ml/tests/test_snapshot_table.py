@@ -1,10 +1,11 @@
 """配列 → 長形式の変換（`bikechance_ml/jobs/snapshot_table.py`、W2 プラン §9.2）。
 
-ここで固定したい契約は 4 つ。
+ここで固定したい契約は 5 つ。
   * 半開区間と UTC でパスが決まる（同じ時間帯は必ず同じパスに写像する）
   * 台帳の `idx` が密でなければ**止まる**（値が別のポートに付くくらいなら落ちる）
   * **配列長より外側の `idx` は行にしない**（未登録と「観測されなかった」を混ぜない）
   * `-1` はそのまま残る（0 と区別する）
+  * **`fetched_at` が全行に入る**（学習の as-of はこの列で切る。W3 プラン §9.1）
 """
 
 import io
@@ -41,11 +42,21 @@ def at(hour: int, minute: int = 0, second: int = 0) -> datetime:
     return datetime(2026, 9, 8, hour, minute, second, tzinfo=UTC)
 
 
-def snapshot(hour: int, minute: int, bikes: list[int]) -> Snapshot:
-    """4 本の配列を同じ長さで作る。値の意味は問わないテスト用。"""
+def fetched(hour: int, minute: int, delay_s: int = 70) -> datetime:
+    """観測から `delay_s` 秒あとの取り込み時刻。60 秒を超えるので `timedelta` で足す。"""
+    return at(hour, minute) + timedelta(seconds=delay_s)
+
+
+def snapshot(hour: int, minute: int, bikes: list[int], delay_s: int = 70) -> Snapshot:
+    """4 本の配列を同じ長さで作る。値の意味は問わないテスト用。
+
+    `fetched_at` は既定で観測の 70 秒あと。HELLO の公開遅延の実測中央値が 67 秒で、
+    **`observed_at` と別の値であることがテストで見えるように**わざとずらしてある。
+    """
     size = len(bikes)
     return Snapshot(
         observed_at=at(hour, minute),
+        fetched_at=fetched(hour, minute, delay_s),
         bikes=bikes,
         docks=[10 - value for value in bikes],
         flags=[7] * size,
@@ -130,6 +141,57 @@ def test_table_carries_the_system_id() -> None:
     assert table.column("system_id").to_pylist() == [SYSTEM]
 
 
+# ── fetched_at（W3 プラン §9.1・段 2） ─────────────────────────
+def test_schema_has_fetched_at_next_to_observed_at() -> None:
+    """列の順序も契約に含める。人が `parquet-tools` で覗いたときに並びで意味が分かる。"""
+    assert SCHEMA.names == [
+        "system_id",
+        "station_id",
+        "observed_at",
+        "fetched_at",
+        "bikes",
+        "docks",
+        "flags",
+        "reported_age_s",
+    ]
+    assert SCHEMA.field("fetched_at").type == SCHEMA.field("observed_at").type
+    assert not SCHEMA.field("fetched_at").nullable
+
+
+def test_fetched_at_is_written_for_every_row() -> None:
+    """スカラなので、そのスナップショットの全ポートに同じ値が入る。"""
+    table = to_table(SYSTEM, ["a", "b"], [snapshot(4, 0, [1, 2])])
+    assert table.column("fetched_at").to_pylist() == [fetched(4, 0)] * 2
+    assert table.column("fetched_at").null_count == 0
+
+
+def test_fetched_at_differs_from_observed_at() -> None:
+    """**この 2 つを取り違えると train/serve skew になる**（開発プラン §6.2）。"""
+    table = to_table(SYSTEM, ["a"], [snapshot(4, 0, [1], delay_s=226)])
+    observed = table.column("observed_at").to_pylist()[0]
+    fetched = table.column("fetched_at").to_pylist()[0]
+    assert fetched > observed
+    assert (fetched - observed).total_seconds() == 226
+
+
+def test_fetched_at_follows_each_snapshot() -> None:
+    """スナップショットごとに違う値になる（1 つの表に複数の取り込み時刻が混ざる）。"""
+    table = to_table(
+        SYSTEM, ["a"], [snapshot(4, 0, [1], delay_s=10), snapshot(4, 5, [2], delay_s=200)]
+    )
+    assert table.column("fetched_at").to_pylist() == [fetched(4, 0, 10), fetched(4, 5, 200)]
+
+
+def test_fetched_at_survives_a_round_trip_through_parquet() -> None:
+    """**書いて読んで消えないこと**を固定する。列を足しただけで満足しない。"""
+    table = to_table(SYSTEM, ["a", "b"], [snapshot(4, 0, [1, 2])])
+    read = pq.read_table(pa_buffer(to_parquet_bytes(table)))
+    assert "fetched_at" in read.schema.names
+    assert read.schema == SCHEMA
+    assert read.column("fetched_at").null_count == 0
+    assert read.column("fetched_at").to_pylist() == [fetched(4, 0)] * 2
+
+
 def test_table_of_no_snapshots_is_empty_but_typed() -> None:
     table = to_table(SYSTEM, ["a"], [])
     assert table.num_rows == 0
@@ -137,7 +199,7 @@ def test_table_of_no_snapshots_is_empty_but_typed() -> None:
 
 
 def test_table_rejects_ragged_arrays() -> None:
-    ragged = Snapshot(at(4), [1, 2], [1], [7, 7], [0, 0])
+    ragged = Snapshot(at(4), fetched(4, 0), [1, 2], [1], [7, 7], [0, 0])
     with pytest.raises(InconsistentSnapshotError):
         to_table(SYSTEM, ["a", "b"], [ragged])
 

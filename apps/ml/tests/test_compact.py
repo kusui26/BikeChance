@@ -33,6 +33,7 @@ def snapshot(minute: int, bikes: list[int]) -> Snapshot:
     size = len(bikes)
     return Snapshot(
         observed_at=HOUR_START + timedelta(minutes=minute),
+        fetched_at=HOUR_START + timedelta(minutes=minute, seconds=70),
         bikes=bikes,
         docks=[1] * size,
         flags=[7] * size,

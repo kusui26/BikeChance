@@ -196,7 +196,7 @@ class SupabaseIo:
         rows = self._paged(
             "/rest/v1/status_snapshots",
             {
-                "select": "observed_at,bikes,docks,flags,reported_age_s",
+                "select": "observed_at,fetched_at,bikes,docks,flags,reported_age_s",
                 "system_id": f"eq.{system_id}",
                 # 同じ列に 2 つの条件を掛けるので `and` にまとめる。
                 # `observed_at` を 2 回書くとクエリで衝突する
@@ -272,6 +272,7 @@ def _to_snapshot(row: object) -> Snapshot:
     fields = as_dict(row, "status_snapshots")
     return Snapshot(
         observed_at=_to_datetime(as_str(field(fields, "observed_at", "snapshot"), "observed_at")),
+        fetched_at=_to_datetime(as_str(field(fields, "fetched_at", "snapshot"), "fetched_at")),
         bikes=_ints(fields, "bikes"),
         docks=_ints(fields, "docks"),
         flags=_ints(fields, "flags"),

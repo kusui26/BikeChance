@@ -5,6 +5,7 @@
 """
 
 import io as _io
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -26,23 +27,40 @@ from bikechance_ml.jobs.snapshot_table import SCHEMA
 HOUR = datetime(2026, 9, 7, 21, tzinfo=UTC)
 
 
-def sample_table(station_ids: tuple[str, ...] = ("a", "b")) -> pa.Table:
-    rows = [
-        (station, HOUR + timedelta(minutes=minute), bikes, 5 - bikes, 7)
-        for station in station_ids
-        for minute, bikes in ((0, 0), (5, 3), (10, 3))
-    ]
+def table_of(rows: Sequence[tuple[str, datetime, int, int]]) -> pa.Table:
+    """`(station_id, observed_at, bikes, docks)` から SCHEMA の表を作る。
+
+    **列を足したときに直す場所を 1 つにする。** この関数を書く前は同じ組み立てが
+    3 か所にあり、`fetched_at` を足したとき（W3 の段 2）3 か所とも直すことになった。
+
+    EDA は `fetched_at` を読まないが SCHEMA には要るので、観測の 70 秒あとで埋める
+    （HELLO の公開遅延の実測中央値）。`flags` は 7（貸出・返却とも可）、
+    `reported_age_s` は 0 で固定する。
+    """
     return pa.table(
         {
             "system_id": pa.array(["t"] * len(rows), type=pa.string()),
             "station_id": pa.array([r[0] for r in rows], type=pa.string()),
             "observed_at": pa.array([r[1] for r in rows], type=pa.timestamp("ms", tz="UTC")),
+            "fetched_at": pa.array(
+                [r[1] + timedelta(seconds=70) for r in rows], type=pa.timestamp("ms", tz="UTC")
+            ),
             "bikes": pa.array([r[2] for r in rows], type=pa.int16()),
             "docks": pa.array([r[3] for r in rows], type=pa.int16()),
-            "flags": pa.array([r[4] for r in rows], type=pa.int16()),
+            "flags": pa.array([7] * len(rows), type=pa.int16()),
             "reported_age_s": pa.array([0] * len(rows), type=pa.int16()),
         },
         schema=SCHEMA,
+    )
+
+
+def sample_table(station_ids: tuple[str, ...] = ("a", "b")) -> pa.Table:
+    return table_of(
+        [
+            (station, HOUR + timedelta(minutes=minute), bikes, 5 - bikes)
+            for station in station_ids
+            for minute, bikes in ((0, 0), (5, 3), (10, 3))
+        ]
     )
 
 
@@ -149,20 +167,7 @@ def test_findings_reports_missing_hours() -> None:
 
 
 def test_findings_reports_stations_that_never_move() -> None:
-    still = pa.table(
-        {
-            "system_id": pa.array(["t"] * 2, type=pa.string()),
-            "station_id": pa.array(["a", "a"], type=pa.string()),
-            "observed_at": pa.array(
-                [HOUR, HOUR + timedelta(minutes=5)], type=pa.timestamp("ms", tz="UTC")
-            ),
-            "bikes": pa.array([2, 2], type=pa.int16()),
-            "docks": pa.array([2, 2], type=pa.int16()),
-            "flags": pa.array([7, 7], type=pa.int16()),
-            "reported_age_s": pa.array([0, 0], type=pa.int16()),
-        },
-        schema=SCHEMA,
-    )
+    still = table_of([("a", HOUR, 2, 2), ("a", HOUR + timedelta(minutes=5), 2, 2)])
     notes = findings([report_of(still)])
     assert any("一度も動かないポート" in note for note in notes)
 
@@ -202,23 +207,11 @@ def test_findings_reports_the_flow_loss() -> None:
 
 def test_findings_reports_the_diurnal_gap() -> None:
     """水準と変化を分けて言っていること。"""
-    rows = [
-        ("a", minute, bikes)
-        for minute, bikes in ((0, 5), (30, 5), (60, 0), (90, 5))  # 01 時台だけ動く
-    ]
-    table = pa.table(
-        {
-            "system_id": pa.array(["t"] * len(rows), type=pa.string()),
-            "station_id": pa.array([r[0] for r in rows], type=pa.string()),
-            "observed_at": pa.array(
-                [HOUR + timedelta(minutes=r[1]) for r in rows], type=pa.timestamp("ms", tz="UTC")
-            ),
-            "bikes": pa.array([r[2] for r in rows], type=pa.int16()),
-            "docks": pa.array([5 - r[2] for r in rows], type=pa.int16()),
-            "flags": pa.array([7] * len(rows), type=pa.int16()),
-            "reported_age_s": pa.array([0] * len(rows), type=pa.int16()),
-        },
-        schema=SCHEMA,
+    table = table_of(
+        [
+            ("a", HOUR + timedelta(minutes=minute), bikes, 5 - bikes)
+            for minute, bikes in ((0, 5), (30, 5), (60, 0), (90, 5))  # 01 時台だけ動く
+        ]
     )
     notes = findings([report_of(table)])
     assert any("水準はほぼ動かないのに" in note for note in notes)
