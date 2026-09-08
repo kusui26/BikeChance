@@ -267,6 +267,29 @@ export const COMPACT_CRON = "7 * * * *";
 export const COMPACT_MAX_DURATION_S = 120;
 
 /**
+ * 先回り推論の Cron（UTC。開発プラン §8.1、W3 プラン §5.10）。
+ *
+ * **フィードの公開周期に位相を合わせる。** HELLO の `last_updated` は毎時 :01:34 から
+ * 5 分周期で、公開は約 55 秒後、収集器は毎分起動なので **:03:59 までに DB に入る**。
+ * 推論を `4-59/5`（:04, :09, …）にすると、常に最新スナップショットの 1〜2 分後に
+ * 予測できる。ドコモ（80 秒周期）は 5 分グリッド毎に 1 回でよいので `1-59/5`。
+ *
+ * **`vercel.json` にあるのは HELLO だけ。** ドコモは 1 システムを 6 時間動かして
+ * `n_dead_tup` と autovacuum を見てから足す（W3-19）。ここの定数は両方持っておく。
+ */
+export const INFER_CRON: Readonly<Record<SystemId, string>> = {
+  hellocycling: "4-59/5 * * * *",
+  "docomo-cycle": "1-59/5 * * * *",
+};
+
+/**
+ * 推論の最大実行時間（秒）。20,745 ポート × 10 水平 × 2 指標を作って書き戻す。
+ * ベースライン（B3）は行列演算だけなので見込みは 10 秒未満だが、Storage からの
+ * 成果物の取得と 6 往復の UPSERT を含めて 120 秒とる。
+ */
+export const INFER_MAX_DURATION_S = 120;
+
+/**
  * 公開 API `/v1` の設定（開発プラン §8.3、W2 プラン §5.7）。
  */
 

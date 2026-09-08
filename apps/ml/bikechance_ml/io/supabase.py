@@ -19,7 +19,12 @@ from typing import Final
 import httpx
 
 from bikechance_ml.config import Config, StorageConfig
-from bikechance_ml.features.reference import NeighborRow, StationAttributeRow, StationGeoRow
+from bikechance_ml.features.reference import (
+    NeighborRow,
+    StationAttributeRow,
+    StationGeoRow,
+    StationStatusRow,
+)
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
 from bikechance_ml.json_shape import (
     ShapeError,
@@ -303,15 +308,90 @@ class SupabaseIo:
             for row in rows
         )
 
+    # ── 推論（W3 プラン §5.10）────────────────────────────────
+    def read_base_observed_at(self, system_id: str) -> datetime | None:
+        """そのシステムの最新の観測時刻。**予測の基準**になる。"""
+        rows = self._rows(
+            "/rest/v1/feed_state",
+            {"select": "last_observed_at", "system_id": f"eq.{system_id}"},
+            "feed_state",
+        )
+        if not rows:
+            return None
+        value = as_dict(rows[0], "feed_state").get("last_observed_at")
+        return None if value is None else _to_datetime(as_str(value, "last_observed_at"))
+
+    def list_station_status(self, system_id: str) -> tuple[StationStatusRow, ...]:
+        """最新状態（1 ポート 1 行）。**`-1` は「一度も観測されていない」。**"""
+        rows = self._paged(
+            "/rest/v1/station_status_latest",
+            {
+                "select": "station_id,bikes,docks,flags,is_present",
+                "system_id": f"eq.{system_id}",
+                "order": "station_id.asc",
+            },
+            STATION_PAGE_SIZE,
+            "station_status_latest",
+        )
+        return tuple(_to_station_status(row) for row in rows)
+
+    def begin_inference(
+        self, system_id: str, base_observed_at: datetime, model_version: str
+    ) -> int | None:
+        """推論を掴む。**既に同じ観測時刻があれば None**（二重推論を止める）。"""
+        response = self._request(
+            "POST",
+            "/rest/v1/rpc/begin_inference",
+            "rest",
+            json={
+                "p_system_id": system_id,
+                "p_base_observed_at": _iso_z(base_observed_at),
+                "p_model_version": model_version,
+            },
+        )
+        fields = as_dict(response.json(), "begin_inference")
+        if not as_bool(field(fields, "claimed", "begin_inference"), "claimed"):
+            return None
+        return as_int(field(fields, "id", "begin_inference"), "id")
+
+    def finish_inference(
+        self, run_id: int, status: str, n_rows: int, duration_ms: int, error: str | None = None
+    ) -> None:
+        self._request(
+            "POST",
+            "/rest/v1/rpc/finish_inference",
+            "rest",
+            json={
+                "p_id": run_id,
+                "p_status": status,
+                "p_n_rows": n_rows,
+                "p_duration_ms": duration_ms,
+                "p_error": error,
+            },
+        )
+
+    def upsert_forecasts(self, rows: Sequence[Mapping[str, object]]) -> int:
+        """予測をまとめて書く。**1 回の往復で送る量は呼ぶ側が刻む。**"""
+        if not rows:
+            return 0
+        response = self._request(
+            "POST", "/rest/v1/rpc/upsert_forecasts", "rest", json={"p_rows": list(rows)}
+        )
+        return as_int(response.json(), "upsert_forecasts")
+
     # ── 書き込み ────────────────────────────────────────────────
     def upload_parquet(self, path: str, body: bytes) -> None:
         """同じパスに上書きする。同じ時間帯を 2 回処理しても結果が変わらない。"""
+        self.upload(PARQUET_BUCKET, path, body, PARQUET_CONTENT_TYPE)
+
+    def upload(self, bucket: str, path: str, body: bytes, content_type: str) -> None:
+        """Storage の 1 オブジェクトを置く（上書き）。"""
         self._request(
             "POST",
-            f"/storage/v1/object/{PARQUET_BUCKET}/{path}",
+            f"/storage/v1/object/{bucket}/{path}",
             "storage",
             content=body,
-            headers={"Content-Type": PARQUET_CONTENT_TYPE, "x-upsert": "true"},
+            headers={"Content-Type": content_type, "x-upsert": "true"},
         )
 
     def job_started(self, job_name: str) -> int:
@@ -353,6 +433,17 @@ class SupabaseIo:
             "rest",
             json={"p_id": run_id, "p_status": status, "p_detail": dict(detail)},
         )
+
+
+def _to_station_status(row: object) -> StationStatusRow:
+    fields = as_dict(row, "station_status_latest")
+    return StationStatusRow(
+        station_id=as_str(field(fields, "station_id", "status"), "station_id"),
+        bikes=as_int(field(fields, "bikes", "status"), "bikes"),
+        docks=as_int(field(fields, "docks", "status"), "docks"),
+        flags=as_int(field(fields, "flags", "status"), "flags"),
+        is_present=as_bool(field(fields, "is_present", "status"), "is_present"),
+    )
 
 
 def _to_station_geo(row: object) -> StationGeoRow:

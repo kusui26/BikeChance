@@ -13,6 +13,8 @@ import {
   ARCHIVE_WEATHER_CRON,
   COMPACT_CRON,
   COMPACT_MAX_DURATION_S,
+  INFER_CRON,
+  INFER_MAX_DURATION_S,
   SYNC_STATIONS_CRON,
   SYSTEMS,
   SYSTEM_IDS,
@@ -22,6 +24,7 @@ const COLLECT_PATH_PREFIX = "/api/jobs/collect/";
 const SYNC_PATH_PREFIX = "/api/jobs/sync-stations/";
 const WEATHER_PATH = "/api/jobs/archive-weather";
 const COMPACT_PATH = "/ml/compact";
+const INFER_PATH_PREFIX = "/ml/infer/";
 
 type CronEntry = {
   readonly path: string;
@@ -144,6 +147,55 @@ describe("vercel.json の Parquet 化 Cron", () => {
   });
 });
 
+describe("vercel.json の推論 Cron", () => {
+  it("知っているシステムだけを指す", () => {
+    const paths = readCrons(INFER_PATH_PREFIX).map((cron) => cron.path);
+    expect(paths.length).toBeGreaterThan(0);
+    for (const path of paths) {
+      const system_id = path.slice(INFER_PATH_PREFIX.length);
+      expect(
+        SYSTEM_IDS.some((id) => id === system_id),
+        `${path} が未知`,
+      ).toBe(true);
+    }
+  });
+
+  it("スケジュールが共有定数と一致する", () => {
+    for (const cron of readCrons(INFER_PATH_PREFIX)) {
+      const system_id = cron.path.slice(INFER_PATH_PREFIX.length);
+      const system = SYSTEM_IDS.find((id) => id === system_id);
+      if (system === undefined) continue;
+      expect(cron.schedule).toBe(INFER_CRON[system]);
+    }
+  });
+
+  it("段階的に広げる：いまは HELLO だけ（W3-19）", () => {
+    // 20,745 行 × 288 回/日 ＝ 597 万行更新/日。配列列の HOT 更新が効くかは
+    // 測ってから判断する。**1 システムを 6 時間動かし、n_dead_tup と autovacuum を
+    // 見てからドコモを足す。** この検査は「足すときに意識させる」ためにある
+    const paths = readCrons(INFER_PATH_PREFIX).map((cron) => cron.path);
+    expect(paths).toEqual([`${INFER_PATH_PREFIX}hellocycling`]);
+  });
+
+  it("フィードの公開周期と位相が合っている", () => {
+    // HELLO は :01:34 から 5 分周期で、収集は :03:59 までに終わる。:04 なら
+    // 常に最新スナップショットの 1〜2 分後になる（開発プラン §8.1）
+    expect(INFER_CRON.hellocycling).toBe("4-59/5 * * * *");
+    expect(INFER_CRON["docomo-cycle"]).toBe("1-59/5 * * * *");
+  });
+
+  it("毎時のジョブと分が重ならない", () => {
+    const minutes = readCrons(INFER_PATH_PREFIX).map((cron) => cron.schedule.split(" ")[0]);
+    const busy = [
+      readCrons(WEATHER_PATH)[0]?.schedule.split(" ")[0],
+      readCrons(COMPACT_PATH)[0]?.schedule.split(" ")[0],
+    ];
+    for (const minute of minutes) {
+      expect(busy).not.toContain(minute);
+    }
+  });
+});
+
 describe("vercel.json の ml サービス", () => {
   /** services.<name>.functions は glob → 設定。glob は**サービスの root からの相対**。 */
   const readMlFunctions = (): Record<string, unknown> => {
@@ -169,5 +221,11 @@ describe("vercel.json の ml サービス", () => {
 
   it("glob が Python のファイルを指す", () => {
     expect(Object.keys(readMlFunctions())).toEqual(["**/*.py"]);
+  });
+
+  it("Python のルートは 1 つの maxDuration を共有する", () => {
+    // glob は `**/*.py` の 1 本しかないので、`/ml/compact` と `/ml/infer/*` に
+    // 別々の上限は付けられない。定数が食い違ったら、どちらかが効いていない
+    expect(INFER_MAX_DURATION_S).toBe(COMPACT_MAX_DURATION_S);
   });
 });

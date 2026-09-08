@@ -168,7 +168,9 @@ create function pg_temp.rest_called() returns text[] language sql immutable as $
     -- 再構築スクリプト
     'ensure_snapshot_partitions', 'drop_expired_snapshot_partitions', 'snapshot_partition_exists',
     -- 祝日の取り込みスクリプト
-    'replace_jp_holidays'
+    'replace_jp_holidays',
+    -- 推論（apps/ml の /ml/infer）
+    'begin_inference', 'finish_inference', 'upsert_forecasts'
   ];
 $$;
 

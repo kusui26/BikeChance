@@ -54,6 +54,10 @@
     {
       "path": "/ml/compact",
       "schedule": "7 * * * *"
+    },
+    {
+      "path": "/ml/infer/hellocycling",
+      "schedule": "4-59/5 * * * *"
     }
   ]
 }

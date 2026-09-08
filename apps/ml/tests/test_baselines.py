@@ -189,3 +189,21 @@ def test_b3_design_matrix_is_logit_logit_horizon() -> None:
     assert x.shape == (1, 3)
     assert x[0, 0] == pytest.approx(0.0)
     assert x[0, 2] == pytest.approx(0.5)
+
+
+# ── 標準化の分母（W3 プラン §12 の 104）────────────────────────
+def test_blend_floors_the_standardisation_scale() -> None:
+    """**動いていない列の分母は 1 にする。**
+
+    素の標準偏差をそのまま持つと、成果物に書き出すときの丸めで 0 になり、
+    読み直したモデルがゼロ除算する。中心を引けば 0 になる列なので 1 で割ってよい。
+    """
+    x = np.zeros((100, 3))
+    x[:, 0] = np.linspace(-1, 1, 100)
+    x[:, 1] = 0.5  # まったく動かない列
+    x[:, 2] = 0.5 + np.linspace(0, 1e-9, 100)  # 動いているが桁が小さすぎる列
+    model = blend.fit(x, np.array([1, 0] * 50, dtype=np.int8), np.ones(100, dtype=np.float32))
+    assert model.scale[1] == 1.0
+    assert model.scale[2] == 1.0
+    assert model.scale[0] > blend.SCALE_FLOOR
+    assert np.all(np.isfinite(blend.predict(model, x)))
