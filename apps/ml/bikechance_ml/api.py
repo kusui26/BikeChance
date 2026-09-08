@@ -24,8 +24,11 @@ from fastapi.responses import JSONResponse
 from bikechance_ml import __version__
 from bikechance_ml.auth import is_authorized
 from bikechance_ml.config import MissingConfigError, read_config
-from bikechance_ml.io.supabase import open_supabase
-from bikechance_ml.jobs.compact import CompactPort, compact_hour, to_detail
+from bikechance_ml.io.supabase import SupabaseIo, open_supabase
+from bikechance_ml.jobs.compact import CompactPort, compact_hour
+from bikechance_ml.jobs.compact import to_detail as compact_detail
+from bikechance_ml.jobs.infer import InferPort, run_inference
+from bikechance_ml.jobs.infer import to_detail as infer_detail
 
 #: 応答の形式版。増やすときは iOS / web 側と揃える。
 HEALTH_SCHEMA_VERSION: Final[str] = "1"
@@ -37,12 +40,22 @@ SERVICE_NAME: Final[str] = "ml"
 #: Cron の応答を CDN に載せない。
 NO_STORE: Final[dict[str, str]] = {"Cache-Control": "no-store"}
 
-#: 入出力の差し替え点。テストは本物の Supabase を持たないので、ここだけを置き換える。
-PortFactory = Callable[[], AbstractContextManager[CompactPort]]
+#: 配信するモデルの版。**環境変数で切り替える**（成果物のパスがそのまま版になる）。
+#: W4 で `model_versions` を作るまでは、ここが唯一の「どれを配るか」の指定である。
+MODEL_VERSION_ENV: Final[str] = "BASELINE_MODEL_VERSION"
+
+#: 推論を受け付けるシステム。**知らない名前は 400 で弾く**（DB に問い合わせない）。
+KNOWN_SYSTEMS: Final[frozenset[str]] = frozenset({"hellocycling", "docomo-cycle"})
+
+
+#: 入出力の差し替え点。**ルートごとに要る口が違う**ので別々に取る。テストは必要な
+#: ほうだけを用意すればよく、本番はどちらにも同じ `SupabaseIo` を渡す。
+CompactPortFactory = Callable[[], AbstractContextManager[CompactPort]]
+InferPortFactory = Callable[[], AbstractContextManager[InferPort]]
 
 
 @contextmanager
-def _default_port() -> Iterator[CompactPort]:
+def _default_port() -> Iterator[SupabaseIo]:
     """本番の組み立て。環境変数は**ハンドラの中で**読む（起動時に読まない）。"""
     with open_supabase(read_config(os.environ)) as io:
         yield io
@@ -71,7 +84,10 @@ def parse_hour(text: str | None) -> datetime | None:
     return at.astimezone(UTC)
 
 
-def build_app(make_port: PortFactory = _default_port) -> FastAPI:
+def build_app(
+    make_port: CompactPortFactory = _default_port,
+    make_infer_port: InferPortFactory = _default_port,
+) -> FastAPI:
     """アプリを組み立てて返す。
 
     生成を関数にしておくと、テストが本番と同じ手順でインスタンスを作れる。
@@ -128,7 +144,40 @@ def build_app(make_port: PortFactory = _default_port) -> FastAPI:
             return _problem(500, "unhandled", type(cause).__name__)
 
         return JSONResponse(
-            to_detail(summary), status_code=200 if summary.ok else 500, headers=NO_STORE
+            compact_detail(summary), status_code=200 if summary.ok else 500, headers=NO_STORE
+        )
+
+    @app.get("/ml/infer/{system}")
+    def infer(request: Request, system: str) -> JSONResponse:
+        """5 分毎の先回り推論（W3 プラン §5.10）。
+
+        **同じ観測時刻に対する 2 度目は何もせずに 200 を返す**（`inference_log` の
+        一意制約で掴む）。Vercel Cron の二重起動は無害になる。
+        """
+        secret = os.environ.get("CRON_SECRET", "")
+        if not is_authorized(request.headers.get("authorization"), secret):
+            return _problem(401, "unauthorized", "CRON_SECRET が一致しません。")
+
+        if system not in KNOWN_SYSTEMS:
+            return _problem(400, "unknown_system", f"知らないシステムです: {system}")
+
+        model_version = os.environ.get(MODEL_VERSION_ENV, "")
+        if not model_version:
+            return _problem(500, "misconfigured", f"{MODEL_VERSION_ENV} が未設定です。")
+
+        try:
+            with make_infer_port() as port:
+                summary = run_inference(port, system, model_version, datetime.now(UTC))
+        except MissingConfigError as cause:
+            return _problem(500, "misconfigured", str(cause))
+        except Exception as cause:
+            # ここに来るのは掴む前に落ちたときだけ。掴んだ後の失敗は `run_inference` が
+            # `inference_log` に記録し、`status = "failed"` の要約として返る
+            print(f"未処理の例外: {type(cause).__name__}", file=sys.stderr)
+            return _problem(500, "unhandled", type(cause).__name__)
+
+        return JSONResponse(
+            infer_detail(summary), status_code=200 if summary.ok else 500, headers=NO_STORE
         )
 
     return app

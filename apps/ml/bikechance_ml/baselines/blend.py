@@ -35,6 +35,11 @@ ITERATIONS: Final[int] = 400
 #: 水平を 0〜1 に写す基準（最長の水平）。
 HORIZON_SCALE: Final[float] = 180.0
 
+#: 標準化の分母の下限。**これより散らばりが小さい列は「動いていない」とみなす。**
+#: 素の標準偏差をそのまま使うと、成果物に書き出すときの丸めで 0 になってゼロ除算になる
+#: （W3 プラン §12 の 104）。動いていない列は中心を引けば 0 になるので、1 で割ってよい。
+SCALE_FLOOR: Final[float] = 1e-6
+
 
 @dataclass(frozen=True)
 class Blend:
@@ -75,7 +80,8 @@ def fit(
 ) -> Blend:
     """重み付きロジスティック回帰。**標準化してから素直に降りる。**"""
     center = np.asarray(x.mean(axis=0), dtype=np.float64)
-    scale = np.asarray(np.where(x.std(axis=0) > 0, x.std(axis=0), 1.0), dtype=np.float64)
+    spread = np.asarray(x.std(axis=0), dtype=np.float64)
+    scale = np.asarray(np.where(spread > SCALE_FLOOR, spread, 1.0), dtype=np.float64)
     scaled = (x - center) / scale
     weights = np.zeros(x.shape[1], dtype=np.float64)
     intercept = 0.0

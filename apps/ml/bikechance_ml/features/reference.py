@@ -39,6 +39,21 @@ class StationAttributeRow:
 
 
 @dataclass(frozen=True)
+class StationStatusRow:
+    """`station_status_latest` の 1 行。**推論の入力**（W3 プラン §5.10）。
+
+    `-1` は「一度も観測されていない」。`is_present` は最新スナップショットに現れたかで、
+    **偽でも値は前回のまま残る**（データ辞書 §4.5）。
+    """
+
+    station_id: str
+    bikes: int
+    docks: int
+    flags: int
+    is_present: bool
+
+
+@dataclass(frozen=True)
 class NeighborRow:
     """`station_neighbors` の 1 行（片方向）。
 

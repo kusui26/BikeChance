@@ -4,7 +4,7 @@
 -- 表を眺めて分かることより、間違った INSERT が落ちることの方が価値が高い。
 
 begin;
-select plan(61);
+select plan(62);
 
 -- このファイルはトランザクション内で完結し rollback するので、ここでの削除は外に影響しない。
 -- ベンチマークや手動確認でデータが残っていても同じ結果になるよう、作業テーブルを空にしてから始める
@@ -34,7 +34,10 @@ select has_table('public'::name, 'daily_quality'::name, 'daily_quality がある
 select has_table('public'::name, 'app_config'::name, 'app_config がある');
 
 -- W1 で作らないと決めたもの（W1-10）。空テーブルを先に作らない
-select hasnt_table('public'::name, 'station_forecasts'::name, '予測テーブルは W4 まで作らない');
+-- **`station_forecasts` は W3 の段 8 で作った**（実際に書き始める段まで待った。0026）。
+-- `model_versions` はまだ：登録するモデルが無い
+select has_table('public'::name, 'station_forecasts'::name, '予測テーブルは段 8 で作った');
+select has_table('public'::name, 'inference_log'::name, '推論の記録も段 8 で作った');
 select hasnt_table('public'::name, 'model_versions'::name, 'モデル登録は W4 まで作らない');
 
 -- ────────────────────────────────────────────────────────────────
