@@ -501,9 +501,13 @@ select l.system_id, l.station_id, a.name, a.lat, a.lon, a.capacity,
 匿名には**この 2 つのビューにだけ** SELECT を与える。基底テーブルの権限は与えない。
 `authenticated` にも与えない（認証の仕組みがまだ無く、到達し得るのは `anon` だけ）。
 
-**索引**：`station_attributes (lat, lon) where valid_to is null and not geo_suspect`。
-索引が無いと bbox の絞り込みが現在有効な属性行（実測 20,742 行）を毎回全件走査する
-（実測 10.6 ms のうち 6.9 ms）。
+**索引**：`station_attributes (lat, lon) where valid_to is null`（0019 で述語を直した）。
+索引が無いと bbox の絞り込みが現在有効な属性行（実測 20,742 行）を毎回全件走査する。
+
+**述語に `geo_suspect` を足してはいけない。** 0018 では `where valid_to is null and not
+geo_suspect` にしていたが、**一度も使われなかった**。ビューは属性を `left join` するので
+`where` が `coalesce(a.geo_suspect, false) = false` になり、**Postgres の含意判定は
+`NOT COALESCE(x, false)` から `NOT x` を導けない**ため候補にすら入らない（§12 の 68）。
 
 **`/v1/stations` の仕様**
 
@@ -1035,7 +1039,7 @@ W1 の実測（`station_status_latest` の `is_present` が HELLO 14,921/14,922�
    広がるので、最悪 96 件。上限 1,000 件に対して **10 倍の余裕**があり、「狭めても通らない」
    状態は起きない。
 
-**問い合わせの所要**（本番、索引を入れる前）
+**問い合わせの所要**（本番）
 
 ```
 Limit (actual time=0.082..10.533 rows=376)
@@ -1044,8 +1048,20 @@ Limit (actual time=0.082..10.533 rows=376)
 Execution Time: 10.633 ms
 ```
 
-全件走査が 6.9 ms を占めるので、部分索引 `(lat, lon) where valid_to is null and not geo_suspect`
-を足した。**いまの規模なら索引なしでも間に合うが、ポートが 10 倍になると 70 ms になる。**
+全件走査が 6.9 ms を占めるので部分索引を足した。ただし**最初に書いた述語では索引が使われず**、
+`valid_to is null` だけに直して初めて効いた（§12 の 68）。
+
+| 索引の述語 | 実行計画 | 所要 |
+|---|---|---|
+| 無し | Seq Scan | 10.6 ms |
+| `valid_to is null and not geo_suspect`（0018） | Seq Scan（**使われない**） | 9.2 ms |
+| `valid_to is null`（0019） | Index Only Scan | **0.27 ms** |
+
+**いまの規模なら索引なしでも間に合うが、ポートが 10 倍になると 70 ms になる。**
+
+**`/v1/stations` の本番実測**（2026-09-08、bbox を毎回変えて CDN を外した 20 回）：
+`min 158 ms / p50 175 ms / p75 207 ms / p95 391 ms`。合格ライン（p75 500 ms）を満たす。
+東京駅まわり 0.02° 四方で 47 ポート。
 
 **ローカルでの一気通し**（`next dev` ＋ ローカル Supabase、12 ポート）
 
@@ -1098,6 +1114,7 @@ W1 の 46 番から続けて採番する。
 | 65 | 軽微 | **`SupabaseClient` の偽物をテストで作るには `as` が要る**（CLAUDE.md §3 で禁止）。既存の `*-port.ts` にテストが無いのも同じ理由だった | 判断の入る部分（読む先・列・bbox から絞り込みへの写像・行の検査）を**純粋なモジュール `view-query.ts` に出し**、`read-port.ts` は supabase-js に渡すだけにした。偽物が要らなくなり、取り違えやすい南北・東西の対応も固定できた | `view-query.ts` |
 | 66 | 軽微 | HELLO には `capacity = 1000`・`docks = 999` のポートが実在する（横浜の広場など。実測 5 件）。異常値に見えるが**提供側の正当な値**で、丸めてはいけない | そのまま返す。表示側の判断に委ねる。データ辞書（PR F）に書く | 運用メモ |
 | 67 | 軽微 | `/v1/meta.stale` の定義が「予測が古い、または未生成」で、モデルの無い W2 では**常に true** になり何も伝えない値だった | **「いずれかのフィードの観測が途切れている」**に改めた。予測の有無は `model_version` で分かる。閾値も `stale_after_s` として返し、クライアントが同じ判定をできるようにした | `api.ts`、`meta.ts` |
+| 68 | **中** | **0018 で作った bbox の部分索引が一度も使われていなかった。** 述語を `where valid_to is null and not geo_suspect` にしたが、ビューは属性を `left join` するので `where` は `coalesce(a.geo_suspect, false) = false` になる。**Postgres の述語の含意判定は `NOT COALESCE(x, false)` から `NOT x` を導けない**ので、索引は候補にすら入らない。人間には同じ意味に見えるぶん、気づかない。実測：ビューと同じ述語で 11.5 ms（全件走査）、`not geo_suspect` と書き換えると **0.27 ms**（Index Only Scan）。本番と同じ 20,000 行をローカルに作った比較でも 13.9 ms → 0.95 ms | 0019 で述語を **`valid_to is null` だけ**にした。これはビューの結合条件にそのまま現れるので含意が自明。`geo_suspect` の除外は索引を引いたあとに任せる（該当は実測 1 件）。**pgTAP で索引の述語そのものを固定**し、親切心で `geo_suspect` を足し戻せないようにした | migration 0019、pgTAP 0010 |
 
 **実装で足したもの**（§5.3 の変更ファイル一覧に対する差分）
 

@@ -9,7 +9,7 @@
 -- **行単位の検査は必ず `system_id` で絞る。** 他のデータが混ざっていても結果が変わらないように。
 
 begin;
-select plan(24);
+select plan(26);
 
 -- ────────────────────────────────────────────────────────────────
 -- 権限
@@ -57,6 +57,24 @@ select is(
      from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relname = 'v1_stations_current'),
   'false', 'v1_stations_current は security_invoker ではない（所有者の権限で実行する）');
+
+-- ────────────────────────────────────────────────────────────────
+-- bbox 索引の述語（0019）
+-- ────────────────────────────────────────────────────────────────
+-- 述語に `geo_suspect` を足すと、ビューの `coalesce(a.geo_suspect, false) = false` から
+-- 含意を導けず、**索引が静かに使われなくなる**（実測で 11.5 ms 対 0.27 ms）。
+-- 人間には同じ意味に見えるので、機械で固定しておく。
+select ok(
+  (select count(*)::int from pg_indexes
+    where schemaname = 'public' and indexname = 'station_attributes_current_geo_idx') = 1,
+  'bbox 検索用の索引がある');
+
+select is(
+  (select pg_get_expr(i.indpred, i.indrelid)
+     from pg_index i join pg_class c on c.oid = i.indexrelid
+    where c.relname = 'station_attributes_current_geo_idx'),
+  '(valid_to IS NULL)',
+  '索引の述語は valid_to is null だけ（geo_suspect を足すと使われなくなる。0019）');
 
 -- ────────────────────────────────────────────────────────────────
 -- 前提条件をこのテストが作る
