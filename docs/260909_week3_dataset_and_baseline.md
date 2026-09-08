@@ -334,6 +334,7 @@ public.monitor_jobs()           上を 1 つずつ例外を切り分けて呼ぶ
 | `archive_weather` | 1 時間 | **3 時間** | 落ちた時刻の予報は永久に失われる |
 | `maintain_partitions` | 1 日 | 30 時間 | |
 | `refresh_station_activity` | 1 日 | 30 時間 | |
+| `daily_quality` | 1 日 | 30 時間 | **0020 で入れ忘れ、0022 で追加した**（§12 の 86） |
 | `sync_stations:hellocycling` | 1 日 | 30 時間 | |
 | `sync_stations:docomo-cycle` | 1 日 | 30 時間 | |
 
@@ -1457,3 +1458,28 @@ Edge Function を JWT で守ると、**呼ぶ側（pg_cron）がサービスロ�
 代わりに Vercel の Cron ハンドラと同じ `Authorization: Bearer <CRON_SECRET>` にした。`CRON_SECRET` は既に Vault（ウォッチドッグ用）と Vercel にある同じ値で、**Edge Function の秘密として置き場所が 1 つ増えるだけ**である。鍵の強さで比べれば明らかにこちらが軽い。
 
 **W3-04 の「新しい秘密を 1 つも置かない」は言い過ぎだった。** ODPT のトークンを持たせない（規約の例外を作らない）のが本題で、そこは達成している。
+
+### 86. 監視対象の表への入れ忘れが、そのまま盲点になっていた（段 3 の適用後）
+
+段 3 を本番に入れたあと、pg_cron のジョブと `monitored_jobs` を突き合わせて気づいた。
+
+```sql
+select c.jobname from cron.job c
+ where not exists (select 1 from public.monitored_jobs m where m.cron_job_name = c.jobname);
+-- → daily_quality
+```
+
+**`daily_quality`（毎日 07:00 JST の品質集計）が監視されていなかった。** §5.3 の表には書いてあったのに、0020 の `insert` から抜けていた。成功の有無も pg_cron への登録も見ていないので、**静かに止まっても気づけない**。
+
+**問題は 1 行足りないことではなく、足りないことに気づけない仕組みだったこと。** 0021 の `check_cron_jobs` は「**知っているジョブがまだ登録されているか**」しか見ておらず、逆向き——「**登録されているのに知らないジョブ**」——を見ていない。だから表への入れ忘れがそのまま盲点になる。
+
+0022 で両方向にした。
+
+| 向き | 何を捕まえるか | 鍵 | 抑制 |
+|---|---|---|---|
+| ① 表 → cron | 知っているジョブが外された・無効にされた | `cron_job_missing:<name>` | 3 時間 |
+| ② cron → 表 | **登録されているのに監視していない**（入れ忘れ） | `cron_job_unmonitored:<name>` | 24 時間 |
+
+pgTAP には「**pg_cron のジョブに監視の抜けが無い**」を不変条件として足した。次に cron ジョブを増やして表に入れ忘れたら、テストと本番の両方で鳴る。
+
+**この見つけ方自体が段 1 の理屈の実例になっている。** 「失敗を探す」検査は、そもそも対象に入っていないものを見つけられない。**在るべきものの一覧と、実際に在るものを突き合わせる**必要がある。
