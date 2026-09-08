@@ -21,7 +21,8 @@ from bikechance_ml.features.constants import (
 
 #: JST は **固定の +09:00**。日本は 1951 年以降に夏時間を採っていないので、
 #: `zoneinfo`（tzdata の同梱が要る）を持ち込まずに固定オフセットで表す。
-JST: Final[timezone] = timezone(timedelta(hours=9), "JST")
+JST_OFFSET_MS: Final[int] = 9 * 60 * 60 * 1000
+JST: Final[timezone] = timezone(timedelta(milliseconds=JST_OFFSET_MS), "JST")
 
 _MS_PER_MINUTE: Final[int] = 60_000
 
