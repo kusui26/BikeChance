@@ -5,7 +5,7 @@
 - **数値**：断りのないものはすべて 2026-09-08 に本番で実測した値。推測は「見込み」と書く。
 - **観測期間はまだ短い**：毎分収集は **2026-09-06 20:07 JST** から、天気は **2026-09-08 00:17 JST** から。**分布や「一度も現れていない」という記述は、この期間だけの話である。** 平日 2 日ぶんしか無く、休日・雨天・イベント日を含んでいない。データが貯まったら測り直し、日付を添えて書き換える。
 - **更新規則**：列・パス・センチネルの意味を変えたら、**同じ PR でこの文書も直す**。実測値を足すときは測った日付を添える。
-- **変更履歴**：**v1.5（2026-09-08）暦（§7.5）と天気ファイルの入手時刻（§7.6）を追加。** **v1.4（2026-09-08）Parquet に `fetched_at` を足し、全期間を畳み直した（§7.3）。読む側は必ず明示スキーマを渡す規約を書いた。** **v1.3（2026-09-08）`OPEN_METEO_FORECAST_DAYS` を 2 → 3 に広げた（§7.2・§8.1・§8.2）。2 モデルの食い違いが緯度で決まることを 371,280 値で測り直した（§8.3）。** v1.2（2026-09-08）W2 完了時点の点検を反映（`job_runs` の保持規則の記述を訂正、天気ファイルの入手時刻、`fetched_at` の代用）。v1.1（2026-09-08）EDA #1 の結果を反映（実在しないポート `5753`、名前での除外が危険なこと）。v1.0（2026-09-08）初版。W2 の PR F。
+- **変更履歴**：**v1.6（2026-09-08）行政区画コードと近傍リストを追加（§4.9・§4.10・§4.2）。** **v1.5（2026-09-08）暦（§7.5）と天気ファイルの入手時刻（§7.6）を追加。** **v1.4（2026-09-08）Parquet に `fetched_at` を足し、全期間を畳み直した（§7.3）。読む側は必ず明示スキーマを渡す規約を書いた。** **v1.3（2026-09-08）`OPEN_METEO_FORECAST_DAYS` を 2 → 3 に広げた（§7.2・§8.1・§8.2）。2 モデルの食い違いが緯度で決まることを 371,280 値で測り直した（§8.3）。** v1.2（2026-09-08）W2 完了時点の点検を反映（`job_runs` の保持規則の記述を訂正、天気ファイルの入手時刻、`fetched_at` の代用）。v1.1（2026-09-08）EDA #1 の結果を反映（実在しないポート `5753`、名前での除外が危険なこと）。v1.0（2026-09-08）初版。W2 の PR F。
 
 ---
 
@@ -179,7 +179,7 @@ ODPT の GBFS v2.3。収集しているのは 2 フィードだけで、いず�
 | `first_seen_at` | timestamptz | 台帳に載った時刻 | 同上 |
 | `last_seen_at` | timestamptz | 直近 25 時間から計算 | 日次 `refresh_station_activity` |
 | `is_active` | bool | 72 時間観測されなければ false | 同上 |
-| `pref_code` / `muni_code` | smallint / int | 座標から導く行政区画コード | **W3 まで NULL** |
+| `pref_code` / `muni_code` | smallint / int | 行政区画コード（JIS X 0401 / X 0402）。**住所から** `muni_codes` への前方一致で導く。ドコモは住所が無いので**両方 NULL** | 日次 `rebuild_geo`（§4.9） |
 
 **`is_active` と `last_seen_at` は「いまの状態」である。** 過去のサンプルの判定に使ってはいけない（§10.1）。
 
@@ -296,6 +296,48 @@ create table public.jp_holidays (holiday_date date primary key, name text not nu
 > **プロファイルと気候値（B2）のセルは `dow_type`（3 値）で切る。** 7 値で切るとセルあたりのサンプルが半分以下になり、`station × dow_type × slot15` が埋まらない。
 
 **2 言語の実装は `fixtures/calendar/day_type_golden.csv`（730 日）で突き合わせてある。** 規則を変えたら `pnpm exec tsx scripts/gen-calendar-golden.ts` で作り直し、**差分をレビューする**。
+
+### 4.9 `muni_codes` — 全国地方公共団体コード（1,917 行）
+
+```sql
+create table public.muni_codes (
+  muni_code integer primary key,   -- 上 5 桁。検査数字は含まない
+  pref_code smallint not null,     -- muni_code / 1000
+  pref_name text not null,         -- 「神奈川県」
+  muni_name text not null          -- 「横浜市瀬谷区」（政令市の区も 1 行）
+);
+```
+
+- 出典は総務省「全国地方公共団体コード」。原本は `supabase/seed/muni_codes.csv`、生成は `scripts/gen-muni-codes.py`
+- **`smallint` に入らない。** 沖縄県与那国町は 47382 で上限 32767 を超える
+- **住所の解析はこの表への前方一致で行う。正規表現を使わない。** 「蒲郡市」「東村山市」「廿日市市」は正規表現だと必ず間違える（W3 プラン §12 の 91）
+
+### 4.10 `station_neighbors` — 半径 500 m の近傍（106,438 行）
+
+```sql
+create table public.station_neighbors (
+  system_id text, station_id text, nb_system_id text, nb_station_id text,
+  distance_m  smallint,   -- 0〜500。四捨五入した整数メートル
+  same_system boolean,    -- system_id = nb_system_id
+  primary key (system_id, station_id, nb_system_id, nb_station_id)
+);
+```
+
+- **片方向の行が両方入る**（A→B と B→A）。片側だけ読めばよい
+- **300 m の特徴量は `distance_m <= 300` で絞る。** 表を 2 つ持たない
+- `same_system` は事業者が同じかどうか。**HELLO とドコモは別事業者で、利用者はふつう乗り換えられない**ので、近傍の集約は「同一システムのみ」と「全部」の 2 系統を作る
+- `geo_suspect`（座標が日本の外）のポートは入らない。**外部キーを張っていない**（毎日全置換するので孤児が生じない）
+
+**近傍が 1 つも無いポートは実データである。欠損ではない。**
+
+| 半径 | ペア数 | 平均 | 中央 | p90 | 近傍 0 のポート |
+|---|---|---|---|---|---|
+| 300 m | 42,950 | 2.1 | 1 | 5 | **5,776（27.8%）** |
+| 500 m | 106,438 | 5.1 | 4 | 11 | 2,111（10.2%） |
+
+`nb_bikes_sum` のような合計は **0 で埋める**。`nb_fill_ratio_mean` のような平均は分母が 0 なので **NULL にする**。1 km 以内に 1 件も無いのは HELLO 373 件・ドコモ 127 件で、そこだけ `muni_code` の平均に落とす（HELLO のみ。ドコモは市区町村が無いのでシステム全体の平均）。
+
+**更新は日次の `rebuild_geo()`**（pg_cron `30 19 * * *` UTC ＝ 04:30 JST、属性同期の後）。`rebuild_station_geo()` で `stations.pref_code` / `muni_code` を埋め、`rebuild_station_neighbors()` で近傍を**全置換**する。結果は `job_runs` の `detail` に `{geo: {...}, neighbors: {...}}` で残る。**当たらなかった住所は推測で埋めず、件数を `detail.geo.unmatched` に出す。**
 
 ## 5. 公開ビュー（`/v1` が読む唯一の面）
 
@@ -621,11 +663,12 @@ select hour_epoch_s from public.v_weather_files
 | 充電ステーション | ○（1.8%） | ✗ | `raw->>'is_charging_station'` | HELLO 専用 |
 | エリア | ✗ | ○（15+ 区分） | `raw->>'region_id'` | ドコモ専用。**名前は未収集**（§12） |
 | 座標・地理特徴 | ○ | ○ | `lat` / `lon` | `geo_suspect` の 1 件に注意 |
-| 行政区画（都道府県・市区町村） | **✗** | **✗** | `stations.pref_code` / `muni_code` | **W3 まで NULL** |
+| 行政区画（都道府県・市区町村） | ○ | **✗** | `stations.pref_code` / `muni_code` | 住所から導く（§4.9）。ドコモは住所が無く NULL |
+| 近傍のポート（500 m / 300 m） | ○ | ○ | `station_neighbors` | **近傍 0 は実データ**。合計は 0、平均は NULL（§4.10） |
 | 天気（気温・降水・降水確率・風速・天気コード） | ○ | ○ | `weather-raw` | 時刻は JST（§8.2）。モデル 2 本（§8.3） |
 | 情報の鮮度 `reported_age_s` | ○ | **✗** | `reported_age_s` | ドコモは恒常的に 0 ＝**情報が無い** |
 | 車種別の在庫 | **✗** | ✗ | — | 冗長で意味を持たない（§3.1） |
-| 曜日・時刻・祝日 | ○ | ○ | `observed_at` から導出 | 祝日表はまだ無い |
+| 曜日・時刻・祝日 | ○ | ○ | `observed_at` ＋ `jp_holidays` | `day_type` 7 値・`dow_type` 3 値（§4.8） |
 
 ---
 
@@ -633,12 +676,11 @@ select hour_epoch_s from public.v_weather_files
 
 | 項目 | 状態 | いつ |
 |---|---|---|
-| `stations.pref_code` / `muni_code` | **NULL のまま** | W3 |
 | ドコモの `region_id` に対応する地域名 | `system_regions.json` を収集していない | 必要になったら |
 | `vehicle_type_id` の意味 | `vehicle_types.json` を収集していない | 車種が増えたら |
 | 天気のバックフィル近似 | **未確定**。アーカイブ開始（2026-09-08 00:17 JST）より前をどう埋めるか | W4 |
 | どちらの天気モデルを使うか | **未確定**。両方を保存し続けている | W4 |
-| 祝日・イベントのカレンダー | 無い | W4 |
+| イベントのカレンダー（花火・祭・スタジアム） | 無い（祝日は §4.8 で入った） | W5 以降 |
 | 予測（`station_forecasts`）・モデル版（`model_versions`） | **テーブルがまだ無い** | W4 |
 | 特徴量の Parquet（`features/date=…`） | 無い | W5 |
 

@@ -86,7 +86,7 @@ select is(
 );
 select is(
   (select count(*)::int from public.monitored_jobs where cron_job_name is not null),
-  7, 'pg_cron のジョブ 7 本が登録の検査対象（0022 で daily_quality を足した）'
+  8, 'pg_cron のジョブ 8 本が登録の検査対象（0022 で daily_quality、0025 で rebuild_geo）'
 );
 select is(
   (select count(*)::int from cron.job c
@@ -172,7 +172,7 @@ select is(pg_temp.last_detail('reason'), 'functions_base_url が未設定', 'ど
 -- 検査 5：pg_cron の登録
 -- ────────────────────────────────────────────────────────────────
 delete from public.alert_state;
-select is(public.check_cron_jobs() -> 'checked', '7'::jsonb, '7 本を見る');
+select is(public.check_cron_jobs() -> 'checked', '8'::jsonb, '8 本を見る');
 select is(public.check_cron_jobs() -> 'alerts', '0'::jsonb, '全部登録されていれば鳴らない');
 
 -- 登録されていない場合（cron.job を触らずに、指す名前を変えて確かめる）

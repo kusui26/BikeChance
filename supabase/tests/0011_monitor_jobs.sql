@@ -117,8 +117,8 @@ select is(
   true, 'postgres は BYPASSRLS（security definer の中から全行が見える）'
 );
 
--- 0020 で 9 本、0021 が trigger_backup_collect を、0022 が daily_quality を足して 11 本
-select is((select count(*)::int from public.monitored_jobs), 11, '監視対象は 11 ジョブ');
+-- 0020 で 9 本、0021・0022・0025 が 1 本ずつ足して 12 本
+select is((select count(*)::int from public.monitored_jobs), 12, '監視対象は 12 ジョブ');
 select is(
   (select array_agg(job_name order by job_name) from public.monitored_jobs where not is_active),
   array['trigger_backup_collect'],
