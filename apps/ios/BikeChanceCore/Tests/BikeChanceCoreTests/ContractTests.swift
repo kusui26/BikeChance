@@ -94,6 +94,62 @@ struct ContractTests {
         #expect(credit.contains("creativecommons.org"))
     }
 
+    // ── ポート詳細（W3 プラン §5.11）────────────────────────
+    @Test("**実応答からポート詳細を組み立てられる**")
+    func buildsTheDetailFromTheRealResponse() throws {
+        let response = try Self.decode(StationsResponse.self, "stations")
+        let feeds = response.feedIndex()
+        let credits = response.attributionIndex()
+        // 応答が作られた時刻を「いま」とみなす。実際の鮮度で判定するため
+        let now = response.generatedAt
+
+        for station in response.stations {
+            let detail = StationDetail(
+                station: station,
+                feed: feeds[station.systemID],
+                attribution: credits[station.systemID],
+                now: now
+            )
+            // 名前が無いポートでも空欄にしない
+            #expect(!detail.name.isEmpty)
+            // **クレジットは全ポートで引ける**（表示義務。CC BY 4.0）
+            #expect(detail.credit != nil)
+            #expect(detail.facts.map(\.label) == ["容量", "設置", "座標", "ポート ID"])
+            #expect(detail.availability.count == 2)
+        }
+    }
+
+    @Test("実応答では大半のポートで台数が出る（鮮度も通る）")
+    func realStationsShowTheirCounts() throws {
+        let response = try Self.decode(StationsResponse.self, "stations")
+        let feeds = response.feedIndex()
+        let now = response.generatedAt
+        let shown = response.stations.filter { station in
+            let detail = StationDetail(
+                station: station, feed: feeds[station.systemID], attribution: nil, now: now)
+            return detail.availability[0].value != StationDetail.unknownValue
+        }
+        // 取得直後の応答なので、ほとんどのポートは「現在値」として出せるはず
+        #expect(shown.count > response.stations.count / 2)
+    }
+
+    @Test("ドコモのポートには動的容量の注記が付く")
+    func docomoStationsExplainTheirCapacity() throws {
+        let response = try Self.decode(StationsResponse.self, "stations")
+        let feeds = response.feedIndex()
+        let docomo = try #require(
+            response.stations.first {
+                feeds[$0.systemID]?.capacityIsDynamic == true && $0.capacity != nil
+            },
+            "動的容量のポートがフィクスチャに無い"
+        )
+        let detail = StationDetail(
+            station: docomo, feed: feeds[docomo.systemID], attribution: nil,
+            now: response.generatedAt)
+        let capacity = try #require(detail.facts.first { $0.label == "容量" })
+        #expect(capacity.note?.contains("固定の台数ではなく") == true)
+    }
+
     @Test("Problem Details をデコードできる")
     func decodesProblems() throws {
         let missing = try Self.decode(Problem.self, "problem_bbox_missing")

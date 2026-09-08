@@ -14,6 +14,7 @@ struct MapScreen: View {
     @State private var camera: MapCameraPosition = .region(MapScreen.initialRegion)
     @State private var visible: [StationCurrent] = []
     @State private var feeds: [String: FeedStatus] = [:]
+    @State private var attributions: [String: Attribution] = [:]
     @State private var selected: StationCurrent?
     @State private var showsCredits = false
     @State private var now = Date()
@@ -29,6 +30,24 @@ struct MapScreen: View {
     private static let tickSeconds = 30
 
     var body: some View {
+        NavigationStack {
+            map
+                // 地図は全面に出す。詳細画面のほうは自分でバーを持つ
+                .toolbar(.hidden, for: .navigationBar)
+                .navigationDestination(item: $selected) { station in
+                    // 選んだあとに再取得が走ることがあるので、**表示は最新の行から引き直す**
+                    let latest = visible.first { $0.id == station.id } ?? station
+                    StationDetailScreen(
+                        station: latest,
+                        feed: feeds[latest.systemID],
+                        attribution: attributions[latest.systemID],
+                        now: now
+                    )
+                }
+        }
+    }
+
+    private var map: some View {
         Map(position: $camera, selection: $selected) {
             UserAnnotation()
             ForEach(visible) { station in
@@ -52,12 +71,6 @@ struct MapScreen: View {
         }
         .safeAreaInset(edge: .top) { StatusBanner(state: model.state, now: now) }
         .safeAreaInset(edge: .bottom) { CreditFooter(showsCredits: $showsCredits) }
-        .sheet(item: $selected) { station in
-            // 選んだあとに再取得が走ることがあるので、**表示は最新の行から引き直す**
-            let latest = visible.first { $0.id == station.id } ?? station
-            StationSheet(station: latest, feed: feeds[latest.systemID], now: now)
-                .presentationDetents([.height(260)])
-        }
         .sheet(isPresented: $showsCredits) { CreditsScreen() }
         .onChange(of: model.state) { _, state in apply(state) }
         .task {
@@ -76,6 +89,7 @@ struct MapScreen: View {
             return
         }
         feeds = response.feedIndex()
+        attributions = response.attributionIndex()
         let center = response.bbox.bbox
         visible = MarkerSelection.nearest(
             response.stations,
