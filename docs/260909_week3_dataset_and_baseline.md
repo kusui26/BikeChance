@@ -720,7 +720,7 @@ create table public.station_neighbors (
 
 **完了条件**：`station_neighbors` が約 10.6 万行。`pref_code` / `muni_code` が HELLO 14,922 件すべてに入る。2 回動かして行が増えない（冪等）。→ **前 2 つは達成。冪等は翌日 04:30 JST の pg_cron 実行で `before = 106438` として確認する**（`job_runs` の `detail.neighbors.before`）。
 
-**副産物：`job_runs` の所要時間が全ジョブで 0 秒になっている**（§12 の 94）。
+**副産物：`job_runs` の所要時間が、pg_cron から呼ぶジョブでは 0 秒になっている**（§12 の 94。0028 で直した）。
 
 **地理の特徴量の主役は近傍リストのほうである**（§10.2a の実測）。`muni_code` は近傍が 1 件も無いポートの控えとして使う。
 
@@ -1980,7 +1980,44 @@ started_at = finished_at   →   所要 0.00 秒
 
 Vercel 側は `job_started` と `job_finished` が**別のリクエスト＝別のトランザクション**なので実測値が入る。差が出ているのはそのためで、pg_cron 側だけが 0 になる。
 
-**`job_finished` の `now()` を `clock_timestamp()` に変えれば直る**（`started_at` はトランザクション開始のままで正しい）。13 系統が使う共有関数なので**別 PR にする**。いまのところ実害は「pg_cron のジョブの所要が測れない」だけで、監視は `finished_at` の新しさしか見ていない。
+**`job_finished` の `now()` を `clock_timestamp()` に変えれば直る**（`started_at` はトランザクション開始のままで正しい）。13 系統が使う共有関数なので**別 PR にした**（0028。段 9 のあと）。
+
+本番で測り直すと、13 系統は**壊れている 7 と、元から正しい 6** にきれいに割れていた。
+
+| 呼び出し経路 | ジョブ | 行数 | 所要 |
+|---|---|---|---|
+| **pg_cron の中**（関数の呼び出し全体が 1 トランザクション） | `watchdog_collect` / `monitor_feeds` / `monitor_jobs` / `maintain_partitions` / `refresh_station_activity` / `daily_quality` / `rebuild_geo` | 2,697 | **全行きっかり 0 ms** |
+| PostgREST 越し（RPC 1 回が 1 トランザクション） | `compact_parquet` / `archive_weather` / `sync_stations`×2 / `backup_collect`×2 | 133 | 269〜5,079 ms |
+
+機構は本番サーバーで直接確かめた。`now()` はトランザクション開始時刻で、何秒はたらいても動かない（時刻はサーバーの UTC）。
+
+```
+now   1 回目 13:02:32.861      clock 1 回目 13:02:32.877
+   ↓ pg_sleep(0.5)
+now   2 回目 13:02:32.861      clock 2 回目 13:02:33.434
+```
+
+**直すのは `finished_at` だけでよい。** pg_cron ではトランザクション開始＝ジョブ開始、PostgREST では `job_started` 自身が 1 トランザクション。どちらの経路でも `started_at` は「開始時刻」として正しい。
+
+**天気の特徴量は動かない。** `v_weather_files.available_at`（§9.4）は `job_runs.finished_at` そのもので**学習の入力**だが、書き手の `archive_weather` は Vercel Cron ＝ PostgREST 越しなので、`finished_at` は元から「`job_finished` を呼んだ瞬間」だった。ずれるのは 1 ミリ秒未満で、**train/serve skew も特徴量の作り直しも生じない**。
+
+**これでも測れないもの**
+
+- `trigger_backup_collect`（段 3）は `net.http_post` でキューに積むだけなので、測れるのは投函までである。バックアップの実所要は Edge Function 自身が書く `backup_collect:<system>` の行が持つ（269 / 592 ms）。
+- **過去の行は 0 秒のまま。** 埋め戻す材料が無いので補間しない（CLAUDE.md §6）。適用の前後を並べて比べてはいけない。
+
+**不変条件**：`0007_ops_functions.sql` に「0.05 秒はたらいてから閉じるジョブ」を 1 本足した。**pgTAP 自身が 1 トランザクションなので、これがそのまま pg_cron の再現になる。** `now()` に戻すと落ちることを、ローカルで実際に戻して確かめた。
+
+```
+# Failed test 2: "**所要が測れる**（now() に戻すと 0 秒になって落ちる）"
+#     '00:00:00'
+#         >=
+#     '00:00:00.04'
+```
+
+**急ぐ理由が無かったのは、監視が所要を 1 度も読んでいないからである。** `check_jobs_missing` も `check_jobs_failed` も判定は `started_at` で、誤検知も見逃しも起きていない。失っていたのは目のほうで、いちばん惜しいのは **`rebuild_geo`** である。その中の近傍づくりを 80.45 秒 → 1.70 秒に詰めた（§12 の 92）のに、**毎晩 04:30 JST に動きながら、退行しても何も教えてくれない**状態だった。全体の 4.38 秒も `\timing` で手で測った値で、`job_runs` には残っていない。
+
+**段 8 で足した `finish_inference`（0026）は、最初から `clock_timestamp()` で書いてあった。** 新しい関数のほうが正しく、13 系統が乗っている土台だけが取り残されていた。**古い共有関数は「ずっと動いているから正しい」と見なされやすい。**
 
 **教訓は「記録した値が本当に測れているかを、一度は別の手段で突き合わせる」。** `job_runs` に列があることと、その列に意味があることは別である。
 

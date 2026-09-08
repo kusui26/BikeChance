@@ -5,7 +5,7 @@
 -- 到達の確認は本番での強制発火で行う。
 
 begin;
-select plan(52);
+select plan(58);
 
 -- テストはトランザクション内で完結し rollback するので、ここでの削除は外に影響しない
 delete from public.station_status_latest;
@@ -44,6 +44,55 @@ $$;
 create function pg_temp.job_detail(p_name text, p_key text) returns text language sql as $$
   select detail->>p_key from public.job_runs where job_name = p_name order by id desc limit 1;
 $$;
+
+-- ────────────────────────────────────────────────────────────────
+-- job_started / job_finished：所要が測れること（W3 プラン §12 の 94）
+-- ────────────────────────────────────────────────────────────────
+-- **`finished_at` は `clock_timestamp()` でなければならない。** `now()` はトランザクション
+-- 開始時刻を返すので、pg_cron のように**関数の呼び出し全体が 1 トランザクション**のジョブ
+-- では `finished_at = started_at` になり、所要が必ず 0 秒になる（本番で 2,697 行がそう
+-- なっていた。0028 で直した）。ここは 0.05 秒はたらいてから閉じるので、`now()` に戻すと
+-- この検査は必ず落ちる。**pgTAP 自身が 1 トランザクションであることが、そのまま再現になる。**
+
+-- 開いたまま閉じない（`running` のまま残る。最後の検査を空振りさせないために要る）
+create function pg_temp.start_only() returns text language plpgsql as $$
+declare
+  v_id bigint;
+begin
+  v_id := public.job_started('pgtap_started');
+  return (select status from public.job_runs where id = v_id);
+end;
+$$;
+
+-- 開いて 0.05 秒はたらいてから閉じ、記録された所要を返す
+create function pg_temp.run_once() returns interval language plpgsql as $$
+declare
+  v_id bigint;
+begin
+  v_id := public.job_started('pgtap_timing');
+  perform pg_sleep(0.05);                              -- はたらいているつもり
+  perform public.job_finished(v_id, 'ok', '{"n_rows": 7}'::jsonb);
+  return (select finished_at - started_at from public.job_runs where id = v_id);
+end;
+$$;
+
+select is(pg_temp.start_only(), 'running', 'job_started は running の行を作る');
+select cmp_ok(
+  pg_temp.run_once(), '>=', interval '40 milliseconds',
+  '**所要が測れる**（now() に戻すと 0 秒になって落ちる）'
+);
+select is(pg_temp.job_status('pgtap_timing'), 'ok', 'job_finished が状態を書き換える');
+select is(pg_temp.job_detail('pgtap_timing', 'n_rows'), '7', 'job_finished が detail を残す');
+select ok(
+  (select started_at = now() from public.job_runs
+    where job_name = 'pgtap_timing' order by id desc limit 1),
+  '**started_at はトランザクション開始のままでよい**（pg_cron ではジョブ開始と同じ）'
+);
+select is(
+  (select count(*)::int from public.job_runs
+    where job_name = 'pgtap_timing' and status = 'running'),
+  0, '閉じ忘れた running が残らない'
+);
 
 -- ────────────────────────────────────────────────────────────────
 -- 設定値
