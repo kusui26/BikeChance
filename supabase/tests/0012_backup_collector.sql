@@ -8,7 +8,7 @@
 -- 自分で入れた行だけに閉じる。
 
 begin;
-select plan(45);
+select plan(50);
 
 delete from public.job_runs;
 delete from public.alert_state;
@@ -86,7 +86,12 @@ select is(
 );
 select is(
   (select count(*)::int from public.monitored_jobs where cron_job_name is not null),
-  6, 'pg_cron のジョブ 6 本が登録の検査対象'
+  7, 'pg_cron のジョブ 7 本が登録の検査対象（0022 で daily_quality を足した）'
+);
+select is(
+  (select count(*)::int from cron.job c
+    where not exists (select 1 from public.monitored_jobs m where m.cron_job_name = c.jobname)),
+  0, '**pg_cron のジョブに監視の抜けが無い**（0022 の逆向きの検査が守る）'
 );
 
 -- ────────────────────────────────────────────────────────────────
@@ -167,14 +172,20 @@ select is(pg_temp.last_detail('reason'), 'functions_base_url が未設定', 'ど
 -- 検査 5：pg_cron の登録
 -- ────────────────────────────────────────────────────────────────
 delete from public.alert_state;
-select is(public.check_cron_jobs() -> 'checked', '6'::jsonb, '6 本を見る');
+select is(public.check_cron_jobs() -> 'checked', '7'::jsonb, '7 本を見る');
 select is(public.check_cron_jobs() -> 'alerts', '0'::jsonb, '全部登録されていれば鳴らない');
 
 -- 登録されていない場合（cron.job を触らずに、指す名前を変えて確かめる）
 update public.monitored_jobs set cron_job_name = 'not_scheduled_at_all'
  where job_name = 'trigger_backup_collect';
-select is(public.check_cron_jobs() -> 'alerts', '1'::jsonb, '登録が無ければ鳴る');
+-- **2 件鳴るのが正しい。** 存在しないジョブを指した（①）ことで、本物の
+-- backup_collect が誰からも参照されなくなる（②）。両方向が同時に効いている
+select is(public.check_cron_jobs() -> 'alerts', '2'::jsonb, '登録が無ければ鳴る（両方向で 2 件）');
 select ok(pg_temp.has_alert('cron_job_missing:not_scheduled_at_all'), '鍵にジョブ名が入る');
+select ok(
+  pg_temp.has_alert('cron_job_unmonitored:backup_collect'),
+  '参照されなくなった本物のジョブも「知らないジョブ」として拾う'
+);
 select alike(
   (select last_value->>'message' from public.alert_state
     where alert_key = 'cron_job_missing:not_scheduled_at_all'),
@@ -182,6 +193,16 @@ select alike(
 );
 update public.monitored_jobs set cron_job_name = 'backup_collect'
  where job_name = 'trigger_backup_collect';
+
+-- **逆向き：登録されているのに monitored_jobs に無いジョブ**（0022）。
+-- 表への入れ忘れがそのまま盲点になっていたので、両方向を見るようにした
+delete from public.alert_state;
+select is(public.check_cron_jobs() -> 'unmanaged', '0'::jsonb, '普段は知らないジョブが無い');
+delete from public.monitored_jobs where job_name = 'daily_quality';
+select is(public.check_cron_jobs() -> 'unmanaged', '1'::jsonb, '表から消すと「知らないジョブ」として数える');
+select ok(pg_temp.has_alert('cron_job_unmonitored:daily_quality'), '入れ忘れを通知する');
+insert into public.monitored_jobs (job_name, expected_every, missing_after, cron_job_name)
+values ('daily_quality', interval '1 day', interval '30 hours', 'daily_quality');
 
 -- 無効にされた場合
 delete from public.alert_state;
