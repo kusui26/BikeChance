@@ -36,6 +36,9 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+
+# 分析が Parquet を置く場所（再実行を速くするだけ。中身は Storage が正）
+.cache/
 .ipynb_checkpoints/
 
 # === Xcode / Swift（apps/ios） ===
