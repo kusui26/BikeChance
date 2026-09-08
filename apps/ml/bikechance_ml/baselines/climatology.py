@@ -123,8 +123,8 @@ def _days_per_cell(key: Int64, day: Int32, size: int) -> Int64:
 
 def predict(table: Table, samples: Samples, fallback: Float64) -> Applied:
     """当てはめる。使えないセルは `fallback`（B1 の予測）に落とす。"""
-    key = _key(samples)
-    usable = table.usable[key]
+    key, inside = _lookup(table, samples)
+    usable = np.asarray(inside & table.usable[key], dtype=np.bool_)
     return Applied(
         probability=np.where(usable, table.rate[key], fallback),
         fell_back=int((~usable).sum()),
@@ -140,11 +140,11 @@ def predict_leave_one_out(
     気候値はセルが小さいので、自分を含めた推定は「その日の観測そのもの」になりやすい。
     自分を引いたあとサンプル数が下限に満たなくなるセルは `fallback`（B1）に落とす。
     """
-    key = _key(samples)
+    key, inside = _lookup(table, samples)
     weight = samples.weight.astype(np.float64)
     total = table.total[key] - weight
     positive = table.positive[key] - weight * samples.y(target)
-    usable = (table.counted[key] - 1 >= table.min_samples) & (total > 0)
+    usable = inside & (table.counted[key] - 1 >= table.min_samples) & (total > 0)
     rate = np.divide(positive, total, out=fallback.copy(), where=usable)
     return Applied(
         probability=np.asarray(np.where(usable, rate, fallback)),
@@ -153,11 +153,33 @@ def predict_leave_one_out(
     )
 
 
+def _lookup(table: Table, samples: Samples) -> tuple[Int64, Bools]:
+    """引くセルの番号と、それが**表の中に収まっているか**を返す。
+
+    **表に無いポートは番号が負で来る。** 配信では、成果物を作ったあとに現れたポートに
+    `port = -1` が振られる（`jobs/infer.py` の `to_samples`）。`_key` はそれを
+    `-288 〜 -1` にするが、**numpy の負インデックスは表の末尾に回り込む**ので、素直に
+    引くと**最後のポートの気候値**が返る。本番で 5 ポートが別のポートの履歴を読み、
+    しかも `confidence = 3`（気候値が効いた）として配られていた（§12 の 110）。
+
+    範囲外は「使えないセル」として扱い、`predict` が `fallback`（B1）に落とす。**予測を
+    出さなくする必要はない。** 新しいポートでも B1（システム × バケツ × 水平）は正しく
+    出るので、気候値の層だけを外せばよい。
+
+    番号は 0 に丸めて返す（引く先を有効な添字にしておく。値は `usable` で捨てる）。
+    """
+    key = _key(samples)
+    inside = np.asarray((key >= 0) & (key < table.usable.size), dtype=np.bool_)
+    return np.asarray(np.where(inside, key, 0), dtype=np.int64), inside
+
+
 def _key(samples: Samples) -> Int64:
     """`(ポート, dow_type, slot15)` を 1 本の番号にする。
 
     ポートの番号は `(system_id, station_id)` の組から振ってある（`dataset.py`）。
     `station_id` だけで振ると、システムを跨いで衝突する 2,608 件が**同じセルに混ざる**。
+
+    **表に無いポートの番号は負になる。** 引く前に `_lookup` を通すこと。
     """
     return np.asarray(
         (samples.port.astype(np.int64) * len(DOW_TYPES) + samples.dow_type) * SLOTS_PER_DAY

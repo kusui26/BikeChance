@@ -303,6 +303,26 @@ def test_unknown_port_still_gets_a_baseline() -> None:
     assert port.written == []
 
 
+def test_unknown_port_does_not_borrow_another_ports_climatology() -> None:
+    """**知らないポートは `port = -1` になり、負の添字は表の末尾に回り込む**（§12 の 110）。
+
+    末尾は `hellocycling/c`＝いつも 7 台あるポートなので、直す前は**空のポートが
+    「41.7% の確率で借りられる」**と言われていた。気候値の層が外れれば、同じ 0 台の
+    既知ポート `a` とまったく同じ値になる。
+
+    **上の検査（`confidence == 2`）はこれを捕まえられなかった。** 信頼度は「過半の水平で
+    気候値が効いたか」しか見ておらず、**引いた先が別のポートでも 2 のまま**だったからで
+    ある。確率そのものを見ないと分からない。
+    """
+    empty = (StationStatusRow("a", 0, 9, OPEN, True),)
+    unknown = (StationStatusRow("zzz", 0, 9, OPEN, True),)
+    known = predict(ARTIFACT, "hellocycling", empty, NOW, BASE, frozenset())
+    fresh = predict(ARTIFACT, "hellocycling", unknown, NOW, BASE, frozenset())
+    assert fresh[0].p_bike_x1000 == known[0].p_bike_x1000
+    assert fresh[0].p_dock_x1000 == known[0].p_dock_x1000
+    assert max(fresh[0].p_bike_x1000) < 100  # 直す前は 417
+
+
 def test_horizons_are_ordered_as_the_contract_says() -> None:
     payload = to_payload(forecasts(), NOW, BASE, "m1")
     assert payload[0]["horizons_min"] == sorted(HORIZONS_MIN)

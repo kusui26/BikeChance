@@ -7,6 +7,8 @@
   * B2 は**下限に満たないセルを B1 に落とし、その割合を返す**（W3-17）
 """
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -147,6 +149,45 @@ def test_b2_does_not_mix_stations_with_the_same_id() -> None:
     table = climatology.fit(samples, BIKE, all_rows(3))
     applied = climatology.predict(table, samples, np.full(3, 0.5))
     assert applied.probability.tolist() == pytest.approx([1.0, 1.0, 0.5])
+
+
+def test_b2_does_not_borrow_the_last_ports_cell_for_an_unknown_port() -> None:
+    """**表に無いポートは `port = -1` で来る**（§12 の 110）。
+
+    `_key` が作る番号は負になり、**numpy の負インデックスは表の末尾に回り込む**ので、
+    素直に引くと**最後のポートの気候値**が返る。ここは表がポート 1 つぶん（288 セル）
+    しかないので `-1` は同じセルにぴたりと重なる：直す前は 0.25 ではなく 1.0
+    （ポート a の気候値）が返っていた。
+    """
+    rows = [
+        fixture.row(DAY0, "hellocycling", "a", 5, 0, 9, 1, 1),
+        fixture.row(DAY1, "hellocycling", "a", 5, 0, 9, 1, 1),
+    ]
+    known = samples_of(rows)
+    table = climatology.fit(known, BIKE, all_rows(2))
+    assert table.cells == 1, "回り込む先に使えるセルが無いと、この検査は何も見ていない"
+
+    unknown = replace(known, port=np.full(len(known), -1, dtype=np.int32))
+    applied = climatology.predict(table, unknown, np.full(2, 0.25))
+    assert applied.probability.tolist() == pytest.approx([0.25, 0.25])
+    assert applied.fell_back == 2
+
+
+def test_b2_leave_one_out_also_ignores_an_unknown_port() -> None:
+    """学習側の引き方も同じ表を引く。**片方だけ直すと、もう片方に残る。**
+
+    3 日ぶんあるので、自分を引いても下限（2 サンプル）を満たす。つまり**回り込めば
+    値が返ってしまう**状況を作ってから確かめている。
+    """
+    rows = [fixture.row(day, "hellocycling", "a", 5, 0, 9, 1, 1) for day in (DAY0, DAY1, DAY2)]
+    known = samples_of(rows)
+    table = climatology.fit(known, BIKE, all_rows(3))
+    assert int(table.counted.max()) == 3
+
+    unknown = replace(known, port=np.full(len(known), -1, dtype=np.int32))
+    applied = climatology.predict_leave_one_out(table, unknown, BIKE, np.full(3, 0.25))
+    assert applied.probability.tolist() == pytest.approx([0.25, 0.25, 0.25])
+    assert applied.fell_back == 3
 
 
 # ── B3：混合 ──────────────────────────────────────────────────
