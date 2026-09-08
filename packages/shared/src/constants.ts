@@ -274,8 +274,9 @@ export const COMPACT_MAX_DURATION_S = 120;
  * 推論を `4-59/5`（:04, :09, …）にすると、常に最新スナップショットの 1〜2 分後に
  * 予測できる。ドコモ（80 秒周期）は 5 分グリッド毎に 1 回でよいので `1-59/5`。
  *
- * **`vercel.json` にあるのは HELLO だけ。** ドコモは 1 システムを 6 時間動かして
- * `n_dead_tup` と autovacuum を見てから足す（W3-19）。ここの定数は両方持っておく。
+ * **段階的に入れた（W3-19）。** HELLO だけを 11 時間 5 分・134 サイクル動かし、
+ * 失敗 0・HOT 率 100.0%・`n_dead_tup` が 1 周期ぶんで頭打ちになることを確かめてから
+ * ドコモを足した（W3 プラン §5.10）。**いまは両系が `vercel.json` に載っている。**
  */
 export const INFER_CRON: Readonly<Record<SystemId, string>> = {
   hellocycling: "4-59/5 * * * *",
