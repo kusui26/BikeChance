@@ -1,0 +1,245 @@
+import Foundation
+import Testing
+
+@testable import BikeChanceCore
+
+/// ポート詳細の組み立て（`StationDetail`、W3 プラン §5.11）。
+///
+/// **この 1 ファイルの主題は「分からないものを 0 と出さないこと」。**
+/// 未観測・鮮度切れ・停止中はどれも「借りられない」ではなく「その数は出せない」で、
+/// 混ぜると表示義務（CLAUDE.md §2 の 7・8）に反する。
+@Suite("ポート詳細")
+struct StationDetailTests {
+    let now = Date(timeIntervalSince1970: 1_788_800_000)
+
+    func feed(dynamicCapacity: Bool = false, staleAfter: Int = 960) -> FeedStatus {
+        FeedStatus(
+            systemID: "hellocycling",
+            displayName: "HELLO CYCLING",
+            dataUpdatedAt: now,
+            expectedCadenceSeconds: 300,
+            staleAfterSeconds: staleAfter,
+            isStale: false,
+            capacityIsDynamic: dynamicCapacity
+        )
+    }
+
+    func station(
+        name: String? = "丸の内中央口",
+        observedAgo: TimeInterval? = 120,
+        isPresent: Bool = true,
+        capacity: Int? = 10,
+        bikes: Int? = 3,
+        docks: Int? = 7,
+        isInstalled: Bool? = true,
+        isRenting: Bool? = true,
+        isReturning: Bool? = true
+    ) -> StationCurrent {
+        StationCurrent(
+            systemID: "hellocycling",
+            stationID: "10139",
+            name: name,
+            latitude: 35.681236,
+            longitude: 139.767125,
+            capacity: capacity,
+            bikes: bikes,
+            docks: docks,
+            isInstalled: isInstalled,
+            isRenting: isRenting,
+            isReturning: isReturning,
+            isPresent: isPresent,
+            observedAt: observedAgo.map { now.addingTimeInterval(-$0) },
+            lastChangedAt: now
+        )
+    }
+
+    let attribution = Attribution(
+        systemID: "hellocycling",
+        provider: "公共交通オープンデータセンター",
+        dataset: "HELLO CYCLING ステーション情報",
+        license: "CC BY 4.0",
+        licenseURL: URL(string: "https://creativecommons.org/licenses/by/4.0/")!
+    )
+
+    func detail(
+        _ station: StationCurrent? = nil,
+        feed: FeedStatus? = nil,
+        attribution: Attribution? = nil
+    ) -> StationDetail {
+        StationDetail(
+            station: station ?? self.station(),
+            feed: feed ?? self.feed(),
+            attribution: attribution,
+            now: now
+        )
+    }
+
+    func fact(_ detail: StationDetail, _ label: String) -> Fact? {
+        detail.facts.first { $0.label == label }
+    }
+
+    // ── 見出し ────────────────────────────────────────────────
+    @Test("名称と事業者を出す")
+    func headline() {
+        let result = detail()
+        #expect(result.name == "丸の内中央口")
+        #expect(result.systemName == "HELLO CYCLING")
+    }
+
+    @Test("名称がまだ取れていないときも、空欄にしない")
+    func missingNameIsLabelled() {
+        // 新しいポートは属性を最大 1 日持たない（データ辞書 §4.3）
+        #expect(detail(station(name: nil)).name == "（名称未取得）")
+    }
+
+    @Test("事業者名が引けなければ system_id を出す")
+    func systemIdIsTheFallback() {
+        let result = StationDetail(station: station(), feed: nil, attribution: nil, now: now)
+        #expect(result.systemName == "hellocycling")
+    }
+
+    // ── 台数 ──────────────────────────────────────────────────
+    @Test("観測できていれば台数を出す")
+    func countsAreShown() {
+        let result = detail()
+        #expect(result.availability.map(\.value) == ["3", "7"])
+        #expect(result.availability.allSatisfy { $0.caution == nil })
+    }
+
+    @Test("**0 台は 0 と出す**（分からないのとは違う）")
+    func zeroIsNotUnknown() {
+        #expect(detail(station(bikes: 0)).availability[0].value == "0")
+    }
+
+    @Test("**未観測は「—」**。0 と区別する")
+    func unobservedIsNotZero() {
+        #expect(detail(station(bikes: nil)).availability[0].value == StationDetail.unknownValue)
+        #expect(detail(station(bikes: nil)).availability[1].value == "7")
+    }
+
+    @Test("**鮮度が切れたら台数を出さない**（「現在値」として読ませない）")
+    func staleCountsAreHidden() {
+        let result = detail(station(observedAgo: 1200))
+        #expect(result.availability.allSatisfy { $0.value == StationDetail.unknownValue })
+        #expect(!result.freshness.isPresentable)
+        #expect(result.freshness.label.contains("滞って"))
+    }
+
+    @Test("最新のフィードに現れなかったポートも台数を出さない")
+    func absentStationsHideCounts() {
+        let result = detail(station(observedAgo: nil, isPresent: false))
+        #expect(result.freshness == .unknown)
+        #expect(result.availability.allSatisfy { $0.value == StationDetail.unknownValue })
+    }
+
+    @Test("**停止中は数を出さず、理由を出す**")
+    func suspendedShowsTheReasonInsteadOfTheCount() {
+        // 「3 台あります」と出すと「借りられる」と読める。数を隠して理由を書く
+        let result = detail(station(isRenting: false))
+        #expect(result.availability[0].value == StationDetail.unknownValue)
+        #expect(result.availability[0].caution == "貸出停止中")
+        #expect(result.availability[1].value == "7")
+        #expect(result.availability[1].caution == nil)
+    }
+
+    @Test("返却停止も同じ規則")
+    func returningSuspensionFollowsTheSameRule() {
+        let result = detail(station(isReturning: false))
+        #expect(result.availability[1].value == StationDetail.unknownValue)
+        #expect(result.availability[1].caution == "返却停止中")
+    }
+
+    @Test("停止しているか分からないときは注意書きを出さない")
+    func unknownFlagsDoNotClaimSuspension() {
+        let result = detail(station(isRenting: nil))
+        #expect(result.availability[0].caution == nil)
+        #expect(result.availability[0].value == "3")
+    }
+
+    // ── 容量 ──────────────────────────────────────────────────
+    @Test("容量を出す")
+    func capacityIsShown() {
+        #expect(fact(detail(), "容量")?.value == "10")
+        #expect(fact(detail(), "容量")?.note == nil)
+    }
+
+    @Test("容量がまだ取れていなければ「—」")
+    func missingCapacity() {
+        #expect(fact(detail(station(capacity: nil)), "容量")?.value == StationDetail.unknownValue)
+    }
+
+    @Test("**動的な容量には注記を添える**（ドコモ）")
+    func dynamicCapacityIsExplained() {
+        // ドコモの capacity は bikes + docks の動的値で、固定のラック数ではない
+        let result = detail(feed: feed(dynamicCapacity: true))
+        #expect(fact(result, "容量")?.note?.contains("固定の台数ではなく") == true)
+    }
+
+    @Test("容量が無ければ動的の注記も出さない")
+    func noCapacityMeansNoNote() {
+        let result = detail(station(capacity: nil), feed: feed(dynamicCapacity: true))
+        #expect(fact(result, "容量")?.note == nil)
+    }
+
+    // ── その他の情報 ──────────────────────────────────────────
+    @Test("設置の状態を言葉で出す")
+    func installationState() {
+        #expect(fact(detail(), "設置")?.value == "設置されています")
+        #expect(fact(detail(station(isInstalled: false)), "設置")?.value == "撤去・休止中")
+        #expect(
+            fact(detail(station(isInstalled: nil)), "設置")?.value == StationDetail.unknownValue)
+    }
+
+    @Test("座標は 6 桁で出す（ポートの座標なので丸めない）")
+    func coordinateIsNotRounded() {
+        // 端末の位置は量子化して送るが（CLAUDE.md §5）、ポートの座標は公開データ
+        #expect(fact(detail(), "座標")?.value == "35.681236, 139.767125")
+    }
+
+    @Test("ポート ID はシステムと組で出す")
+    func portIdIncludesTheSystem() {
+        #expect(fact(detail(), "ポート ID")?.value == "hellocycling / 10139")
+    }
+
+    @Test("情報の並びが決まっている")
+    func factsAreOrdered() {
+        #expect(detail().facts.map(\.label) == ["容量", "設置", "座標", "ポート ID"])
+    }
+
+    // ── クレジット ────────────────────────────────────────────
+    @Test("**クレジットを出す**（CC BY 4.0 の表示義務）")
+    func creditIsShown() {
+        let result = detail(attribution: attribution)
+        #expect(result.credit?.contains("公共交通オープンデータセンター") == true)
+        #expect(result.credit?.contains("CC BY 4.0") == true)
+    }
+
+    @Test("クレジットが引けなければ nil（作り話をしない）")
+    func missingCreditIsNil() {
+        #expect(detail().credit == nil)
+    }
+
+    @Test("クレジットはシステムごとに引ける")
+    func creditIndexIsKeyedBySystem() {
+        let response = StationsResponse(
+            apiVersion: "1",
+            generatedAt: now,
+            bbox: BboxEnvelope(west: 139.7, south: 35.6, east: 139.8, north: 35.7),
+            count: 0,
+            isStale: false,
+            feeds: [],
+            stations: [],
+            attribution: [attribution]
+        )
+        #expect(response.attributionIndex()["hellocycling"] == attribution)
+        #expect(response.attributionIndex()["docomo-cycle"] == nil)
+    }
+
+    // ── 一覧の identity ───────────────────────────────────────
+    @Test("行の id が重ならない（ForEach が崩れない）")
+    func rowIdentitiesAreUnique() {
+        let result = detail()
+        #expect(Set(result.availability.map(\.id)).count == result.availability.count)
+        #expect(Set(result.facts.map(\.id)).count == result.facts.count)
+    }
+}
