@@ -235,6 +235,7 @@ describe("archiveWeather", () => {
     expect(seen[0]).toContain("jma_msm");
     expect(seen[0]).toContain("best_match");
     expect(seen[0]).toContain("precipitation_probability");
-    expect(seen[0]).toContain("forecast_days=2");
+    // 窓は JST 当日 0 時起点なので、3 日 = 72 時間。jma_msm が欠けない最大（W3 §12 の 77）
+    expect(seen[0]).toContain("forecast_days=3");
   });
 });
