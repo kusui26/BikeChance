@@ -154,3 +154,202 @@ struct StationsModelTests {
         #expect(recorder.urls.count == 2)
     }
 }
+
+/// 開いたまま置かれたときの自動再取得（W3 プラン §12 の 107）。
+///
+/// **守りたいのは 3 つ。**
+///   * 時刻を進めるだけでは値は新しくならない。**間隔が来たら取り直す**
+///   * 取り直しは**静かに**：`loading` にせず、失敗しても前の値を消さない
+///   * 拡大待ちや最初の読み込み中には投げない
+@MainActor
+@Suite("自動再取得")
+struct AutoRefreshTests {
+    /// 時刻を進められる時計。
+    final class Clock: @unchecked Sendable {
+        var now = Date(timeIntervalSince1970: 1_788_800_000)
+        func advance(_ seconds: TimeInterval) { now += seconds }
+    }
+
+    /// 呼ばれた回数と、次に返す状態コードを持つ応答役。
+    final class Server: @unchecked Sendable {
+        var calls = 0
+        var status = 200
+    }
+
+    let tokyo = Bbox(west: 139.76, south: 35.67, east: 139.78, north: 35.69)
+    let tooWide = Bbox(west: 130, south: 30, east: 145, north: 45)
+
+    func make(body: Data) -> (StationsModel, Clock, Server) {
+        let clock = Clock()
+        let server = Server()
+        let client = V1Client(baseURL: URL(string: "https://example.test")!) { request in
+            server.calls += 1
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: server.status, httpVersion: nil, headerFields: nil)!
+            return (body, response)
+        }
+        return (StationsModel(client: client, clock: { clock.now }), clock, server)
+    }
+
+    func body() throws -> Data { try ContractTests.fixture("stations") }
+
+    /// 要求が `count` 件になるまで待つ。**静かな取り直しは `loading` にならない**ので、
+    /// 状態ではなく要求の数で待つ。
+    func settle(_ server: Server, until count: Int) async {
+        for _ in 0..<200 {
+            if server.calls >= count { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        // 応答の反映まで 1 手番譲る
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+
+    // ── 間隔 ──────────────────────────────────────────────────
+    @Test("**間隔が来ていなければ取りに行かない**")
+    func waitsForTheInterval() async throws {
+        let (model, clock, server) = make(body: try body())
+        model.viewportChanged(to: tokyo)
+        await settle(server, until: 1)
+
+        clock.advance(StationsModel.refreshInterval - 1)
+        #expect(model.refreshIfDue() == false)
+        #expect(server.calls == 1)
+    }
+
+    @Test("**間隔が来たら取り直す**")
+    func refreshesAfterTheInterval() async throws {
+        let (model, clock, server) = make(body: try body())
+        model.viewportChanged(to: tokyo)
+        await settle(server, until: 1)
+
+        clock.advance(StationsModel.refreshInterval)
+        #expect(model.refreshIfDue() == true)
+        await settle(server, until: 2)
+        #expect(server.calls == 2)
+    }
+
+    @Test("取り直したら、また間隔ぶん待つ")
+    func theIntervalRestartsAfterEachRequest() async throws {
+        let (model, clock, server) = make(body: try body())
+        model.viewportChanged(to: tokyo)
+        await settle(server, until: 1)
+
+        clock.advance(StationsModel.refreshInterval)
+        model.refreshIfDue()
+        await settle(server, until: 2)
+        // 時刻を進めなければ 2 度目は投げない
+        #expect(model.refreshIfDue() == false)
+        #expect(server.calls == 2)
+    }
+
+    @Test("間隔は呼ぶ側で変えられる")
+    func theIntervalIsAnArgument() async throws {
+        let (model, clock, server) = make(body: try body())
+        model.viewportChanged(to: tokyo)
+        await settle(server, until: 1)
+
+        clock.advance(5)
+        #expect(model.refreshIfDue(interval: 1) == true)
+        await settle(server, until: 2)
+    }
+
+    // ── 静かに取り直す ────────────────────────────────────────
+    @Test("**取り直しの最中も表示を消さない**（`loading` にしない）")
+    func silentRefreshKeepsTheCurrentResponse() async throws {
+        let (model, clock, server) = make(body: try body())
+        model.viewportChanged(to: tokyo)
+        await settle(server, until: 1)
+        guard case .loaded(let before) = model.state else {
+            Issue.record("最初の読み込みに失敗した")
+            return
+        }
+
+        clock.advance(StationsModel.refreshInterval)
+        model.refreshIfDue()
+        // 投げた直後も loaded のまま。地図のピンが消えない
+        #expect(model.state == .loaded(before))
+        await settle(server, until: 2)
+        #expect(model.state == .loaded(before))
+    }
+
+    @Test("**取り直しが失敗しても前の値を消さない**")
+    func silentFailureKeepsTheCurrentResponse() async throws {
+        let (model, clock, server) = make(body: try body())
+        model.viewportChanged(to: tokyo)
+        await settle(server, until: 1)
+        guard case .loaded(let before) = model.state else {
+            Issue.record("最初の読み込みに失敗した")
+            return
+        }
+
+        server.status = 500
+        clock.advance(StationsModel.refreshInterval)
+        model.refreshIfDue()
+        await settle(server, until: 2)
+        // 一瞬の失敗でエラーを出したり消したりしない。表示はそのまま古くなり、
+        // 「N 分前の観測」がそれを伝える
+        #expect(model.state == .loaded(before))
+    }
+
+    @Test("**明示的な再取得は今までどおり**（`loading` になり、失敗も出す）")
+    func explicitReloadStillReportsFailures() async throws {
+        let (model, _, server) = make(body: try body())
+        model.viewportChanged(to: tokyo)
+        await settle(server, until: 1)
+
+        server.status = 500
+        model.reloadCurrent()
+        await settle(server, until: 2)
+        guard case .failed = model.state else {
+            Issue.record("明示的な再取得の失敗は表示すべき")
+            return
+        }
+    }
+
+    // ── 投げない場面 ──────────────────────────────────────────
+    @Test("まだ何も取っていなければ投げない")
+    func doesNotRefreshBeforeTheFirstLoad() throws {
+        let (model, clock, server) = make(body: try body())
+        clock.advance(StationsModel.refreshInterval * 10)
+        #expect(model.refreshIfDue() == false)
+        #expect(server.calls == 0)
+    }
+
+    @Test("**拡大待ちのときは投げない**（何度投げても同じ）")
+    func doesNotRefreshWhileZoomedOut() async throws {
+        let (model, clock, server) = make(body: try body())
+        model.viewportChanged(to: tooWide)
+        #expect(model.state == .needsZoom(StationsModel.zoomInMessage))
+
+        clock.advance(StationsModel.refreshInterval * 10)
+        #expect(model.refreshIfDue() == false)
+        #expect(server.calls == 0)
+    }
+
+    @Test("**失敗のあとは取り直す**（自分で戻れる）")
+    func recoversAfterAFailure() async throws {
+        let (model, clock, server) = make(body: try body())
+        server.status = 500
+        model.viewportChanged(to: tokyo)
+        await settle(server, until: 1)
+        guard case .failed = model.state else {
+            Issue.record("最初の読み込みは失敗しているはず")
+            return
+        }
+
+        server.status = 200
+        clock.advance(StationsModel.refreshInterval)
+        #expect(model.refreshIfDue() == true)
+        await settle(server, until: 2)
+        guard case .loaded = model.state else {
+            Issue.record("取り直しで戻るべき")
+            return
+        }
+    }
+
+    @Test("間隔の既定は 60 秒（CDN の s-maxage に合わせる）")
+    func theDefaultIntervalMatchesTheCdn() {
+        // これより短くしても、CDN が同じ本文を返すので新しい値にならない
+        #expect(StationsModel.refreshInterval == 60)
+    }
+}

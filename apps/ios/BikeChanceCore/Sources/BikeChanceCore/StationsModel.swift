@@ -19,15 +19,29 @@ public final class StationsModel {
 
     public private(set) var state: State = .idle
     private let client: V1Client
+    private let clock: @Sendable () -> Date
     /// 直前に要求した矩形。**同じ矩形なら投げ直さない**（地図の微動で無駄に叩かない）。
     private var lastRequested: Bbox?
+    /// 直前に**取りに行った**時刻。応答の `generated_at` ではなく要求の時刻で数える。
+    /// CDN が返す応答は最大 3 分古いことがあり、それを基準にすると毎回投げ直してしまう。
+    private var lastRequestedAt: Date?
     private var task: Task<Void, Never>?
 
     /// 範囲が広すぎるときの案内。**失敗ではなく操作の案内**として出す。
     public static let zoomInMessage = "地図を拡大すると、この範囲のポートを表示します。"
 
-    public init(client: V1Client) {
+    /// 開いたまま置かれたときに取り直す間隔（秒）。
+    ///
+    /// **60 秒より短くしても新しい値は返らない。** `/v1` の CDN キャッシュが
+    /// `s-maxage=60` なので、その内側の要求は同じ本文を返す（`V1_CACHE_CONTROL`）。
+    /// 一方、いちばん厳しい鮮度の閾値はドコモの 303 秒なので、60 秒あれば
+    /// 「更新が滞っています」に落ちる前に取り直せる。
+    public static let refreshInterval: TimeInterval = 60
+
+    /// - Parameter clock: 現在時刻。**検査が時間を進められるように**差し替え口にする。
+    public init(client: V1Client, clock: @escaping @Sendable () -> Date = { Date() }) {
         self.client = client
+        self.clock = clock
     }
 
     /// 表示中の矩形が変わったときに呼ぶ。
@@ -54,22 +68,49 @@ public final class StationsModel {
         reload(bbox: lastRequested)
     }
 
-    private func reload(bbox: Bbox) {
+    /// 画面を開いたまま置かれたときの自動再取得（W3 プラン §12 の 107）。
+    ///
+    /// **時刻を進めるだけでは値は新しくならない。** 地図を動かさない利用者には、
+    /// データが古くなっていく様子だけが見えて、やがて全部が灰色になる。
+    ///
+    /// **静かに取り直す**：`loading` にせず、失敗しても前の値を消さない。
+    /// 取れなければ表示はそのまま古くなり、**鮮度の表示がそれを伝える**。
+    /// 一瞬の失敗で「通信に失敗しました」を出したり消したりするより、
+    /// 「N 分前の観測」が伸びていくほうが正しく伝わる。
+    ///
+    /// - Returns: 実際に取りに行ったか。
+    @discardableResult
+    public func refreshIfDue(interval: TimeInterval = StationsModel.refreshInterval) -> Bool {
+        switch state {
+        // 出せている間と、失敗したあとだけ。`needsZoom` は拡大してもらうまで何度投げても同じで、
+        // `loading` と `idle` はまだ最初の結果を待っている
+        case .loaded, .failed: break
+        case .idle, .loading, .needsZoom: return false
+        }
+        guard let lastRequested, let lastRequestedAt else { return false }
+        guard clock().timeIntervalSince(lastRequestedAt) >= interval else { return false }
+        reload(bbox: lastRequested, silently: true)
+        return true
+    }
+
+    /// - Parameter silently: 自動の再取得か。真なら `loading` にせず、失敗も表示しない。
+    private func reload(bbox: Bbox, silently: Bool = false) {
         task?.cancel()
-        state = .loading
+        lastRequestedAt = clock()
+        if !silently { state = .loading }
         task = Task { [client] in
             do {
                 let response = try await client.stations(in: bbox)
                 guard !Task.isCancelled else { return }
                 state = .loaded(response)
             } catch let error as V1Error {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, !silently else { return }
                 // 「多すぎる」は失敗ではなく操作の案内として出す
                 state = error.needsNarrowerBbox ? .needsZoom(error.message) : .failed(error.message)
             } catch is CancellationError {
                 return
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, !silently else { return }
                 state = .failed("通信に失敗しました。")
             }
         }
