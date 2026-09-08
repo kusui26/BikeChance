@@ -148,16 +148,18 @@ describe("vercel.json の Parquet 化 Cron", () => {
 });
 
 describe("vercel.json の推論 Cron", () => {
-  it("知っているシステムだけを指す", () => {
+  it("システムごとにちょうど 1 本ある", () => {
+    // **段階的に入れた（W3-19）。** 20,745 行 × 288 回/日 ＝ 597 万行更新/日になるので、
+    // 配列列の HOT 更新が効くかを測ってから広げる約束だった。HELLO だけを 11 時間 5 分・
+    // 134 サイクル動かし、失敗 0・HOT 率 100.0%・`n_dead_tup` が 1 周期ぶんで頭打ちに
+    // なることを確かめてからドコモを足した（W3 プラン §5.10・§7.8）。
+    //
+    // 以降は収集・属性同期と同じ「全システムに 1 本ずつ」を不変条件にする。
+    // **システムを増やして推論だけ忘れる**のを、ここで止める
     const paths = readCrons(INFER_PATH_PREFIX).map((cron) => cron.path);
-    expect(paths.length).toBeGreaterThan(0);
-    for (const path of paths) {
-      const system_id = path.slice(INFER_PATH_PREFIX.length);
-      expect(
-        SYSTEM_IDS.some((id) => id === system_id),
-        `${path} が未知`,
-      ).toBe(true);
-    }
+    expect([...paths].sort()).toEqual(
+      [...SYSTEM_IDS].map((id) => `${INFER_PATH_PREFIX}${id}`).sort(),
+    );
   });
 
   it("スケジュールが共有定数と一致する", () => {
@@ -169,12 +171,11 @@ describe("vercel.json の推論 Cron", () => {
     }
   });
 
-  it("段階的に広げる：いまは HELLO だけ（W3-19）", () => {
-    // 20,745 行 × 288 回/日 ＝ 597 万行更新/日。配列列の HOT 更新が効くかは
-    // 測ってから判断する。**1 システムを 6 時間動かし、n_dead_tup と autovacuum を
-    // 見てからドコモを足す。** この検査は「足すときに意識させる」ためにある
-    const paths = readCrons(INFER_PATH_PREFIX).map((cron) => cron.path);
-    expect(paths).toEqual([`${INFER_PATH_PREFIX}hellocycling`]);
+  it("2 系統が同じ分に重ならない", () => {
+    // HELLO は `4-59/5`、ドコモは `1-59/5` で 3 分ずれる。同じ分に置くと、
+    // 2 万行の UPSERT が Vercel の同時実行と DB の書き込みで重なる
+    const minutes = readCrons(INFER_PATH_PREFIX).map((cron) => cron.schedule.split(" ")[0]);
+    expect(new Set(minutes).size).toBe(minutes.length);
   });
 
   it("フィードの公開周期と位相が合っている", () => {

@@ -58,6 +58,10 @@
     {
       "path": "/ml/infer/hellocycling",
       "schedule": "4-59/5 * * * *"
+    },
+    {
+      "path": "/ml/infer/docomo-cycle",
+      "schedule": "1-59/5 * * * *"
     }
   ]
 }
