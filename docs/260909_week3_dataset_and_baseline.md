@@ -1557,3 +1557,32 @@ etag: "5422-649cc6d5b46cb"   ← 3 回目で別の値
 サイズ（5422）は同じで後半だけが違う。負荷分散された別のサーバが別の mtime を持っているのだろう。**ETag では原理的に一致しない。**
 
 そこで**中身の SHA-256 を自分で持って比べる**。21 KB のダウンロードは毎回払うが、それだけである。`app_config.holidays_sha256` に入れ、同じなら RPC を呼ばない。
+
+### 90. 本番では関数の EXECUTE が `service_role` に既定で付かない（段 4 の適用後）
+
+`db push` のあと `import-holidays.ts` を本番で流したら、**ローカルでは通っていたのに** 403 になった。
+
+```
+42501  permission denied for function replace_jp_holidays
+```
+
+0006 の冒頭が「本番プロジェクトは『新規オブジェクトの自動公開』を OFF にしてある。この設定は `anon` / `authenticated` だけでなく **`service_role` の既定権限も剥奪する**」と書いていた、まさにその罠である。**ただし 0006 は表とシーケンスにしか手当てをしていなかった。**
+
+```
+pg_default_acl（本番）
+  postgres / r（表）   → {postgres=arwdDxtm/postgres, service_role=arwdDxtm/postgres}
+  postgres / f（関数） → {postgres=X/postgres}          ← service_role が無い
+```
+
+だから `jp_holidays` と `v_weather_files` は読めるのに、`replace_jp_holidays` だけ呼べなかった。既存の 10 個（`ingest_snapshot`・`job_started` ほか）はすべて明示的に `grant execute` してあり、**0023 で足した 1 つだけ忘れていた**。
+
+**ローカルでは既定権限が違うので再現しない。** `has_function_privilege` で見るテストを書いても、ローカルだけ通って本番で落ちる。そこで**「明示的な grant があること」を `proacl` の中身で見る**不変条件を 0003 に足した。
+
+| 検査 | 何を守るか |
+|---|---|
+| PostgREST から呼ぶ 11 関数に `service_role=X` がある | 本番で 42501 にならない |
+| **どちらにも分類されていない関数が無い** | 新しい関数を足したら、必ずどちらかに分類させる |
+
+grant を剥がすと 1 件目が実際に落ちることを確かめてある。
+
+**この形の抜けは 0006 の時点から仕組みとして残っていた**（「毎回書く」という約束だけで守られていた）。分類を強制する 2 つ目の検査があれば、次に関数を足す人は考えざるを得ない。
