@@ -468,11 +468,13 @@ pnpm exec tsx scripts/recompact-parquet.ts .env 2026-09-06T06:00:00Z
 **目的**：Vercel 全体の障害・デプロイ事故のあいだも、生 JSON だけは失わない（R13・R18）。
 
 ```
-supabase/functions/collect-gbfs-backup/index.ts
-supabase/functions/collect-gbfs-backup/path.ts        # rawObjectPath の Deno 版（拡張子つきの相対 import）
-apps/web/backup-collector-path.test.ts                # shared と同じ文字列を返すことを固定
-supabase/migrations/<ts>_0021_backup_collector.sql    # 起動条件と pg_cron ジョブ
-supabase/tests/0012_backup_collector.sql
+supabase/functions/collect-gbfs-backup/core.ts        # 純粋な部分（Deno の API を使わない）
+supabase/functions/collect-gbfs-backup/index.ts       # Deno の殻（serve・env・fetch・gzip）
+apps/web/backup-collector-path.test.ts                # shared との契約（20 件）
+supabase/migrations/<ts>_0021_backup_collector.sql    # 起動条件・cron の登録の検査
+supabase/tests/0012_backup_collector.sql              # pgTAP（45 件）
+scripts/setup-app-config.sh                           # functions_base_url を入れる
+supabase/config.toml                                  # verify_jwt = false
 ```
 
 **やることは 3 つだけ**（W3-03）。
@@ -480,38 +482,63 @@ supabase/tests/0012_backup_collector.sql
 ```
 1. ODPT の公開エンドポイントから station_status.json を取る（トークン無し。W3-04）
 2. last_updated を読み、gzip して gbfs-raw の同じパスに upsert:false で PUT する
-3. job_runs に記録する（job_started / job_finished）
+3. job_runs に記録する
 ```
 
-**やらないこと**：JSON のパース（`last_updated` を読むための最小限を除く）、正規化、`ingest_snapshot` の呼び出し、`feed_state` の更新。復旧後は `rebuild-snapshots.ts`（W2 の PR B）で DB に戻す。
+**やらないこと**：正規化、`ingest_snapshot` の呼び出し、`feed_state` の更新。復旧後は `scripts/rebuild-snapshots.ts` で DB に戻す（§9.2）。
 
-**起動条件**（`0021`）
+#### 純粋な部分と Deno の殻を分けた（実装で決めたこと）
 
-```sql
--- 1 分毎。feed_state.last_success_at が 6 分超のときだけ Edge Function を叩く
-select cron.schedule('backup_collect', '* * * * *', $$select public.trigger_backup_collect()$$);
-```
+プランでは `index.ts` と `path.ts` の 2 つとしていたが、**`core.ts`（純粋）と `index.ts`（殻）**にした。
 
-`trigger_backup_collect()` は `security definer` で、Vault から `cron_secret` を読み、`net.http_post` で Edge Function を起動する。**応答は待たない**（結果は `job_runs` で見る）。
+| ファイル | 中身 | 誰が見るか |
+|---|---|---|
+| `core.ts` | パス規約・URL の組み立て・`last_updated` の読み取り・認証・重複の判定 | **vitest と `apps/web` の `tsc`**。Deno の API を一切使わないので、拡張子なしで import できる |
+| `index.ts` | `Deno.serve`・環境変数・`fetch`・`CompressionStream`・PostgREST | Deno だけ |
 
-**踏むと分かっている点**
+**型検査とテストが届く範囲を最大にする**のが目的である。`index.ts` はどの `tsconfig` にも入らないので型検査されないが、判断を含む部分は全部 `core.ts` に寄せてあるので、残るのは配線だけになる。
 
-- **CPU 2 秒の上限**：パースしないので gzip だけ。`CompressionStream("gzip")` を使い、`Response.body` をそのまま流す。
-- **同じパスへの衝突**：`upsert: false` で PUT し、**409 を正常系**として `job_runs` の `detail` に `duplicate: true` で残す。
-- **パス規約の重複**：Deno は拡張子なしの相対 import を解決しないので `packages/shared` をそのまま import できない。`path.ts` に同じ式を置き、**vitest から両方を import して同じ文字列を返すことをフィクスチャで固定する**（§9.2）。
-  - 契約テストは **`apps/web` に置く**。`supabase/functions/` は vitest の対象外で、`apps/web` は既に `vercel-crons.test.ts` でリポジトリのルート（`vercel.json`）を読んでいる前例がある。
-  - `path.ts` を拡張子つきで import するので、typecheck の tsconfig に **`allowImportingTsExtensions`**（`noEmit` 前提）が要る。**入れる前に `pnpm typecheck` が通ることを確かめる。**
-- **秘密**：Edge Function には `SUPABASE_URL` と `SUPABASE_SERVICE_ROLE_KEY`（Supabase が自動注入）以外は要らない。**新しい秘密を 1 つも置かない**（W3-04）。
+#### 認証は `CRON_SECRET`（W3-04a）
 
-**検証**：本番の cron を止められないので、**手動で 1 回叩いて確かめる**。
+**`verify_jwt` を切る。** JWT で守ると、呼ぶ側（pg_cron）が**サービスロールキーを持つ必要があり、最も強い鍵を Vault に置く**ことになる。代わりに Vercel の Cron ハンドラと同じ `Authorization: Bearer <CRON_SECRET>` にする。比較は `apps/web/lib/jobs/auth.ts` と同じ規律で、**先に SHA-256 で固定長にしてから**定数時間で比べる（長さも漏らさない）。
 
-1. `supabase functions deploy collect-gbfs-backup --use-api`（Docker 不要）
-2. `curl` で 1 回起動 → `gbfs-raw` にオブジェクトが 1 個増える（または 409 で `duplicate`）
-3. `job_runs` に `backup_collect:<system>` が `ok` で入る
-4. `rebuild-snapshots.ts --from <その時刻>` で DB に戻せる
-5. 起動条件が**普段は発火しない**ことを、24 時間の `job_runs` で確認する（発火 0 回）
+> **W3-04 の「新しい秘密を 1 つも置かない」は言い過ぎだった。** ODPT のトークンは持たせない（そこが本題）が、**`CRON_SECRET` を Edge Function の秘密として 1 つ置く**必要がある。既に Vault と Vercel にある同じ値なので、影響範囲は増えない。
 
-**完了条件**：上の 1〜5。ODPT への呼び出しが増えていないこと（`feed_fetch_log` の件数が変わらないこと）も見る。
+#### 起動条件は「発火したときだけ記録する」
+
+`watchdog_collect` は毎分 `job_runs` に書くので 1 日 1,441 行になる。同じものをもう 1 本増やしたくない。そこで **`trigger_backup_collect` は停滞しているシステムが 1 つも無ければ何も書かずに戻る**（1 クエリで終わる）。
+
+**するとその代わりに「動いているか」を見張れなくなる**ので、`monitor_jobs` に**検査 5：pg_cron のジョブが登録されていて active か**を足した。`monitored_jobs.cron_job_name` が指す `cron.job` を見るだけで、**行を 1 つも増やさずに「誰かが unschedule した」を捕まえる**。滅多に発火しないジョブや日次のジョブにも効く。
+
+| 状態 | 記録 | 通知 |
+|---|---|---|
+| 停滞なし | **書かない** | なし |
+| 発火した | `ok`（`fired`・`systems`） | `backup_collect_fired`（抑制 1 時間） |
+| 設定漏れ（`cron_secret` / `functions_base_url`） | `failed`（`reason`） | `backup_collect_misconfigured`（抑制 6 時間） |
+
+**設定漏れを通知するのが要点である。** 冗長系が無い状態が静かに続くのが一番まずい。
+
+#### 設定値の置き場所
+
+`functions_base_url`（Edge Function の宛先）は **マイグレーションに書かない**。`project_base_url`（0004）は利用者が叩く Vercel のドメインで公開されているが、Supabase のプロジェクト URL はどこにも公開していない。秘密ではないが、わざわざリポジトリに置く理由も無い。`scripts/setup-app-config.sh` が `.env` の `SUPABASE_URL` から導いて入れる。
+
+#### ローカルでの実測（2026-09-08 15:00〜15:06 JST）
+
+`supabase functions serve` で**本物の ODPT を叩き、ローカルの Storage に保存し、`rebuild-snapshots.ts` で DB に戻すところまで**通した。
+
+| 見たもの | 結果 |
+|---|---|
+| 認証なし / 秘密違い | **401**（`{"ok":false,"error":"unauthorized"}`） |
+| 知らないシステム / 指定なし | **400**（`unknown_system`） |
+| HELLO（4,221,766 B） | **200**・gzip 107,147 B・**528 ms** |
+| ドコモ（903,722 B） | 200・gzip 35,525 B・390 ms |
+| 同じ `last_updated` で再実行 | **200・`duplicate: true`**（正常系） |
+| `job_runs` | `backup_collect:<system>` に `ok` で記録 |
+| **復旧の往復** | `rebuild-snapshots.ts` で **新規 2 / 重複 0 / 失敗 0**。`status_snapshots` に 5,814・5,808 ポートぶんの行が入り、配列長も一致 |
+
+**4 MB のフィードで 528 ms**（CPU 上限 2 秒・実時間 400 秒に対して十分）。内訳の見積りは `JSON.parse` 26 ms ＋ gzip 約 70 ms（Node での実測）で、残りはネットワークである。
+
+**完了条件**：上の 6 つ。本番では手動で 1 回起動し、`gbfs-raw` にオブジェクトが増え、`job_runs` に `ok` が入り、**普段は発火 0**（24 時間）であることを確認する。
 
 ### 5.6 PR D：暦と天気アーカイブの索引
 
@@ -1406,3 +1433,27 @@ select is(
 **新しく分かったのは下の行**である。**`schema=` を渡すと `date` / `hour` のパーティション列が付かない**（10 ではなく 8）。明示スキーマがパーティション探索より優先されるためで、「必ず `schema=SCHEMA` を渡す」という規約と「Hive で読むと列が 2 つ増える」という記述は**同時には成り立たない**。
 
 **含意**：`date` / `hour` を列として使いたいなら、`SCHEMA` にその 2 つを足した版を渡す。ただし `observed_at` から導けるので、ふつうは要らない。**「列数で比べる」検査はどちらの読み方でも書けない**（8 にも 10 にもなる）ので、名前の集合で比べる。データ辞書 §7.3 を直した。
+
+### 84. Storage の REST API は重複を **HTTP 400** で返す（段 3）
+
+`upsert: false` で既にあるパスに PUT したときの生の応答（実測 2026-09-08）。
+
+```
+HTTP/1.1 400 Bad Request
+{"statusCode":"409","error":"Duplicate","message":"The resource already exists",
+ "code":"KeyAlreadyExists"}
+```
+
+**409 は本文の中にあり、しかも文字列である。** HTTP ステータスだけを見ると「重複」が「想定外の失敗」に化け、**毎回 500 を返して `job_runs` が `failed` で埋まる**。実際にローカルで踏んだ（`{"phase":"storage","http_status":400,...}` で `failed` が 1 行残っている）。
+
+`apps/web/lib/jobs/storage.ts` が `statusCode` を string / number の両方で読んでいるのは同じ理由（supabase-js が本文の値をそのまま載せる）。**あちらは supabase-js 越しなので気づけたが、REST を直接叩く Edge Function では自分で見に行く必要がある。**
+
+判定は `core.ts` の `isDuplicateUpload(http_status, body)` に閉じ、5 件のテストで固定した。**本当の失敗（403・413・500）を重複と読み違えない**ことも一緒に固定してある。
+
+### 85. `verify_jwt` を切る判断（段 3）
+
+Edge Function を JWT で守ると、**呼ぶ側（pg_cron）がサービスロールキーを持つ必要がある**。Vault に置くことになり、**最も強い鍵の置き場所が 1 つ増える**。
+
+代わりに Vercel の Cron ハンドラと同じ `Authorization: Bearer <CRON_SECRET>` にした。`CRON_SECRET` は既に Vault（ウォッチドッグ用）と Vercel にある同じ値で、**Edge Function の秘密として置き場所が 1 つ増えるだけ**である。鍵の強さで比べれば明らかにこちらが軽い。
+
+**W3-04 の「新しい秘密を 1 つも置かない」は言い過ぎだった。** ODPT のトークンを持たせない（規約の例外を作らない）のが本題で、そこは達成している。

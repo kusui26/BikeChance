@@ -92,6 +92,31 @@ jobs:
           fi
           echo "OK: 検出なし"
 
+      - name: バックアップ収集器が ODPT のトークンを持たないか（W3-04）
+        # 冗長系のために「トークン付き URL を組み立てる箇所」を 2 つ目に作らない、という
+        # 決定（W3-04）を機械で守る。バックアップ収集器は**公開エンドポイントだけ**を叩く。
+        # 実測（2026-09-08）で公開エンドポイントは無認証で 200 を返し、応答は認証付きと同一。
+        #
+        # `api-public.odpt.org` は許し、`api.odpt.org`（認証付き）を弾く。
+        run: |
+          if git grep -nIE '(acl:consumerKey|(^|[^-])api\.odpt\.org|ODPT_ACCESS_TOKEN)' \
+              -- 'supabase/functions'; then
+            echo "::error::バックアップ収集器は ODPT の公開エンドポイントだけを使ってください（W3-04）"
+            exit 1
+          fi
+          echo "OK: 検出なし"
+
+      - name: バックアップ収集器の外向き fetch が index.ts に閉じているか
+        # `core.ts` は純粋な部分（vitest と apps/web の tsc が見る）。通信を持ち込むと
+        # 型検査もテストも届かない場所が増える。fetch は殻（index.ts）にだけ置く。
+        run: |
+          if git grep -nIE '(^|[^A-Za-z0-9_$.])fetch\(' \
+              -- 'supabase/functions' ':!supabase/functions/*/index.ts'; then
+            echo "::error::Edge Function の外向き fetch は index.ts の中だけで呼んでください"
+            exit 1
+          fi
+          echo "OK: 検出なし"
+
       - name: ml サービスの外向き通信が io/ に閉じているか
         # apps/ml も同じ規律に入れる。ここは ODPT のトークンを扱わないが、
         # 「外向きの通信を一望できる状態を保つ」意味は同じで、副作用を io/ に集める

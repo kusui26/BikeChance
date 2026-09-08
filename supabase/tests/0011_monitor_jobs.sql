@@ -117,10 +117,12 @@ select is(
   true, 'postgres は BYPASSRLS（security definer の中から全行が見える）'
 );
 
-select is((select count(*)::int from public.monitored_jobs), 9, '監視対象は 9 ジョブ');
+-- 0020 で 9 本、0021 が trigger_backup_collect を足して 10 本
+select is((select count(*)::int from public.monitored_jobs), 10, '監視対象は 10 ジョブ');
 select is(
-  (select count(*)::int from public.monitored_jobs where not is_active),
-  0, '初期状態では全部 active'
+  (select array_agg(job_name order by job_name) from public.monitored_jobs where not is_active),
+  array['trigger_backup_collect'],
+  '成功の有無を見ないのは trigger_backup_collect だけ（発火したときしか記録しないため。0021）'
 );
 select is(
   (select bool_and(missing_after > expected_every) from public.monitored_jobs),
@@ -278,7 +280,7 @@ select is(
      select count(*)::int as jsonb_object_keys_count
        from jsonb_object_keys((select detail->'checks' from public.job_runs
                                 where job_name='monitor_jobs' order by id desc limit 1))) t),
-  4, '4 つの検査すべてが detail に残る'
+  5, '5 つの検査すべてが detail に残る（0021 で check_cron_jobs を足した）'
 );
 
 -- **1 つ壊しても他は走る。** 0009 の monitor_feeds は全検査を 1 つの exception で
