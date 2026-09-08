@@ -182,9 +182,9 @@ def test_batches_split_without_losing_rows() -> None:
 
 
 def test_model_path_uses_the_version() -> None:
-    assert (
-        model_path("baseline-b3-v0-20260909") == "models/baseline/baseline-b3-v0-20260909.json.gz"
-    )
+    """**バケットは `models`**（`gbfs-parquet` は Parquet の MIME しか許さない）。"""
+    assert MODEL_BUCKET == "models"
+    assert model_path("baseline-b3-v0-20260909") == "baseline/baseline-b3-v0-20260909.json.gz"
 
 
 # ── 実行 ──────────────────────────────────────────────────────

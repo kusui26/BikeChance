@@ -385,7 +385,7 @@ create table public.inference_log (
 - `finished_at` は `clock_timestamp()`（`now()` はトランザクション開始時刻で動かない。§12 の 94）
 - **`job_runs` とは別の表。** ジョブの監視（`monitored_jobs`）にはまだ入れていない
 
-**モデルの成果物**：`gbfs-parquet` の `models/baseline/{version}.json.gz`。B1 の参照表・B2 の気候値・B3 の係数・ポートの並びを 1 つに固めたもの（実測 3.2 MB）。**配る版は Vercel の環境変数 `BASELINE_MODEL_VERSION`**。
+**モデルの成果物**：**`models` バケット**の `baseline/{version}.json.gz`。B1 の参照表・B2 の気候値・B3 の係数・ポートの並びを 1 つに固めたもの（実測 3.2 MB）。**配る版は Vercel の環境変数 `BASELINE_MODEL_VERSION`**。
 
 ## 5. 公開ビュー（`/v1` が読む唯一の面）
 
@@ -428,6 +428,17 @@ create table public.inference_log (
 ---
 
 ## 7. アーカイブのパス規約
+
+**バケットは 4 つある。** 作り直せるかどうかが違うので、混ぜない（W3 プラン §12 の 106）。
+
+| バケット | 中身 | Content-Type | 作り直せるか |
+|---|---|---|---|
+| `gbfs-raw` | 生 gzip JSON | `application/gzip` | **一次ソース。作り直せない** |
+| `weather-raw` | 天気予報の生 JSON | `application/gzip` | 同上（過去の予報は取り直せない） |
+| `gbfs-parquet` | 学習用 Parquet ＋ 学習サンプル | `application/vnd.apache.parquet` | 生 JSON からも Postgres からも作り直せる |
+| `models` | モデルの成果物 | `application/gzip` | **同じ版は二度と作れない**（当てはめの時点が違う） |
+
+**`allowed_mime_types` は絞ってある。** Content-Type を付けない実装を弾くためで、違う型を上げようとすると **HTTP 415** で止まる。
 
 ### 7.1 生 GBFS JSON（`gbfs-raw`、一次ソース）
 
