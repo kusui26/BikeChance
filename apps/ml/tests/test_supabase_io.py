@@ -19,6 +19,7 @@ from bikechance_ml.io.supabase import (
     STATION_PAGE_SIZE,
     SupabaseError,
     SupabaseIo,
+    is_missing_object,
 )
 from bikechance_ml.json_shape import ShapeError
 
@@ -240,3 +241,27 @@ def test_job_finished_sends_the_detail() -> None:
     io, seen = io_with(lambda request: httpx.Response(204))
     io.job_finished(7, "ok", {"n_rows": 6})
     assert b'"p_status":"ok"' in seen[0].content.replace(b" ", b"")
+
+
+# ── Storage の「無い」の読み方（W3 プラン §12 の 84 と同じ癖）──
+def test_missing_object_is_reported_as_http_400() -> None:
+    """**Supabase Storage は 404 を HTTP 400 で返す**（実測 2026-09-08）。"""
+    body = (
+        '{"statusCode":"404","error":"not_found","message":"Object not found","code":"NoSuchKey"}'
+    )
+    assert is_missing_object(400, body)
+    assert is_missing_object(404, body)
+
+
+def test_plain_404_is_still_missing() -> None:
+    """相手が素直に 404 を返すようになっても壊れない。"""
+    assert is_missing_object(404, "")
+
+
+def test_other_failures_are_not_read_as_missing() -> None:
+    """**400 をすべて「無い」と読むと、権限エラーが欠測に化ける。**"""
+    assert not is_missing_object(403, '{"statusCode":"403","code":"AccessDenied"}')
+    assert not is_missing_object(500, "boom")
+    assert not is_missing_object(400, '{"statusCode":"409","code":"KeyAlreadyExists"}')
+    assert not is_missing_object(400, "これは JSON ではない")
+    assert not is_missing_object(400, "[]")

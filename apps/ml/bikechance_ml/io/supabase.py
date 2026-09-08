@@ -9,19 +9,23 @@ PostgREST と Storage の REST を httpx で直に叩く。**psycopg を入れ�
   * 失敗は `SupabaseError` に詰め替えて上げる。素の例外のままだと文脈が消える
 """
 
+import json
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Final
 
 import httpx
 
 from bikechance_ml.config import Config, StorageConfig
+from bikechance_ml.features.reference import NeighborRow, StationAttributeRow, StationGeoRow
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
 from bikechance_ml.json_shape import (
     ShapeError,
+    as_bool,
     as_dict,
+    as_float,
     as_int,
     as_int_list,
     as_list,
@@ -40,6 +44,9 @@ PARQUET_CONTENT_TYPE: Final[str] = "application/vnd.apache.parquet"
 #: 台帳の 1 ページ。14,900 件なら 4 往復（5,000 が 3 回と、空のページ 1 回）で済む。
 STATION_PAGE_SIZE: Final[int] = 5_000
 
+#: 近傍の 1 ページ。1 行が小さいので大きく取る（HELLO は約 8.6 万行）。
+NEIGHBOR_PAGE_SIZE: Final[int] = 10_000
+
 #: スナップショットの 1 ページ。1 行が 5,800〜14,900 要素の配列 4 本なので小さく刻む。
 SNAPSHOT_PAGE_SIZE: Final[int] = 24
 
@@ -52,6 +59,9 @@ MAX_ERROR_CHARS: Final[int] = 200
 
 #: 「無い」を正常系として扱うための状態コード。
 HTTP_NOT_FOUND: Final[int] = 404
+
+#: Storage が「無い」を表すときに本文へ入れる符号。**HTTP の状態コードは 400 で来る。**
+STORAGE_NOT_FOUND_CODES: Final[frozenset[str]] = frozenset({"NoSuchKey", "NotFound"})
 
 #: 1 要求のタイムアウト（秒）。maxDuration 120 秒の内側に収める。
 REQUEST_TIMEOUT_S: Final[float] = 30.0
@@ -78,6 +88,32 @@ class SupabaseError(RuntimeError):
     def __init__(self, failure: SupabaseFailure) -> None:
         self.failure = failure
         super().__init__(failure.describe())
+
+
+def is_missing_object(http_status: int, body: str) -> bool:
+    """Storage の応答が「オブジェクトが無い」を表しているか。
+
+    **Supabase Storage は 404 を HTTP 400 で返す**（実測 2026-09-08、本文は
+    `{"statusCode":"404","error":"not_found","message":"Object not found",
+    "code":"NoSuchKey"}`）。重複アップロードを 400 で返すのと同じ癖で、
+    W3 プラン §12 の 84 と同じ形をしている。
+
+    **状態コードだけで判断しない。** 400 をすべて「無い」と読むと、権限エラーや
+    要求の誤りまで「無い」に化けて、欠測として静かに集計から抜ける。
+    """
+    if http_status == HTTP_NOT_FOUND:
+        return True
+    if http_status not in {400, 404}:
+        return False
+    try:
+        document = json.loads(body)
+    except ValueError:
+        return False
+    if not isinstance(document, dict):
+        return False
+    return str(document.get("statusCode")) == str(HTTP_NOT_FOUND) or (
+        str(document.get("code")) in STORAGE_NOT_FOUND_CODES
+    )
 
 
 def _iso_z(at: datetime) -> str:
@@ -208,6 +244,65 @@ class SupabaseIo:
         )
         return tuple(_to_snapshot(row) for row in rows)
 
+    # ── 参照データ（特徴量パイプライン。W3 プラン §9.5）──────────
+    def list_station_geo(self, system_id: str) -> tuple[StationGeoRow, ...]:
+        """台帳と行政区画コード。**`is_active` は読まない**（生存者バイアス）。"""
+        rows = self._paged(
+            "/rest/v1/stations",
+            {
+                "select": "station_id,first_seen_at,pref_code,muni_code",
+                "system_id": f"eq.{system_id}",
+                "order": "station_id.asc",
+            },
+            STATION_PAGE_SIZE,
+            "stations",
+        )
+        return tuple(_to_station_geo(row) for row in rows)
+
+    def list_station_attributes(self, system_id: str) -> tuple[StationAttributeRow, ...]:
+        """現行の属性。`raw` から HELLO / ドコモ固有の項目を取り出す。"""
+        rows = self._paged(
+            "/rest/v1/station_attributes",
+            {
+                "select": "station_id,lat,lon,capacity,raw",
+                "system_id": f"eq.{system_id}",
+                "valid_to": "is.null",
+                "order": "station_id.asc",
+            },
+            STATION_PAGE_SIZE,
+            "station_attributes",
+        )
+        return tuple(_to_station_attribute(row) for row in rows)
+
+    def list_neighbors(self, system_id: str) -> tuple[NeighborRow, ...]:
+        """半径 500 m の近傍（起点がこのシステムのもの）。相手は別システムでもよい。"""
+        rows = self._paged(
+            "/rest/v1/station_neighbors",
+            {
+                "select": "station_id,nb_system_id,nb_station_id,distance_m,same_system",
+                "system_id": f"eq.{system_id}",
+                "order": "station_id.asc,nb_station_id.asc",
+            },
+            NEIGHBOR_PAGE_SIZE,
+            "station_neighbors",
+        )
+        return tuple(_to_neighbor(row) for row in rows)
+
+    def list_holidays(self) -> tuple[date, ...]:
+        """内閣府 CSV の祝日。**年末年始とお盆は入っていない**（暦の規則）。"""
+        rows = self._paged(
+            "/rest/v1/jp_holidays",
+            {"select": "holiday_date", "order": "holiday_date.asc"},
+            STATION_PAGE_SIZE,
+            "jp_holidays",
+        )
+        return tuple(
+            date.fromisoformat(
+                as_str(field(as_dict(row, "jp_holidays"), "holiday_date", "jp_holidays"), "date")
+            )
+            for row in rows
+        )
+
     # ── 書き込み ────────────────────────────────────────────────
     def upload_parquet(self, path: str, body: bytes) -> None:
         """同じパスに上書きする。同じ時間帯を 2 回処理しても結果が変わらない。"""
@@ -241,10 +336,10 @@ class SupabaseIo:
             raise SupabaseError(
                 SupabaseFailure("storage", None, type(cause).__name__, self._mask(str(cause)))
             ) from None
-        if response.status_code == HTTP_NOT_FOUND:
-            return None
         if response.is_success:
             return response.content
+        if is_missing_object(response.status_code, response.text):
+            return None
         raise SupabaseError(
             SupabaseFailure(
                 "storage", response.status_code, "HttpStatus", self._mask(response.text)
@@ -258,6 +353,75 @@ class SupabaseIo:
             "rest",
             json={"p_id": run_id, "p_status": status, "p_detail": dict(detail)},
         )
+
+
+def _to_station_geo(row: object) -> StationGeoRow:
+    fields = as_dict(row, "stations")
+    return StationGeoRow(
+        station_id=as_str(field(fields, "station_id", "stations"), "station_id"),
+        first_seen_at=_to_datetime(as_str(field(fields, "first_seen_at", "stations"), "first")),
+        pref_code=_optional_int(fields, "pref_code", "stations"),
+        muni_code=_optional_int(fields, "muni_code", "stations"),
+    )
+
+
+def _to_station_attribute(row: object) -> StationAttributeRow:
+    fields = as_dict(row, "station_attributes")
+    raw = as_dict(field(fields, "raw", "station_attributes"), "raw")
+    return StationAttributeRow(
+        station_id=as_str(field(fields, "station_id", "station_attributes"), "station_id"),
+        lat=_optional_float(fields, "lat", "station_attributes"),
+        lon=_optional_float(fields, "lon", "station_attributes"),
+        capacity=_optional_int(fields, "capacity", "station_attributes"),
+        is_charging_station=_optional_bool(raw, "is_charging_station", "raw"),
+        region_id=_optional_numeric_id(raw, "region_id", "raw"),
+    )
+
+
+def _to_neighbor(row: object) -> NeighborRow:
+    fields = as_dict(row, "station_neighbors")
+    return NeighborRow(
+        station_id=as_str(field(fields, "station_id", "station_neighbors"), "station_id"),
+        nb_system_id=as_str(field(fields, "nb_system_id", "station_neighbors"), "nb_system"),
+        nb_station_id=as_str(field(fields, "nb_station_id", "station_neighbors"), "nb"),
+        distance_m=as_int(field(fields, "distance_m", "station_neighbors"), "distance_m"),
+        same_system=as_bool(field(fields, "same_system", "station_neighbors"), "same_system"),
+    )
+
+
+def _optional_int(fields: Mapping[str, object], name: str, where: str) -> int | None:
+    """**無い**と**null**を同じに扱う。`raw` はシステムごとにキーの集合が違う。"""
+    value = fields.get(name)
+    return None if value is None else as_int(value, f"{where}.{name}")
+
+
+def _optional_numeric_id(fields: Mapping[str, object], name: str, where: str) -> int | None:
+    """GBFS の ID は**文字列**である（実測：ドコモの `region_id` は "1"〜"18"）。
+
+    W3-07a は「整数のカテゴリとして使う」と決めたので、ここで数に直す。
+    **数字でない ID が来たら止める。** 静かに NULL にすると、地域の情報が
+    丸ごと消えたことに気づけない（`region_id` はドコモの地理特徴量の主役）。
+    """
+    value = fields.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ShapeError(f"{where}.{name}: 真偽値は ID ではない")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    raise ShapeError(f"{where}.{name}: 数字の ID を期待した")
+
+
+def _optional_float(fields: Mapping[str, object], name: str, where: str) -> float | None:
+    value = fields.get(name)
+    return None if value is None else as_float(value, f"{where}.{name}")
+
+
+def _optional_bool(fields: Mapping[str, object], name: str, where: str) -> bool | None:
+    value = fields.get(name)
+    return None if value is None else as_bool(value, f"{where}.{name}")
 
 
 def _to_station_row(row: object) -> StationRow:

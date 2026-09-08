@@ -9,6 +9,7 @@
 必要なポートの必要な期間だけを読める。
 """
 
+import io
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -43,6 +44,10 @@ SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("reported_age_s", pa.int16(), nullable=False),
     ]
 )
+
+
+class SchemaMismatchError(ValueError):
+    """読んだ Parquet の列が `SCHEMA` と違う。**静かに null で埋めない。**"""
 
 
 class InconsistentLedgerError(ValueError):
@@ -179,6 +184,30 @@ def _accumulate(station_ids: Sequence[str], snapshots: Sequence[Snapshot]) -> _C
 def count_missing(table: pa.Table) -> int:
     """`bikes` が `-1`（観測されなかった）の行数。収集品質の目安として記録する。"""
     return int(pc.sum(pc.equal(table.column("bikes"), MISSING)).as_py() or 0)
+
+
+def has_current_schema(body: bytes) -> bool:
+    """Parquet の**ファイル自身の列**が `SCHEMA` と一致するか。
+
+    畳み直し（W2 の PR B、`scripts/recompact-parquet.ts`）で**同じパスの中身が
+    変わる**。パスで引くだけのキャッシュは古い形のファイルを返し得るので、
+    使う前にここで確かめる。
+    """
+    return bool(pq.read_schema(io.BytesIO(body)).names == SCHEMA.names)
+
+
+def read_table(body: bytes, where: str) -> pa.Table:
+    """Parquet を読む。**列が契約と違えば止める。**
+
+    `pq.read_table(..., schema=SCHEMA)` に頼ってはいけない。**足りない列を
+    黙って null で埋める**ので、`fetched_at` が無い古い形のファイルを読むと、
+    as-of が全滅しているのに例外も出ない（W3 プラン §12 の 96）。
+    明示スキーマは「余分な列を落とす」ためのもので、「無い列を作る」ためのものではない。
+    """
+    if not has_current_schema(body):
+        found = pq.read_schema(io.BytesIO(body)).names
+        raise SchemaMismatchError(f"{where}: 列が {found} で、契約と違う")
+    return pq.read_table(io.BytesIO(body), schema=SCHEMA)
 
 
 def to_parquet_bytes(table: pa.Table) -> bytes:

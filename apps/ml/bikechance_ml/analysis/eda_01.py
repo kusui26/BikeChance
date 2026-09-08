@@ -18,7 +18,6 @@ Storage に無いものは「欠落」として報告する（`status_snapshots`
 """
 
 import argparse
-import io as _io
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -28,13 +27,12 @@ from typing import Final, Protocol
 
 import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
 
 from bikechance_ml.analysis import metrics
 from bikechance_ml.analysis.report import render_markdown
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.io.supabase import open_storage
-from bikechance_ml.jobs.snapshot_table import SCHEMA, parquet_path
+from bikechance_ml.jobs.snapshot_table import SCHEMA, has_current_schema, parquet_path, read_table
 
 #: 分析の対象。`systems` から読まず定数にするのは、分析の再現性を優先するため。
 SYSTEM_IDS: Final[tuple[str, ...]] = ("hellocycling", "docomo-cycle")
@@ -93,8 +91,9 @@ def _cached(cache: Path | None, system_id: str, hour: datetime) -> Path | None:
     return cache / parquet_path(system_id, hour)
 
 
-def _read_bytes(body: bytes) -> pa.Table:
-    return pq.read_table(_io.BytesIO(body))
+def _read_bytes(body: bytes, where: str) -> pa.Table:
+    """**列が契約と違えば止める。** 畳み直しでキャッシュが古くなり得る（§12 の 96）。"""
+    return read_table(body, where)
 
 
 def load_hours(
@@ -112,7 +111,7 @@ def load_hours(
         if body is None:
             missing.append(hour)
             continue
-        tables.append(_read_bytes(body))
+        tables.append(_read_bytes(body, f"{system_id} {hour:%Y-%m-%dT%H}Z"))
         found.append(hour)
     table = pa.concat_tables(tables) if tables else SCHEMA.empty_table()
     return Loaded(system_id, table, tuple(found), tuple(missing))
@@ -124,7 +123,10 @@ def _load_one(
     """キャッシュがあれば使う。**何度走らせても同じ入力になる**ようにするため。"""
     path = _cached(cache, system_id, hour)
     if path is not None and path.exists():
-        return path.read_bytes()
+        cached = path.read_bytes()
+        if has_current_schema(cached):
+            return cached
+        path.unlink()
     downloaded = source.download(PARQUET_BUCKET, parquet_path(system_id, hour))
     if downloaded is not None and path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
