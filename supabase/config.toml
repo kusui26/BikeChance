@@ -370,6 +370,17 @@ authorization_url_path = "/oauth/consent"
 # Allow dynamic client registration
 allow_dynamic_registration = false
 
+# ────────────────────────────────────────────────────────────────
+# バックアップ収集器（W3 プラン §5.5）
+# ────────────────────────────────────────────────────────────────
+# **verify_jwt を切る。** JWT で守ると、呼ぶ側（pg_cron）がサービスロールキーを
+# 持つ必要があり、最も強い鍵を Vault に置くことになる。代わりに Vercel の Cron
+# ハンドラと同じ `Authorization: Bearer <CRON_SECRET>` で認証する。CRON_SECRET は
+# 既に Vault と Vercel にある同じ値で、置き場所が 1 つ増えるだけ（W3-04a）。
+[functions.collect-gbfs-backup]
+enabled = true
+verify_jwt = false
+
 [edge_runtime]
 enabled = true
 # Supported request policies: `oneshot`, `per_worker`.
