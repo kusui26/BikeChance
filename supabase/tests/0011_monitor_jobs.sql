@@ -8,7 +8,7 @@
 -- 確かめられるのは記録と抑制の論理まで（0007 と同じ）。
 
 begin;
-select plan(61);
+select plan(60);
 
 -- 自分の前提を作る
 delete from public.status_snapshots;
@@ -247,27 +247,25 @@ select is(public.check_parquet_gap() -> 'checked', '0'::jsonb, '窓より古い�
 -- ────────────────────────────────────────────────────────────────
 -- 検査 4：参照データの期限
 -- ────────────────────────────────────────────────────────────────
+-- 0023 が jp_holidays を作ったので「表が無い」経路はもう通らない。**それでも
+-- `to_regclass` の分岐は残す**：0020 だけを当てた環境（本番に 0023 を入れる前）で
+-- この関数が落ちないことが、段どうしを独立させる根拠だった
 delete from public.status_snapshots; delete from public.alert_state;
+delete from public.jp_holidays where true;
 select is(
   public.check_reference_data() -> 'skipped', 'true'::jsonb,
-  'jp_holidays がまだ無ければ飛ばす（PR D で作る）'
+  'jp_holidays が空なら飛ばす（0 件を「期限切れ」と読まない）'
 );
 select is(pg_temp.alerts(), '(なし)', '飛ばしたときは通知しない');
-
-create table public.jp_holidays (holiday_date date primary key, name text not null);
-select is(
-  public.check_reference_data() -> 'skipped', 'true'::jsonb,
-  'jp_holidays が空でも飛ばす'
-);
 
 insert into public.jp_holidays values (current_date + 30, 'テスト');
 select is(public.check_reference_data() -> 'days_left', '30'::jsonb, '残り日数を数える');
 select ok(pg_temp.has_alert('holidays_expiring'), '残り 90 日を切ったら通知する');
 
 delete from public.alert_state;
+delete from public.jp_holidays where true;
 insert into public.jp_holidays values (current_date + 400, 'テスト');
 select is(public.check_reference_data() -> 'alerts', '0'::jsonb, '十分先まであれば鳴らない');
-drop table public.jp_holidays;
 
 -- ────────────────────────────────────────────────────────────────
 -- 親：検査どうしが独立していること
