@@ -543,60 +543,74 @@ supabase/config.toml                                  # verify_jwt = false
 
 ### 5.6 PR D：暦と天気アーカイブの索引
 
-**目的**：特徴量が `t` から引く「時刻の参照データ」を 2 つ揃える。どちらも小さく、本番影響が小さい。
+**目的**：特徴量が `t` から引く「時刻の参照データ」を 2 つ揃える。どちらも小さく、収集にも配信にも触らない。
 
 ```
-supabase/migrations/<ts>_0022_calendar_and_weather_index.sql
-scripts/import-holidays.ts                 # 内閣府 CSV → jp_holidays
-packages/shared/src/calendar.ts            # day_type の導出（TS 側の正）
-apps/ml/bikechance_ml/features/calendar.py # 同じ規則の Python 実装（テストで突き合わせ）
-supabase/tests/0013_calendar.sql
+supabase/migrations/<ts>_0023_calendar_and_weather_index.sql  # jp_holidays / replace RPC / v_weather_files
+scripts/import-holidays.ts                  # 内閣府 CSV → jp_holidays
+scripts/gen-calendar-golden.ts              # ゴールデンの生成
+fixtures/calendar/day_type_golden.csv       # 730 日ぶんの答え（TS と Python の契約）
+packages/shared/src/calendar.ts             # 規則の正
+apps/ml/bikechance_ml/features/calendar.py  # 同じ規則（ゴールデンで突き合わせ）
+supabase/tests/0013_calendar_and_weather_index.sql
 ```
 
-**`jp_holidays`**
+#### `jp_holidays` に入れるのは CSV の中身だけ（実装で決めたこと）
 
-```sql
-create table public.jp_holidays (
-  holiday_date date primary key,
-  name         text not null,
-  kind         text not null   -- 'statutory'（国民の祝日・休日）| 'newyear' | 'obon'
-);
-```
+プランの §9.5 は `kind ∈ {statutory, newyear, obon}` を持つ案だったが、**年末年始とお盆は暦の規則で決まる**ので表に入れない（§12 の 87）。
 
-- `statutory` は内閣府 CSV（Shift_JIS、2027-11-23 まで収録）。
-- `newyear`（12/29–1/3）と `obon`（8/13–16）は**規則で生成**する（CSV に入っていない。実測）。
-- 取り込みは **`etag` / `last-modified` で条件付き取得**（実測でどちらも返る）。月次で回す想定だが、W3 では手動実行でよい（Cron 化は W7 の保守の回に含める）。
-- 最終収録日を `app_config.holidays_max_date` に記録し、PR A の検査が読む。
-
-**`day_type` の導出**（`packages/shared/src/calendar.ts`）
-
-| 値 | 条件 |
+| | |
 |---|---|
-| `holiday` | `jp_holidays` に在る（`kind` を問わない） |
-| `sat` | 土曜で `holiday` でない |
-| `sun` | 日曜で `holiday` でない |
-| `weekday` | それ以外 |
+| 表に入れる | 内閣府 CSV の `(holiday_date, name)` だけ。1,067 件・1955-01-01〜2027-11-23（実測） |
+| 規則で決める | 年末年始 12/29〜1/3、お盆 8/13〜16 |
+| なぜ | `kind` を持つと「元日は statutory でもあり newyear でもある」の決着が要る。**導けるものを表に持たない**ほうが、その問題自体が消える |
 
-`is_day_before_holiday` と `is_last_business_day` も同じファイルで導く。**同じ規則を Python 側にも書き、両方が同じ結果を返すことをテストで固定する**（学習と配信でずれない。CLAUDE.md §2 の 4）。
+#### 暦の規則は 2 言語で書き、ゴールデンで突き合わせる
 
-**`v_weather_files`**（W3-06）
+学習（Python）と配信（TypeScript）で答えがずれると、**モデルが見た世界と本番の世界が食い違う**。`packages/shared` の実装から 730 日ぶんの表を吐き、両方のテストがそれに照らす。
 
-```sql
-create view public.v_weather_files as
-select (r.detail->>'hour_epoch_s')::bigint            as hour_epoch_s,
-       r.finished_at                                   as available_at,
-       (r.detail->>'n_saved')::int                     as n_saved,
-       (r.detail->>'n_failed')::int                    as n_failed,
-       r.status
-  from public.job_runs r
- where r.job_name = 'archive_weather' and r.detail ? 'hour_epoch_s';
+```
+scripts/gen-calendar-golden.ts → fixtures/calendar/day_type_golden.csv
+   ├─ packages/shared/src/calendar.test.ts   実装と 1 日も食い違わない
+   └─ apps/ml/tests/test_calendar.py         730 日すべてで一致する
 ```
 
-- 特徴量は `available_at <= t` の最新行を引く。
-- 記録が無い時間帯のフォールバックは `hour_epoch_s + 3600`（保守的な既定）。**フォールバックを使った件数を必ず出す。**
-- 実測では遅延は 17.637〜17.658 分（12 件、ばらつき 0.02 分）だが、**定数として持たない**。cron の分を変えれば変わるし、過去のファイルは過去の時刻を持ち続ける。
+**TypeScript を変えたらフィクスチャの差分が出る**ので、レビューで「暦の意味が変わった」ことに気づける。祝日そのものもフィクスチャに入れてあるので、Python 側のテストは DB も CSV も要らない。
 
-**完了条件**：`jp_holidays` に 2026 年 18 件・2027 年 17 件の `statutory` が入り、`newyear` / `obon` が規則どおり生成される。`day_type` の TS 実装と Python 実装が 2026-01-01〜2027-12-31 の全日で一致する。`v_weather_files` が 12 行以上を返す。
+| 値 | 優先順 | 内容 |
+|---|---|---|
+| `newyear` | 1 | 12/29〜1/3。**祝日より優先**（期間全体が休業として振る舞う） |
+| `obon` | 2 | 8/13〜16 |
+| `holiday` | 3 | `jp_holidays` に在る |
+| `sun` / `sat` | 4 | 曜日 |
+| `bridge` | 5 | **前日も翌日も休みの平日**（飛び石） |
+| `weekday` | 6 | それ以外 |
+
+`dow_type`（プロファイルと気候値のセルを切る 3 値）は `day_type` から畳む：`sat` / `sun_holiday`（sun・holiday・newyear・obon）/ `weekday`（weekday・bridge）。**7 値で切るとセルあたりのサンプルが半分以下になり `station × dow_type × slot15` が埋まらない。**
+
+2026 年の内訳（実測）：`weekday` 234・`sat` 50・`sun` 50・`holiday` 17・`newyear` 6・`obon` 4・`bridge` 4 ＝ 365。**CSV は 18 件だが元日が `newyear` に吸われるので `holiday` は 17。**
+
+#### 入れ替えは 1 つの RPC で
+
+`delete` と `insert` を別のリクエストにすると、**その間だけ祝日が 0 件**になり、そこで特徴量を作ると全部平日になる。PostgREST の 1 リクエスト＝1 トランザクションなので、`replace_jp_holidays(jsonb)` に閉じる。
+
+**空にしてしまう事故は関数の中で止める。** 100 行未満は受け付けない（1955 年からの収録で 1,000 行以上あるのが正常）。
+
+#### 条件付き取得は使えなかった
+
+プランは「`etag` / `last-modified` で条件付き取得」としていたが、**実測で効かない**（§12 の 89）。中身の SHA-256 を自分で持って比べる。
+
+#### ローカルでの実測（2026-09-08 15:35〜15:50 JST）
+
+| 見たもの | 結果 |
+|---|---|
+| 取り込み | **1,067 件**（1955-01-01〜2027-11-23）。2025 年 19・2026 年 18・2027 年 17 件 |
+| 2 回目 | **中身が同じなので何も書かない**（`--force` で強制できる） |
+| `check_reference_data` | `skipped` → **`days_left: 441`・`alerts: 0`** に変わった |
+| `v_weather_files` | `available_at` が予報時刻の **18 分後**。01:10 時点では 01 時の予報を引かない |
+| TypeScript ↔ Python | **730 日すべて一致**（`day_type`・`dow_type`・休前日・月末営業日） |
+
+**完了条件**：上の 5 つ。本番では `import-holidays.ts` を 1 回流し、`check_reference_data` が `skipped` でなくなることを確認する。**2026-09-21〜23 の 3 連休より前に入れる**（それまでの蓄積に祝日が 1 日も含まれていないため。§6）。
 
 ### 5.7 PR E：ポートの地理属性と近傍リスト
 
@@ -1031,19 +1045,30 @@ select hour_epoch_s
 
 ### 9.5 参照データの契約（PR D・PR E）
 
-**`jp_holidays`**
+**`jp_holidays`**（内閣府 CSV の中身**だけ**。§12 の 87）
 
 | 列 | 内容 |
 |---|---|
 | `holiday_date` | date（主キー） |
-| `name` | 内閣府 CSV の名称、または `年末年始` / `お盆` |
-| `kind` | `statutory`（CSV 由来）/ `newyear`（12/29–1/3）/ `obon`（8/13–16） |
+| `name` | 内閣府 CSV の名称。「元日」などの祝日名と、振替休日・国民の休日を表す「休日」 |
 
-`app_config.holidays_max_date` に CSV の最終収録日を記録する（PR A の検査が読む）。
+**年末年始とお盆は入れない。** 暦の規則（12/29〜1/3・8/13〜16）なので `calendar.ts` / `calendar.py` が持つ。入れ替えは `replace_jp_holidays(jsonb)` の 1 トランザクションで、**100 行未満は受け付けない**（取得の失敗で表を空にしない）。
 
-**`day_type`**（`packages/shared/src/calendar.ts` と `features/calendar.py` の両方に同じ規則）
+`app_config` に持つのは `holidays_sha256`（次回の差分判定）・`holidays_last_modified`・`holidays_imported_at` の 3 つ。**最終収録日は持たない**（`max(holiday_date)` で引けるものを二重に持たない）。
 
-`holiday` > `sun` > `sat` > `weekday` の優先順で 1 つに決める。`is_day_before_holiday` は「翌日が `holiday`」。
+**`day_type` / `dow_type`**（`packages/shared/src/calendar.ts` と `features/calendar.py` の両方に同じ規則。`fixtures/calendar/day_type_golden.csv` で突き合わせる）
+
+| `day_type` | 優先順 | `dow_type` |
+|---|---|---|
+| `newyear`（12/29〜1/3） | 1 | `sun_holiday` |
+| `obon`（8/13〜16） | 2 | `sun_holiday` |
+| `holiday`（`jp_holidays`） | 3 | `sun_holiday` |
+| `sun` | 4 | `sun_holiday` |
+| `sat` | 5 | `sat` |
+| `bridge`（前後が休みの平日） | 6 | `weekday` |
+| `weekday` | 7 | `weekday` |
+
+`is_day_before_holiday` は「翌日が休み（土日・祝日・年末年始・お盆）」。`is_last_business_day` は「月末から遡って最初の非休日」。
 
 **`stations.pref_code` / `muni_code`**
 
@@ -1483,3 +1508,52 @@ select c.jobname from cron.job c
 pgTAP には「**pg_cron のジョブに監視の抜けが無い**」を不変条件として足した。次に cron ジョブを増やして表に入れ忘れたら、テストと本番の両方で鳴る。
 
 **この見つけ方自体が段 1 の理屈の実例になっている。** 「失敗を探す」検査は、そもそも対象に入っていないものを見つけられない。**在るべきものの一覧と、実際に在るものを突き合わせる**必要がある。
+
+### 87. 年末年始とお盆を表に持たせると、優先順の決着がつかなくなる（段 4）
+
+プラン §9.5 は `jp_holidays.kind ∈ {statutory, newyear, obon}` を持つ設計だった。**実装しようとして詰まった。**
+
+`holiday_date` が主キーなので 1 日 1 行しか持てない。ところが **2026-01-01 は「元日（statutory）」でもあり「年末年始（newyear）」でもある**。振替休日が 1/2 や 1/3 に落ちる年もある（1/1 が日曜のとき）。どちらの `kind` を残すかを決めないと入れられない。
+
+**そもそも年末年始（12/29〜1/3）とお盆（8/13〜16）は暦の規則で、データではない。** 表に持たせるのをやめたら、この問題ごと消えた。
+
+| 表に入れる | 規則で決める |
+|---|---|
+| 内閣府 CSV の `(holiday_date, name)` | 年末年始・お盆・飛び石・月末営業日 |
+
+**規則は 2 つの言語（TS と Python）に写る**ので、`fixtures/calendar/day_type_golden.csv` を挟んで機械的に突き合わせる。730 日ぶんの答えを TypeScript から生成し、両方のテストがそれに照らす。
+
+### 88. `DELETE` に `WHERE` が無いと PostgREST 経由で弾かれる（段 4）
+
+`replace_jp_holidays` の中に素直に `delete from public.jp_holidays;` と書いたら、RPC が 400 を返した。
+
+```
+21000  DELETE requires a WHERE clause
+```
+
+Supabase は PostgREST の接続ロール（`authenticator`）に **`session_preload_libraries = supautils, safeupdate`** を設定していて、`WHERE` の無い `DELETE` / `UPDATE` を止める。**`security definer` でもセッションの設定なので効く。**
+
+`where true` を足せば通る。**pgTAP では再現できない**（`postgres` で動くので safeupdate が載っておらず、`LOAD 'safeupdate'` は許可されていない）ので、代わりに**関数の本文に `delete from public.jp_holidays where` があること**をテストで見張る。
+
+> **気づけたのは、スクリプトがエラー本文を出していなかったのを直したから。** 最初は「HTTP 400」としか出しておらず、「行が少なすぎる」のか「関数が無い」のか分からなかった。**PostgREST のエラー本文は自分たちのエラー文なので、そのまま出してよい。**
+
+### 89. 内閣府の CSV に条件付き取得は効かない（段 4）
+
+プラン §5.6 は「`etag` / `last-modified` で条件付き取得（実測でどちらも返る）」としていた。**「ヘッダが返る」ことは確かめたが、「条件付き取得が効く」ことは確かめていなかった。**
+
+| 送ったもの | 応答 |
+|---|---|
+| `If-None-Match: "5422-649cc6d5b61b9"` | **200**（304 ではない） |
+| `If-Modified-Since: Mon, 02 Feb 2026 00:30:17 GMT` | **200** |
+
+しかも**同じファイルなのに ETag が要求ごとに変わる**。
+
+```
+etag: "5422-649cc6d5b61b9"
+etag: "5422-649cc6d5b61b9"
+etag: "5422-649cc6d5b46cb"   ← 3 回目で別の値
+```
+
+サイズ（5422）は同じで後半だけが違う。負荷分散された別のサーバが別の mtime を持っているのだろう。**ETag では原理的に一致しない。**
+
+そこで**中身の SHA-256 を自分で持って比べる**。21 KB のダウンロードは毎回払うが、それだけである。`app_config.holidays_sha256` に入れ、同じなら RPC を呼ばない。
