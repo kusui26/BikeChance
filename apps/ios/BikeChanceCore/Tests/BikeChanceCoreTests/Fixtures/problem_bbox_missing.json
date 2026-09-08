@@ -1,0 +1,7 @@
+{
+    "type": "/v1/problems/bbox-missing",
+    "title": "bbox \u304c\u6307\u5b9a\u3055\u308c\u3066\u3044\u307e\u305b\u3093",
+    "status": 400,
+    "detail": "bbox \u306f\u5fc5\u9808\u3067\u3059\uff08west,south,east,north \u306e\u9806\u306b\u5ea6\u3067\u6307\u5b9a\uff09\u3002",
+    "code": "bbox_missing"
+}

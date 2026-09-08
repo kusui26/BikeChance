@@ -10,3 +10,7 @@ docs
 # apps/ml の Python 仮想環境
 .venv
 **/.venv/**
+
+# iOS は swift-format が持つ。Prettier は触らない
+# （とくに Fixtures/ は本番の応答をそのまま置いた契約テストの入力）
+apps/ios

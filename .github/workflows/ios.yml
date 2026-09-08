@@ -1,0 +1,51 @@
+name: iOS
+
+# apps/ios は SwiftUI のアプリと、その中の純粋ロジック（Swift Package）。
+# ci.yml に混ぜないのは、macOS ランナーが要るのは iOS が変わった PR だけで、
+# 収集側の PR を毎回遅くする理由が無いため（python.yml / sql-tests.yml と同じ方針）。
+on:
+  pull_request:
+    paths:
+      - "apps/ios/**"
+      - ".github/workflows/ios.yml"
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: swift test / swift-format
+    # macOS 26 が GA。iOS 26 の SDK が要る（最小 iOS バージョンが 26。開発プラン §9.1）
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: ツールチェーンを確認する
+        run: |
+          xcodebuild -version
+          swift --version
+          xcrun --sdk iphonesimulator --show-sdk-version
+
+      # 判断の入るものはすべてここにある。シミュレータが要らないので速い
+      - name: 純粋ロジックのテスト
+        working-directory: apps/ios/BikeChanceCore
+        run: swift test
+
+      # Xcode 同梱の swift-format を使う。**追加のツールを入れない**
+      - name: 書式
+        working-directory: apps/ios
+        run: |
+          xcrun swift-format lint --strict --parallel --recursive \
+            --configuration .swift-format \
+            BikeChanceCore/Sources BikeChanceCore/Tests BikeChance
+
+      # pbxproj が壊れていないことの確認。**手で書いた project.pbxproj なので効く**
+      - name: アプリのビルド
+        working-directory: apps/ios
+        run: |
+          xcodebuild -project BikeChance.xcodeproj -scheme BikeChance \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -configuration Debug build \
+            CODE_SIGNING_ALLOWED=NO | tail -20
