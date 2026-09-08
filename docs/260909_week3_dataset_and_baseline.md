@@ -289,50 +289,87 @@ select date_trunc('hour', created_at at time zone 'Asia/Tokyo') as 時,
 **目的**：静かに落ちる経路を無くす。とくに**天気アーカイブ**は、落ちた時刻の予報が永久に失われる。
 
 ```
-supabase/migrations/<ts>_0020_monitor_jobs.sql
+supabase/migrations/20260908043706_0020_monitor_jobs.sql
 supabase/tests/0011_monitor_jobs.sql
 ```
 
-**新しい関数 `monitor_jobs()` を作る**（`monitor_feeds` には触らない。W3-02）。pg_cron に 5 分毎のジョブとして登録する。
+**新しい関数を作る**（`monitor_feeds` には触らない。W3-02）。pg_cron に 5 分毎のジョブとして登録する。
+
+#### 検査を 4 つの関数に分けた（実装で決めたこと）
+
+プランでは「`monitor_jobs()` の中に検査を並べ、`begin ... exception` で囲む」としていたが、**検査ごとに別の関数にした**。
+
+| 理由 | |
+|---|---|
+| 1 関数 20 行未満・単一責務（CLAUDE.md §3） | 4 検査を 1 関数に入れると 200 行を超える |
+| **単体でテストできる** | pgTAP から `check_parquet_gap()` だけを呼んで、窓の境界を 4 通り確かめられる |
+| 隔離が 1 か所で書ける | 親は `execute format('select public.%I()', v_name)` で回すだけ。**コピペした exception 節が 4 つ並ばない** |
+
+```
+public.check_jobs_missing()     直近 N のあいだ status='ok' が無いジョブ
+public.check_jobs_failed()      直近 3 時間に status='failed' があるジョブ（全ジョブ対象）
+public.check_parquet_gap()      status_snapshots に行が在るのに Parquet が無い時間帯
+public.check_reference_data()   参照データの期限（いまは祝日のみ）
+public.monitor_jobs()           上を 1 つずつ例外を切り分けて呼ぶ。これだけが親の仕事
+```
 
 | 検査 | 条件 | 抑制 | 鍵 |
 |---|---|---|---|
-| **ジョブが動いていない** | 対象ジョブの `status = 'ok'` が直近 N 時間に 1 件も無い | 3 時間 | `job_missing:<job>` |
+| **ジョブが動いていない** | 対象ジョブの `status = 'ok'` が直近 N のあいだ 1 件も無い | 3 時間 | `job_missing:<job>` |
 | **ジョブが失敗した** | 直近 3 時間に `status = 'failed'` がある | 1 時間 | `job_failed:<job>` |
-| **Parquet に欠落がある** | 直近 6 時間で、`status_snapshots` に行が在るのに Storage に対応するオブジェクトが無い時間帯がある | 6 時間 | `parquet_gap` |
+| **Parquet に欠落がある** | 直近 6 時間（末尾 1 時間は猶予）で、`status_snapshots` に行が在るのに Storage に対応するオブジェクトが無い | 6 時間 | `parquet_gap` |
 | **祝日データが尽きかけている** | `jp_holidays` の最終収録日まで 90 日を切った | 7 日 | `holidays_expiring` |
+| **検査そのものが落ちた** | いずれかの検査が例外を投げた | 1 時間 | `monitor_check_failed:<check>` |
 
-対象ジョブと閾値は**テーブルで持つ**（`app_config` ではなく専用の小さな表）。ジョブが増えるたびに関数を書き換えたくない。
+#### 監視対象は `public.monitored_jobs` に持つ
 
-祝日の検査は PR D が `jp_holidays` を作るまで対象が無い。**`to_regclass('public.jp_holidays') is null` なら黙って飛ばす**（例外に頼らない）。
+プランでは 6 ジョブとしていたが、**9 ジョブにした**。毎分・5 分毎のものも入れる。
 
-| ジョブ名 | 期待周期 | 「成功が無い」閾値 |
+| ジョブ名 | 期待周期 | 「成功が無い」閾値 | なぜ入れるか |
+|---|---|---|---|
+| `watchdog_collect` | 1 分 | 15 分 | 個別に外されたら気づきたい |
+| `monitor_feeds` | 5 分 | 30 分 | 同上 |
+| **`monitor_jobs`** | 5 分 | 30 分 | **自分自身。復旧したときに空白があったことを検出できる** |
+| `compact_parquet` | 1 時間 | **3 時間** | 2 回落ちたら鳴る |
+| `archive_weather` | 1 時間 | **3 時間** | 落ちた時刻の予報は永久に失われる |
+| `maintain_partitions` | 1 日 | 30 時間 | |
+| `refresh_station_activity` | 1 日 | 30 時間 | |
+| `sync_stations:hellocycling` | 1 日 | 30 時間 | |
+| `sync_stations:docomo-cycle` | 1 日 | 30 時間 | |
+
+**`monitor_jobs` 自身の停止は、この仕組みでは検知できない。** pg_cron ごと止まれば監視も通知も止まる。それでも表に入れてあるのは、**復旧したときに「30 分以上動いていなかった」を残せる**ため。
+
+#### 実装で足した 3 つの安全装置
+
+| # | 何を | なぜ |
 |---|---|---|
-| `archive_weather` | 1 時間 | **3 時間**（2 回落ちたら鳴る） |
-| `compact_parquet` | 1 時間 | 3 時間 |
-| `sync_stations:hellocycling` | 1 日 | 30 時間 |
-| `sync_stations:docomo-cycle` | 1 日 | 30 時間 |
-| `maintain_partitions` | 1 日 | 30 時間 |
-| `daily_quality` | 1 日 | 30 時間 |
+| 1 | **`added_at` の猶予**（`now() > added_at + missing_after` になるまで見ない） | 適用直後は「まだ 1 度も回っていない」だけかもしれない。日次ジョブは 1 巡するまで判断できない。**これが無いと migration を当てた瞬間に 9 件の誤報が出る** |
+| 2 | **`missing_after > expected_every` の check 制約** | 閾値が周期より短いと必ず鳴り続ける。設定ミスを DB で止める |
+| 3 | **Parquet 欠落の窓の末尾に 1 時間の猶予** | 毎時ジョブは :07 に前 1 時間を畳むので、:00〜:07 は「まだ無い」のが正常。猶予が無いと**毎時 7 分間だけ誤報**が出る |
 
 **設計上の注意**
 
-- 検査ごとに `begin ... exception when others` で囲み、**1 つの失敗が他を巻き込まない**ようにする。関数全体としては `job_runs` に `ok` を記録し、`detail` に検査ごとの結果（`checked` / `alerts` / `errors`）を残す。
-- `storage.objects` は**スキーマ付きで書く**（`set search_path = ''`）。
-- 欠落検査は**直近 6 時間に限る**。`status_snapshots` の `observed_at` を UTC の時に丸め、`storage.objects` の `name` から `date=` / `hour=` を組み立てて突き合わせる。
+- `storage.objects` は**スキーマ付きで書く**（`set search_path = ''`）。`postgres` は **BYPASSRLS** を持つので `security definer` の中から全行が見える（本番・ローカルとも実測で確認）
+- 欠落検査は**直近 6 時間に限る**。古い欠落の埋め戻しは別の話（データ辞書 §13 の SQL を手で回す）
+- アドバイザリロックは **(8423, 6)**。1〜5 は 0009・0011・0013 が使っている（W1-30）
+- Cron は **`4-59/5 * * * *`**（:04, :09, …）。`monitor_feeds`（:00, :05 …）・`compact_parquet`（:07）・`archive_weather`（:17）と重ねない
+- **`job_runs` が 1 日 288 行増える**（1,780 → 約 2,070 行/日）。W7 の保持では `watchdog_collect`・`monitor_feeds` と同じく**消してよい側**に入れる（§8）
 
-**テスト**（pgTAP）
+**テスト**（pgTAP・61 件）
 
-- 関数が在り、`security definer` かつ `search_path = ''` であること
-- `postgres` が `storage.objects` を読めること（**これが読めないと設計が成り立たない**）
-- ジョブ表に上表の 6 行が在ること
-- 「成功が無い」検査：`job_runs` を空にして呼ぶと `alert_state` に `job_missing:archive_weather` が入ること
-- 「失敗」検査：`failed` を 1 行入れると `job_failed:*` が入ること
-- 1 つの検査を壊しても（存在しないテーブルを見る等）他の検査が走り、`job_runs` が `ok` で終わること
-- 抑制：連続 2 回呼んでも 2 通目は送られないこと
+| 群 | 見るもの |
+|---|---|
+| 構造 | 表と 5 関数の存在、RLS、`security definer` ＋ `search_path=''`、匿名から呼べない、cron の schedule |
+| 前提 | **`postgres` が `storage.objects` を読めること**（これが読めないと設計が成り立たない）、`rolbypassrls` |
+| 検査 1 | 猶予中は見ない／猶予後に鳴る／成功があれば鳴らない／抑制／閾値より古い成功では鳴る |
+| 検査 2 | 失敗で鳴る／3 時間より古い失敗では鳴らない／**監視対象表に無いジョブも拾う** |
+| 検査 3 | 欠落で鳴る／置けば消える／**直前 1 時間は猶予**／窓より古い時間は見ない／通知に系統と時間が入る |
+| 検査 4 | 表が無ければ `skipped`／空でも `skipped`／90 日を切れば鳴る／十分先なら鳴らない |
+| 親 | 正常時 `ok`／**1 つ壊しても他は走る**／`detail` に SQLSTATE／`status` が `failed`／`monitor_check_failed` が出る／ロック番号 |
 
-**完了条件**：ローカルで `archive_weather` の `job_runs` を空にした状態から `monitor_jobs()` を呼び、通知が組み立てられることを確認する。本番適用後、**実際に 1 度鳴らして Discord に届くことを見る**（段 0 で Webhook を確かめたときと同じ）。
-※ 本番の cron を止めるのは CLAUDE.md §6 の確認が要る操作なので、**ローカルで再現する**。
+**完了条件**：ローカルで全 381 件（うち新規 61 件）が通り、`monitor_jobs()` を実行すると 4 検査すべてが `detail` に残る。本番適用後、5 分毎に `ok` が並び、**24 時間で誤報 0**。
+
+**本番適用前の空撃ち（2026-09-08 13:45 JST）**：本番の DB に対して、`check_parquet_gap` と同じ問い合わせを読み取りだけで実行した。**対象 12 組（2 系統 × 6 時間）・欠落 0**。`check_jobs_missing` の対象 8 ジョブも、最も古い成功が 644 分前（閾値 1,800 分）で余裕がある。**適用しても誤報は出ない。**
 
 ### 5.4 PR B：Parquet に `fetched_at` ＋既存の再圧縮
 
@@ -760,7 +797,7 @@ W1・W2 と同じ。§1 の合格基準の表を実測で埋め、§1 の直下�
 
 | 項目 | 実施週 | 理由 |
 |---|---|---|
-| **`job_runs` の保持** | **W7**（開発プラン §13 の「保持ポリシー・コスト確認」へ移した） | 遅れても失われるものが無く、**急ぐと危ない**。`archive_weather` の行は天気の入手時刻の記録そのもの（W3-06 が使う）で、素直に「N 日より古い行を消す」と書くと消してしまう。現状の伸びは 1 日 1,780 行・936 kB で、8 GB の予算に対して無視できる。**消すのは `watchdog_collect` と `monitor_feeds` に限る**という条件つきで W7 に置く（W2 プラン §14.5） |
+| **`job_runs` の保持** | **W7**（開発プラン §13 の「保持ポリシー・コスト確認」へ移した） | 遅れても失われるものが無く、**急ぐと危ない**。`archive_weather` の行は天気の入手時刻の記録そのもの（W3-06 が使う）で、素直に「N 日より古い行を消す」と書くと消してしまう。現状の伸びは 1 日 1,780 行・936 kB で、8 GB の予算に対して無視できる。**消すのは `watchdog_collect`・`monitor_feeds`・`monitor_jobs` に限る**という条件つきで W7 に置く（W2 プラン §14.5）。**段 1 で `monitor_jobs` が 1 日 288 行を足した**ので、伸びは 1 日約 2,070 行になった |
 | 国土数値情報 N03 のポリゴン照合（ドコモの `muni_code`） | 未定（W8 以降か、行わない） | 全国 611 MB・都道府県別 11 MB（実測）、対象は 29 都道府県以上、幾何ライブラリの追加が要る。一方で**これで埋まるのは「ドコモかつ 1 km 以内に近傍 0 件」の 136 ポート（全体の 0.66%）**にすぎない（§10.2a）。近傍が 1 件でもあれば近傍の集約のほうが当たり、近傍で説明したあと市区町村が足す残差は 1.49%。**遅らせても失われるものは無い**（座標と住所は `station_attributes` と生 JSON に無期限で残り、N03 は過去年度版も入手できる）。**外部の市区町村データ（人口・乗降客数など）と結合したくなった時点で判断する** |
 | 履歴プロファイル（`station_profiles`） | W4〜W5 | 過去 28 日の集計なので、9 月の時点では日数が足りない。**先に作っても中身が入らない。** 特徴量の枠だけ `features/` に用意し、値は W4 以降 |
 | 再配置（リバランス）の検知 | W4 | 検知規則（開発プラン §6.5）は Parquet からいつでも作り直せる。特徴量パイプラインが通ってから足す |
@@ -1257,3 +1294,30 @@ W1・W2 プランと同じ運用にする。
 `weatherObjectPath` は `gbfs-raw` と同じく **UTC の日付**でディレクトリを切る（W2 プラン §9.1）。したがって **JST の 09-08 の 13 時刻は `2026/09/07` に 9 個・`2026/09/08` に 4 個**に分かれて置かれる。
 
 データ辞書 §7.2 は「日付・時刻は UTC」と書いており規約としては明記されている。**それでもこの検証で踏んだ**：JST の日付でパスを組み立てて **9 時刻ぶん（54 ファイル）が 400 で取れなかった**。§4.2 の 14（Parquet の `date=` / `hour=` は UTC）とまったく同じ落とし穴が**天気にも当てはまる**、と書いておかないと繰り返す。読み出しは必ず `storage.objects.name` か `weatherObjectPath` から組み立て、手で書かない。
+
+### 81. `storage.objects` からは直接 DELETE できない（段 1）
+
+pgTAP のテストは「自分の前提を自分で作る」ため、先に関係する表を空にしてから始める（0007 の作法）。**`storage.objects` だけはこれができない。**
+
+```
+ERROR:  Direct deletion from storage tables is not allowed. Use the Storage API instead.
+HINT:   This prevents accidental data loss from orphaned objects.
+CONTEXT: PL/pgSQL function storage.protect_delete() line 5 at RAISE
+```
+
+Supabase が `before delete` トリガで止めている（孤児オブジェクトを防ぐため）。**INSERT は通る**ので、テストは「消してから始める」ではなく**前提を表明してから始める**形にした。
+
+```sql
+select is(
+  (select count(*)::int from storage.objects where bucket_id = 'gbfs-parquet'),
+  0, '前提：ローカルの gbfs-parquet は空'
+);
+```
+
+**運用への含意**：Storage のオブジェクトを消すには Storage API を通すしかない。CLAUDE.md §6 が「Storage バケットやオブジェクトの削除」を確認の要る操作に挙げているのと整合しており、**SQL でうっかり消せない**ようになっている。
+
+### 82. 監視対象表に自分自身を入れると、適用直後に必ず誤報が出る（段 1）
+
+`check_jobs_missing` は「直近 N のあいだ `status='ok'` が 1 件も無い」を見る。**適用直後はどのジョブも「この表に載ってから」は 1 度も成功していない**ので、9 件そろって鳴る。日次ジョブに至っては、次に回るまで最大 24 時間、正しく判断できない。
+
+**`added_at` を持たせ、`now() > added_at + missing_after` になるまで見ない**ことで解決した。副作用として「新しく監視対象に足したジョブは、その閾値のあいだ盲点になる」が、これは**「まだ 1 巡していない」と「死んでいる」を区別できない**という事実そのものなので、正しい振る舞いである。
