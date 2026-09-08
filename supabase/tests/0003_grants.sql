@@ -5,7 +5,7 @@
 -- ここでは「anon には何も無い」「service_role には全部ある」を機械で固定する。
 
 begin;
-select plan(17);
+select plan(19);
 
 -- ────────────────────────────────────────────────────────────────
 -- RLS：例外を作らない
@@ -146,6 +146,66 @@ select ok(
        and array_to_string(d.defaclacl, ' ') like '%service_role=%'
   ),
   'postgres が作るテーブルの既定権限に service_role が入っている'
+);
+
+-- ────────────────────────────────────────────────────────────────
+-- PostgREST から呼ぶ関数には明示的な grant が要る（W3 プラン §12 の 90）
+-- ────────────────────────────────────────────────────────────────
+-- **本番は「新規オブジェクトの自動公開」が OFF** で、`postgres` が作った関数の
+-- EXECUTE が `service_role` に既定で付かない（表とシーケンスには 0006 が既定権限を
+-- 入れてあるので付く）。ローカルは既定が違うため、`has_function_privilege` で見ると
+-- **ローカルだけ通って本番で 42501 になる**。そこで **明示的な grant があること** を見る。
+--
+-- 関数を 2 つに分類し、どちらにも入っていないものが無いことも見張る。新しい関数を
+-- 足したら、ここでどちらかに入れることになる。
+create function pg_temp.rest_called() returns text[] language sql immutable as $$
+  select array[
+    -- 収集（apps/web/lib/jobs）
+    'begin_fetch', 'finish_fetch', 'ingest_snapshot', 'upsert_station_attributes',
+    'weather_grid_cells',
+    -- ジョブの記録（apps/ml と Edge Function）
+    'job_started', 'job_finished',
+    -- 再構築スクリプト
+    'ensure_snapshot_partitions', 'drop_expired_snapshot_partitions', 'snapshot_partition_exists',
+    -- 祝日の取り込みスクリプト
+    'replace_jp_holidays'
+  ];
+$$;
+
+create function pg_temp.cron_only() returns text[] language sql immutable as $$
+  select array[
+    -- pg_cron から呼ぶ（PostgREST から呼ばないので grant は要らない）
+    'watchdog_collect', 'monitor_feeds', 'monitor_jobs', 'run_maintenance',
+    'refresh_station_activity', 'compute_daily_quality', 'trigger_backup_collect',
+    'check_jobs_missing', 'check_jobs_failed', 'check_cron_jobs', 'check_parquet_gap',
+    'check_reference_data',
+    -- 他の関数の中からだけ呼ぶ補助
+    'send_alert', 'config_int', 'jsonb_boolean', 'jsonb_number',
+    -- Supabase が作る（こちらの管理外）
+    'rls_auto_enable',
+    -- このテスト自身が既定権限を測るために作る
+    'privilege_probe_fn'
+  ];
+$$;
+
+select is(
+  (select array_agg(p.proname order by p.proname)
+     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.prokind = 'f'
+      and p.proname = any (pg_temp.rest_called())
+      and p.proacl::text not like '%service_role=X%'),
+  null,
+  'PostgREST から呼ぶ関数はすべて service_role に明示的な grant を持つ（本番で 42501 にならない）'
+);
+
+select is(
+  (select array_agg(p.proname order by p.proname)
+     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.prokind = 'f'
+      and not (p.proname = any (pg_temp.rest_called()))
+      and not (p.proname = any (pg_temp.cron_only()))),
+  null,
+  '**どちらにも分類されていない関数が無い**（新しい関数を足したらここで分類する）'
 );
 
 select * from finish();
