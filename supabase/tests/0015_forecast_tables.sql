@@ -7,7 +7,7 @@
 --   * 匿名ロールからは**何も見えない**
 
 begin;
-select plan(35);
+select plan(44);
 
 delete from public.station_forecasts where true;
 delete from public.inference_log where true;
@@ -116,6 +116,60 @@ select ok(
 select throws_ok(
   $$update public.inference_log set status = 'weird' where id = (select min(id) from public.inference_log)$$,
   '23514', null, '知らない状態は入らない'
+);
+
+-- ────────────────────────────────────────────────────────────────
+-- detail：成果物のドリフトを残す（0030、W3 プラン §12 の 110）
+-- ────────────────────────────────────────────────────────────────
+-- **落ちていることが見えないと、再学習の間隔が長すぎるのに気づけない。**
+-- `finish_inference` に `p_detail` を足し、列になっていない要約だけを入れる。
+select has_column('public', 'inference_log', 'detail', 'detail がある（0030）');
+select is(
+  (select data_type from information_schema.columns
+    where table_schema = 'public' and table_name = 'inference_log' and column_name = 'detail'),
+  'jsonb', 'detail は jsonb（列を足さずに数を増やせる）'
+);
+
+-- **多重定義になっていないこと。** `create or replace` は引数の並びが同じときしか
+-- 置き換えにならない。末尾に既定値付きの引数を足すと 2 つ並び、PostgREST が
+-- どちらを呼ぶか決められなくなる（0030 で落として作り直した理由）
+select is(
+  (select count(*)::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = 'finish_inference'),
+  1, '**`finish_inference` は 1 つだけ**（多重定義していない）'
+);
+select is(
+  (select pronargs::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = 'finish_inference'),
+  6, '引数は 6 つ（p_detail を足した）'
+);
+select ok(
+  (select proacl::text like '%service_role=X%' from pg_proc p
+     join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = 'finish_inference'),
+  '**落として作り直すと ACL も消える。** 明示的に付け直してある（§12 の 90）'
+);
+
+select lives_ok(
+  $$select public.finish_inference(
+      (select id from public.inference_log order by id limit 1), 'ok', 123, 4567, null,
+      '{"stations": 14928, "skipped": 492, "unknown_ports": 5}'::jsonb)$$,
+  'detail を渡せる'
+);
+select is(
+  (select detail->>'unknown_ports' from public.inference_log order by id limit 1),
+  '5', '成果物に無かったポートの数が残る'
+);
+select is(
+  (select detail->>'status' from public.inference_log order by id limit 1),
+  null, '**列に在るものは入れない**（status は列で持っている）'
+);
+
+-- 古い呼び方（5 引数）も通る。マイグレーションとコードのどちらを先に出しても壊れない
+select lives_ok(
+  $$select public.finish_inference(
+      (select id from public.inference_log order by id limit 1), 'ok', 1, 2)$$,
+  '既定値があるので 4 引数でも呼べる'
 );
 
 -- ────────────────────────────────────────────────────────────────

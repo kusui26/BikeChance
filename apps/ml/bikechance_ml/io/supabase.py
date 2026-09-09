@@ -355,7 +355,13 @@ class SupabaseIo:
         return as_int(field(fields, "id", "begin_inference"), "id")
 
     def finish_inference(
-        self, run_id: int, status: str, n_rows: int, duration_ms: int, error: str | None = None
+        self,
+        run_id: int,
+        status: str,
+        n_rows: int,
+        duration_ms: int,
+        error: str | None = None,
+        detail: Mapping[str, object] | None = None,
     ) -> None:
         self._request(
             "POST",
@@ -367,6 +373,7 @@ class SupabaseIo:
                 "p_n_rows": n_rows,
                 "p_duration_ms": duration_ms,
                 "p_error": error,
+                "p_detail": None if detail is None else dict(detail),
             },
         )
 
