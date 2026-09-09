@@ -188,14 +188,14 @@ select is(
 -- ────────────────────────────────────────────────────────────────
 -- 監視とスケジュール
 -- ────────────────────────────────────────────────────────────────
--- ウォッチドッグは**両系に広げてから**入れる（W3-19）。いまは入っていないことを固定する
+-- ウォッチドッグは**両系に広げてから**入れる（W3-19）。**手順 5 で入れた**（0029）
 select is(
-  (select count(*)::int from cron.job where jobname like 'infer%'), 0,
-  '**推論のウォッチドッグはまだ入れない**（1 システム 6 時間の観察が先。W3-19）'
+  (select count(*)::int from cron.job where jobname = 'infer_watchdog'), 1,
+  '推論のウォッチドッグ（pg_cron 5 分毎）が登録されている（0029。W3-19 の手順 5）'
 );
 select is(
-  (select count(*)::int from public.monitored_jobs where job_name like 'infer%'), 0,
-  '監視対象にもまだ入れない（`inference_log` は `job_runs` と別の表）'
+  (select count(*)::int from public.monitored_jobs where job_name = 'trigger_infer'), 1,
+  '**監視対象にも入れる**（入れ忘れると check_cron_jobs が「知らないジョブ」として鳴る）'
 );
 
 select * from finish();

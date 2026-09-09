@@ -8,7 +8,7 @@
 -- 確かめられるのは記録と抑制の論理まで（0007 と同じ）。
 
 begin;
-select plan(60);
+select plan(77);
 
 -- 自分の前提を作る
 delete from public.status_snapshots;
@@ -74,6 +74,8 @@ select has_function('public', 'check_jobs_missing', 'check_jobs_missing があ�
 select has_function('public', 'check_jobs_failed', 'check_jobs_failed がある');
 select has_function('public', 'check_parquet_gap', 'check_parquet_gap がある');
 select has_function('public', 'check_reference_data', 'check_reference_data がある');
+select has_function('public', 'check_inference', 'check_inference がある（0029）');
+select has_function('public', 'trigger_infer', 'trigger_infer がある（0029）');
 select has_function('public', 'monitor_jobs', 'monitor_jobs がある');
 
 -- security definer かつ search_path='' でなければ、本番と権限の効き方が変わる
@@ -81,16 +83,16 @@ select is(
   (select bool_and(p.prosecdef) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public'
       and p.proname in ('check_jobs_missing','check_jobs_failed','check_parquet_gap',
-                        'check_reference_data','monitor_jobs')),
-  true, '5 つとも security definer'
+                        'check_reference_data','check_inference','trigger_infer','monitor_jobs')),
+  true, '7 つとも security definer'
 );
 select is(
   (select bool_and(p.proconfig @> array['search_path=""']) from pg_proc p
      join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public'
       and p.proname in ('check_jobs_missing','check_jobs_failed','check_parquet_gap',
-                        'check_reference_data','monitor_jobs')),
-  true, '5 つとも search_path = ''''（スキーマ付きで書く前提）'
+                        'check_reference_data','check_inference','trigger_infer','monitor_jobs')),
+  true, '7 つとも search_path = ''''（スキーマ付きで書く前提）'
 );
 select is(
   has_function_privilege('anon', 'public.monitor_jobs()', 'execute'),
@@ -103,6 +105,15 @@ select is(
   '4-59/5 * * * *', 'monitor_jobs は :04 起点の 5 分毎'
 );
 select is((select active from cron.job where jobname = 'monitor_jobs'), true, 'monitor_jobs は有効');
+
+-- 推論のウォッチドッグ（0029）。**検査（monitor_jobs）とは別の登録**にしてある
+select is(
+  (select schedule from cron.job where jobname = 'infer_watchdog'),
+  '*/5 * * * *', 'infer_watchdog は 5 分毎'
+);
+select is(
+  (select active from cron.job where jobname = 'infer_watchdog'), true, 'infer_watchdog は有効'
+);
 
 -- ────────────────────────────────────────────────────────────────
 -- 設計が成り立つ前提
@@ -117,12 +128,12 @@ select is(
   true, 'postgres は BYPASSRLS（security definer の中から全行が見える）'
 );
 
--- 0020 で 9 本、0021・0022・0025 が 1 本ずつ足して 12 本
-select is((select count(*)::int from public.monitored_jobs), 12, '監視対象は 12 ジョブ');
+-- 0020 で 9 本、0021・0022・0025・0029 が 1 本ずつ足して 13 本
+select is((select count(*)::int from public.monitored_jobs), 13, '監視対象は 13 ジョブ');
 select is(
   (select array_agg(job_name order by job_name) from public.monitored_jobs where not is_active),
-  array['trigger_backup_collect'],
-  '成功の有無を見ないのは trigger_backup_collect だけ（発火したときしか記録しないため。0021）'
+  array['trigger_backup_collect', 'trigger_infer'],
+  '成功の有無を見ないのは発火したときしか記録しない 2 本だけ（0021・0029）'
 );
 select is(
   (select bool_and(missing_after > expected_every) from public.monitored_jobs),
@@ -268,6 +279,93 @@ insert into public.jp_holidays values (current_date + 400, 'テスト');
 select is(public.check_reference_data() -> 'alerts', '0'::jsonb, '十分先まであれば鳴らない');
 
 -- ────────────────────────────────────────────────────────────────
+-- 検査 6：予測の鮮度（0029）
+-- ────────────────────────────────────────────────────────────────
+-- **鮮度は `station_forecasts` で測る。`inference_log` では測らない。** 推論が毎回
+-- 失敗していても `inference_log` には行が増えるので、そちらを見ると「新しい」に見える。
+delete from public.station_forecasts where true;
+delete from public.inference_log where true;
+delete from public.station_status_latest;
+delete from public.status_snapshots;
+delete from public.stations;
+delete from public.alert_state;
+insert into public.stations (system_id, station_id, idx) values
+  ('hellocycling', 'a', 0), ('docomo-cycle', 'a', 0);
+
+-- 予測を 1 行置く。**動かすのは鮮度だけ**（値は検査に関係しない）
+create function pg_temp.put_forecast(p_system text, p_age interval, p_base interval)
+returns void language sql as $$
+  insert into public.station_forecasts
+    (system_id, station_id, generated_at, base_observed_at, model_version,
+     horizons_min, p_bike_x1000, p_dock_x1000, confidence)
+  values (p_system, 'a', now() - p_age, now() - p_base, 'test',
+          array[5]::smallint[], array[500]::smallint[], array[500]::smallint[], 2)
+  on conflict (system_id, station_id) do update
+     set generated_at = excluded.generated_at, base_observed_at = excluded.base_observed_at;
+$$;
+
+-- **一度も動いていない**は null なので、比較だけでは拾えない
+select is(public.check_inference() -> 'alerts', '2'::jsonb, '予測が 1 度も出ていなければ鳴る');
+select is(public.check_inference() -> 'checked', '2'::jsonb, '活性なシステムを全部見る');
+select ok(pg_temp.has_alert('inference_stale:hellocycling'), '通知の鍵はシステム別');
+
+delete from public.alert_state;
+select pg_temp.put_forecast('hellocycling', interval '1 minute', interval '3 minutes');
+select pg_temp.put_forecast('docomo-cycle', interval '1 minute', interval '3 minutes');
+select is(public.check_inference() -> 'alerts', '0'::jsonb, '新しければ鳴らない');
+
+select pg_temp.put_forecast('hellocycling', interval '16 minutes', interval '18 minutes');
+select is(public.check_inference() -> 'alerts', '1'::jsonb, '15 分より古ければ鳴る');
+select ok(
+  (select last_value ? 'feed_observed_at' and last_value ? 'last_status'
+     from public.alert_state where alert_key = 'inference_stale:hellocycling'),
+  '**原因の当たりを付ける材料**を payload に入れる（収集の持ち場か推論の持ち場か）'
+);
+
+-- ────────────────────────────────────────────────────────────────
+-- 再起動：投げれば進むときだけ叩く（0029）
+-- ────────────────────────────────────────────────────────────────
+-- net.http_get はキューに積むだけで、送信は**コミット後**。rollback するここからは
+-- 外へ出ない（0007 と同じ）。
+delete from public.job_runs; delete from public.alert_state;
+select ok(
+  vault.create_secret('dummy-not-a-real-secret', 'cron_secret', 'pgTAP 用') is not null,
+  'テスト用の cron_secret を置ける'
+);
+
+select pg_temp.put_forecast('hellocycling', interval '1 minute', interval '3 minutes');
+select pg_temp.put_forecast('docomo-cycle', interval '1 minute', interval '3 minutes');
+update public.feed_state set last_observed_at = now() - interval '1 minute';
+select is(public.trigger_infer(), 0, '予測が新しければ叩かない');
+select is(
+  (select count(*)::int from public.job_runs where job_name = 'trigger_infer'),
+  0, '**何もしなかった回は job_runs に書かない**（5 分毎に 1 日 288 行を増やさない）'
+);
+
+-- 予測は停滞しているが、**まだ推論していない観測が無い**
+select pg_temp.put_forecast('hellocycling', interval '20 minutes', interval '22 minutes');
+select pg_temp.put_forecast('docomo-cycle', interval '20 minutes', interval '22 minutes');
+update public.feed_state set last_observed_at = now() - interval '22 minutes';
+select is(
+  public.trigger_infer(), 0,
+  '**未推論の観測が無ければ叩かない**（収集の停滞は monitor_feeds と trigger_backup_collect の持ち場）'
+);
+
+-- 新しい観測が来た。**ここで初めて「投げれば進む」**
+update public.feed_state set last_observed_at = now() - interval '1 minute'
+ where system_id = 'hellocycling';
+select is(public.trigger_infer(), 1, '未推論の観測があり、予測が停滞していれば叩く');
+select is(pg_temp.job_status('trigger_infer'), 'ok', '発火したときは job_runs に残る');
+select ok(
+  pg_temp.has_alert('infer_watchdog_fired'),
+  '**埋め合わせたことを知らせる**（慢性的な配信漏れがウォッチドッグに隠されないよう）'
+);
+
+-- 親の検査に持ち込まないよう、両系とも新しい状態に戻しておく
+select pg_temp.put_forecast('hellocycling', interval '1 minute', interval '3 minutes');
+select pg_temp.put_forecast('docomo-cycle', interval '1 minute', interval '3 minutes');
+
+-- ────────────────────────────────────────────────────────────────
 -- 親：検査どうしが独立していること
 -- ────────────────────────────────────────────────────────────────
 delete from public.job_runs; delete from public.alert_state;
@@ -278,7 +376,7 @@ select is(
      select count(*)::int as jsonb_object_keys_count
        from jsonb_object_keys((select detail->'checks' from public.job_runs
                                 where job_name='monitor_jobs' order by id desc limit 1))) t),
-  5, '5 つの検査すべてが detail に残る（0021 で check_cron_jobs を足した）'
+  6, '6 つの検査すべてが detail に残る（0021 で check_cron_jobs、0029 で check_inference）'
 );
 
 -- **1 つ壊しても他は走る。** 0009 の monitor_feeds は全検査を 1 つの exception で
