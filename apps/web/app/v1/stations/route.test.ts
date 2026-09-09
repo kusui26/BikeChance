@@ -66,6 +66,27 @@ describe("入力の誤り", () => {
     expect(problem.code).toBe("unknown_system");
   });
 
+  it("到着の指定の誤りも DB に触る前に 400", async () => {
+    vi.stubEnv("SUPABASE_URL", "");
+    vi.stubEnv("SUPABASE_SECRET_KEY", "");
+    const bbox = "?bbox=139.76,35.67,139.78,35.69";
+    const conflict = await problemOf(`${bbox}&at=2026-09-09T12:30:00Z&in_min=30`);
+    expect(conflict.status).toBe(400);
+    expect(conflict.problem.code).toBe("arrival_conflict");
+    const range = await problemOf(`${bbox}&in_min=999`);
+    expect(range.status).toBe(400);
+    expect(range.problem.code).toBe("arrival_out_of_range");
+    const malformed = await problemOf(`${bbox}&at=2026-09-09T12:30:00`);
+    expect(malformed.status).toBe(400);
+    expect(malformed.problem.code).toBe("arrival_malformed");
+  });
+
+  it("到着の誤りの type も一意（クライアントが分岐できる）", async () => {
+    const { problem } = await problemOf("?bbox=139.76,35.67,139.78,35.69&in_min=999");
+    expect(problem.type).toBe("/v1/problems/arrival-out-of-range");
+    expect(problem.title).not.toBe("");
+  });
+
   it("誤りの応答にもクレジットのヘッダを付ける", async () => {
     const response = await GET(url(""));
     expect(response.headers.get("X-Data-Attribution")).toContain("CC BY 4.0");

@@ -52,6 +52,29 @@ export const metaResponseSchema = z.object({
  *   * `bikes` / `docks` / `is_*` … 一度も観測されていない。**0 や false と区別する**
  *   * `observed_at` … 最新のフィードにこのポートが現れなかった（`is_present` が false）
  */
+/**
+ * 1 ポートぶんの予測（W4 プラン §4 の W4-01・W4-02）。
+ *
+ * **要求に `at` か `in_min` が無ければ、この欄そのものが null になる。** 「いまの確率」は
+ * 現在値そのものであって予測ではない。
+ *
+ * 指定があっても null になる場合が 3 つある：貸出も返却も止まっている／観測が古い／
+ * 成果物にそのポートが無い。**理由は返さない。** 利用者にとっては「いまは出せない」で
+ * 十分で、原因は `inference_log` と監視が持つ（内部の都合を API の契約に漏らさない）。
+ */
+export const stationForecastSchema = z.object({
+  /** 借りられる確率（0〜1）。元は 1/1000 刻み。 */
+  p_bike: z.number().min(0).max(1),
+  /** 返せる確率（0〜1）。 */
+  p_dock: z.number().min(0).max(1),
+  /** 0〜3。3 が最も確か（気候値が過半の水平で効いた）。 */
+  confidence: z.number().int().min(0).max(3),
+  /** **この予測が基づく観測の時刻。** 鮮度はこれで測る（`generated_at` ではない）。 */
+  base_observed_at: z.iso.datetime(),
+  /** この値を出したモデルの版。 */
+  model_version: z.string().min(1),
+});
+
 export const stationCurrentSchema = z.object({
   system_id: systemIdSchema,
   station_id: z.string().min(1),
@@ -71,6 +94,8 @@ export const stationCurrentSchema = z.object({
   observed_at: z.iso.datetime().nullable(),
   /** 台数・枠・フラグのいずれかが最後に「変わった」時刻。最後に観測した時刻ではない。 */
   last_changed_at: z.iso.datetime(),
+  /** 到着時刻の予測。**要求に `at` / `in_min` が無ければ null**（W4-02）。 */
+  forecast: stationForecastSchema.nullable(),
 });
 
 export const bboxSchema = z.object({
@@ -91,6 +116,13 @@ export const stationsResponseSchema = z.object({
   count: z.number().int().nonnegative(),
   /** いずれかのフィードの観測が途切れている。 */
   stale: z.boolean(),
+  /**
+   * 予測を出した到着時刻（**5 分に丸めた後**）。`at` / `in_min` が無ければ null。
+   *
+   * **丸めた後の値を返す**ので、`in_min=37` で要求すると 35 が返る。何分の予測を見て
+   * いるのかを、利用者が要求の文字列ではなく応答から読めるようにする。
+   */
+  forecast_in_min: z.number().int().positive().nullable(),
   feeds: z.array(feedStatusSchema),
   stations: z.array(stationCurrentSchema),
   /** CC BY 4.0 の表示に要る。応答だけで表示を完結できるようにする（開発プラン §3.7）。 */
@@ -114,6 +146,7 @@ export const problemSchema = z.object({
 export type MetaResponse = z.infer<typeof metaResponseSchema>;
 export type Attribution = z.infer<typeof attributionSchema>;
 export type FeedStatus = z.infer<typeof feedStatusSchema>;
+export type StationForecast = z.infer<typeof stationForecastSchema>;
 export type StationCurrent = z.infer<typeof stationCurrentSchema>;
 export type StationsResponse = z.infer<typeof stationsResponseSchema>;
 export type Problem = z.infer<typeof problemSchema>;

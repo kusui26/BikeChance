@@ -38,6 +38,12 @@ const stationRow = {
   is_returning: true,
   is_present: true,
   last_changed_at: "2026-09-07T23:55:00.000Z",
+  forecast_horizons_min: [5, 10, 15, 20, 30, 45, 60, 90, 120, 180],
+  forecast_p_bike_x1000: [900, 880, 860, 840, 800, 750, 700, 600, 500, 300],
+  forecast_p_dock_x1000: [100, 120, 140, 160, 200, 250, 300, 400, 500, 700],
+  forecast_confidence: 3,
+  forecast_base_observed_at: "2026-09-07T23:58:00.000Z",
+  forecast_model_version: "b1-2026-09-08",
 };
 
 const feedRow = {
@@ -47,6 +53,8 @@ const feedRow = {
   poll_interval_s: 60,
   capacity_is_dynamic: false,
   last_observed_at: "2026-09-07T23:58:00.000Z",
+  forecast_model_version: "b1-2026-09-08",
+  forecast_generated_at: "2026-09-07T23:58:30.000Z",
 };
 
 describe("触れる先", () => {
@@ -159,5 +167,37 @@ describe("行の検査", () => {
   it("型の違いを見逃さない（文字列の数値は数値ではない）", () => {
     expect(stationRowSchema.safeParse({ ...stationRow, lat: "35.68" }).success).toBe(false);
     expect(stationRowSchema.safeParse({ ...stationRow, bikes: "3" }).success).toBe(false);
+  });
+});
+
+describe("予測の列（0033）", () => {
+  it("予測が無いポート（すべて NULL）でも通る", () => {
+    const unknown = {
+      ...stationRow,
+      forecast_horizons_min: null,
+      forecast_p_bike_x1000: null,
+      forecast_p_dock_x1000: null,
+      forecast_confidence: null,
+      forecast_base_observed_at: null,
+      forecast_model_version: null,
+    };
+    expect(stationRowSchema.safeParse(unknown).success).toBe(true);
+  });
+
+  it("**長さがそろっていない配列も通す**（判断は読む側に置く）", () => {
+    // ビューは station_forecasts を素直に写すだけ。ここで弾くと、行ごと落ちて
+    // 台数まで返せなくなる。そろっているかは interpolateForecast が見る
+    const ragged = { ...stationRow, forecast_p_bike_x1000: [900, 880] };
+    expect(stationRowSchema.safeParse(ragged).success).toBe(true);
+  });
+
+  it("確率は整数の配列（1/1000 刻みのまま運ぶ）", () => {
+    const float = { ...stationRow, forecast_p_bike_x1000: [0.9, 0.88] };
+    expect(stationRowSchema.safeParse(float).success).toBe(false);
+  });
+
+  it("推論がまだなら feeds の版は NULL", () => {
+    const fresh = { ...feedRow, forecast_model_version: null, forecast_generated_at: null };
+    expect(feedRowSchema.safeParse(fresh).success).toBe(true);
   });
 });
