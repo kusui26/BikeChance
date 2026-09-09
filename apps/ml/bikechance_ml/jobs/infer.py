@@ -74,7 +74,13 @@ class InferPort(Protocol):
         self, system_id: str, base_observed_at: datetime, model_version: str
     ) -> int | None: ...
     def finish_inference(
-        self, run_id: int, status: str, n_rows: int, duration_ms: int, error: str | None = None
+        self,
+        run_id: int,
+        status: str,
+        n_rows: int,
+        duration_ms: int,
+        error: str | None = None,
+        detail: Mapping[str, object] | None = None,
     ) -> None: ...
     def upsert_forecasts(self, rows: Sequence[Mapping[str, object]]) -> int: ...
 
@@ -100,6 +106,8 @@ class InferSummary:
     model_version: str
     n_stations: int
     n_skipped: int
+    #: 成果物に無かったポートの数。**気候値が引けず B1 だけになる**（§12 の 110）
+    n_unknown_ports: int
     n_rows: int
     duration_ms: int
     error: str | None = None
@@ -184,6 +192,25 @@ def _probabilities(artifact: Artifact, samples: Samples, target: Target) -> tupl
 def to_x1000(values: Float64) -> Int16:
     """確率を 0〜1000 の整数にする。**丸めで範囲を出さない。**"""
     return np.clip(np.rint(values * PROBABILITY_SCALE), 0, PROBABILITY_SCALE).astype(np.int16)
+
+
+def unknown_ports(artifact: Artifact, system_id: str, rows: Sequence[StationStatusRow]) -> int:
+    """**成果物に無い、予測対象のポート**の数（§12 の 110）。
+
+    成果物を作ったあとに現れたポートは気候値（B2）が引けず、B1 だけになる。
+    **落ちること自体は正しい**が、落ちていることが見えないと、再学習の間隔が長すぎる
+    のに気づけない。ここで数えて `inference_log.detail` に残す。
+
+    数えるのは**予測対象だけ**である。止まっているポートや幻のポートは、そもそも
+    成果物に無くてよい。判定は `is_predictable` を呼び直す（**同じ関数を使う**ので、
+    `predict` が選ぶ集合とずれようがない）。
+    """
+    known = frozenset(artifact.ports)
+    return sum(
+        1
+        for row in rows
+        if is_predictable(system_id, row) and f"{system_id}/{row.station_id}" not in known
+    )
 
 
 def confidence_of(*, stale: bool, climatology_horizons: int) -> int:
@@ -300,11 +327,14 @@ def run_inference(
             model_version=model_version,
             n_stations=0,
             n_skipped=0,
+            n_unknown_ports=0,
             n_rows=0,
             duration_ms=elapsed,
             error=type(cause).__name__,
         )
-    port.finish_inference(run_id, "ok", summary.n_rows, summary.duration_ms)
+    port.finish_inference(
+        run_id, "ok", summary.n_rows, summary.duration_ms, None, to_record(summary)
+    )
     return summary
 
 
@@ -329,6 +359,7 @@ def _produce(
         model_version=artifact.model_version,
         n_stations=len(rows),
         n_skipped=len(rows) - len(forecasts),
+        n_unknown_ports=unknown_ports(artifact, system_id, rows),
         n_rows=written,
         duration_ms=_elapsed_ms(started),
     )
@@ -379,6 +410,7 @@ def _skipped(
         model_version=model_version,
         n_stations=0,
         n_skipped=0,
+        n_unknown_ports=0,
         n_rows=0,
         duration_ms=_elapsed_ms(started),
         error=reason,
@@ -401,7 +433,22 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         "model_version": summary.model_version,
         "stations": summary.n_stations,
         "skipped": summary.n_skipped,
+        "unknown_ports": summary.n_unknown_ports,
         "rows": summary.n_rows,
         "duration_ms": summary.duration_ms,
         "error": summary.error,
+    }
+
+
+def to_record(summary: InferSummary) -> dict[str, object]:
+    """`inference_log.detail` に残す要約。
+
+    **列に在るものは入れない。** `status` / `n_rows` / `duration_ms` / `error` /
+    `model_version` / `base_observed_at` は列で持っているので、同じ値を jsonb にも
+    並べると 1 日 576 行ぶん無駄に膨らむ（0030 の冒頭）。
+    """
+    return {
+        "stations": summary.n_stations,
+        "skipped": summary.n_skipped,
+        "unknown_ports": summary.n_unknown_ports,
     }

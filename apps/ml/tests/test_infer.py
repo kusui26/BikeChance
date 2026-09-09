@@ -25,6 +25,7 @@ from bikechance_ml.jobs.fit_baseline import build_artifact
 from bikechance_ml.jobs.infer import (
     MODEL_BUCKET,
     Forecast,
+    InferSummary,
     MissingArtifactError,
     batches,
     confidence_of,
@@ -36,7 +37,9 @@ from bikechance_ml.jobs.infer import (
     run_inference,
     to_detail,
     to_payload,
+    to_record,
     to_x1000,
+    unknown_ports,
 )
 from tests import eval_fixture as fixture
 
@@ -195,6 +198,7 @@ class FakePort:
     base: datetime | None = BASE
     claims: list[tuple[str, datetime]] = field(default_factory=list)
     finished: list[tuple[int, str, int]] = field(default_factory=list)
+    details: list[Mapping[str, object] | None] = field(default_factory=list)
     written: list[Mapping[str, object]] = field(default_factory=list)
     body: bytes | None = None
     next_id: int = 1
@@ -222,9 +226,16 @@ class FakePort:
         return self.next_id
 
     def finish_inference(
-        self, run_id: int, status: str, n_rows: int, duration_ms: int, error: str | None = None
+        self,
+        run_id: int,
+        status: str,
+        n_rows: int,
+        duration_ms: int,
+        error: str | None = None,
+        detail: Mapping[str, object] | None = None,
     ) -> None:
         self.finished.append((run_id, status, n_rows))
+        self.details.append(detail)
 
     def upsert_forecasts(self, rows: Sequence[Mapping[str, object]]) -> int:
         self.written.extend(rows)
@@ -321,6 +332,57 @@ def test_unknown_port_does_not_borrow_another_ports_climatology() -> None:
     assert fresh[0].p_bike_x1000 == known[0].p_bike_x1000
     assert fresh[0].p_dock_x1000 == known[0].p_dock_x1000
     assert max(fresh[0].p_bike_x1000) < 100  # 直す前は 417
+
+
+# ── 成果物のドリフトを数える（§12 の 110、§14.2 の 3）─────────
+def test_unknown_ports_counts_only_what_is_predicted() -> None:
+    """**成果物に無い、予測対象のポート**だけを数える。
+
+    止まっているポートや幻のポートは、そもそも成果物に無くてよい。数に入れると
+    「ドリフトが増えた」と誤読する。
+    """
+    rows = (
+        StationStatusRow("zzz", 2, 7, OPEN, True),  # 予測対象で成果物に無い ← 数える
+        StationStatusRow("a", 2, 7, OPEN, True),  # 成果物に在る
+        StationStatusRow("yyy", 2, 7, SUSPENDED, True),  # 止まっている
+        StationStatusRow("xxx", 2, 7, OPEN, False),  # 最新配列に居ない
+    )
+    assert unknown_ports(ARTIFACT, "hellocycling", rows) == 1
+
+
+def test_the_phantom_station_is_not_counted_as_drift() -> None:
+    """幻のポート（ドコモ `5753`）は成果物に無くて当たり前である。"""
+    rows = (StationStatusRow("5753", 2, 7, OPEN, True),)
+    assert unknown_ports(ARTIFACT, "docomo-cycle", rows) == 0
+
+
+def test_no_drift_when_every_port_is_in_the_artifact() -> None:
+    assert unknown_ports(ARTIFACT, "hellocycling", STATIONS) == 0
+
+
+def test_the_count_reaches_the_response_and_the_record() -> None:
+    """**応答にも記録にも出す。** 数えても出さなければ気づけない。"""
+    port = ready_port()
+    summary = run_inference(port, "hellocycling", "m1", NOW)
+    assert summary.n_unknown_ports == 0
+    assert to_detail(summary)["unknown_ports"] == 0
+    assert port.details == [{"stations": 3, "skipped": 0, "unknown_ports": 0}]
+
+
+def test_the_record_does_not_repeat_the_columns() -> None:
+    """`inference_log` に列で在るものを jsonb にも並べない（0030 の冒頭）。"""
+    summary = InferSummary(
+        system_id="hellocycling",
+        status="ok",
+        base_observed_at=BASE,
+        model_version="m1",
+        n_stations=10,
+        n_skipped=1,
+        n_unknown_ports=2,
+        n_rows=9,
+        duration_ms=123,
+    )
+    assert to_record(summary) == {"stations": 10, "skipped": 1, "unknown_ports": 2}
 
 
 def test_horizons_are_ordered_as_the_contract_says() -> None:
