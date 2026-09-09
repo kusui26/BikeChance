@@ -21,6 +21,7 @@ LightGBM は W4 以降（W3-18）。**予測テーブルを埋め始め、5 分�
 """
 
 import sys
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -110,6 +111,8 @@ class InferSummary:
     n_unknown_ports: int
     n_rows: int
     duration_ms: int
+    #: このプロセスが使った CPU 時間。**費用は Active CPU で決まる**（開発プラン §4.5a）
+    cpu_ms: int
     error: str | None = None
 
     @property
@@ -306,16 +309,19 @@ def run_inference(
 ) -> InferSummary:
     """1 システムぶんの推論。**掴めなければ何もしない。**"""
     started = datetime.now(UTC)
+    cpu_started = time.process_time_ns()
     base = port.read_base_observed_at(system_id)
     if base is None:
-        return _skipped(system_id, model_version, None, started, "観測がまだありません")
+        return _skipped(
+            system_id, model_version, None, started, cpu_started, "観測がまだありません"
+        )
 
     run_id = port.begin_inference(system_id, base, model_version)
     if run_id is None:
-        return _skipped(system_id, model_version, base, started, None)
+        return _skipped(system_id, model_version, base, started, cpu_started, None)
 
     try:
-        summary = _produce(port, system_id, model_version, now, base, started)
+        summary = _produce(port, system_id, model_version, now, base, started, cpu_started)
     except Exception as cause:
         elapsed = _elapsed_ms(started)
         port.finish_inference(run_id, "failed", 0, elapsed, type(cause).__name__)
@@ -330,6 +336,7 @@ def run_inference(
             n_unknown_ports=0,
             n_rows=0,
             duration_ms=elapsed,
+            cpu_ms=_cpu_ms(cpu_started),
             error=type(cause).__name__,
         )
     port.finish_inference(
@@ -345,6 +352,7 @@ def _produce(
     now: datetime,
     base: datetime,
     started: datetime,
+    cpu_started: int,
 ) -> InferSummary:
     artifact = load_artifact(port, model_version)
     holidays = frozenset(port.list_holidays())
@@ -362,6 +370,7 @@ def _produce(
         n_unknown_ports=unknown_ports(artifact, system_id, rows),
         n_rows=written,
         duration_ms=_elapsed_ms(started),
+        cpu_ms=_cpu_ms(cpu_started),
     )
 
 
@@ -401,6 +410,7 @@ def _skipped(
     model_version: str,
     base: datetime | None,
     started: datetime,
+    cpu_started: int,
     reason: str | None,
 ) -> InferSummary:
     return InferSummary(
@@ -413,8 +423,23 @@ def _skipped(
         n_unknown_ports=0,
         n_rows=0,
         duration_ms=_elapsed_ms(started),
+        cpu_ms=_cpu_ms(cpu_started),
         error=reason,
     )
+
+
+def _cpu_ms(started_ns: int) -> int:
+    """このプロセスが使った CPU 時間（ミリ秒）。
+
+    `duration_ms`（実時間）は Storage の取得と PostgREST の往復を含む。**費用は実時間
+    ではなく Active CPU で決まる**（開発プラン §4.5a）ので、計算に使った時間を分けて
+    記録する。1 サイクル 3.5 秒のうちどれだけが計算かが分かる。
+
+    **プロセス単位で測る。** Fluid compute は 1 つのプロセスで複数の要求を捌きうるので、
+    同時に走っていれば他の要求ぶんも混ざる。推論は 5 分周期で 2 系統を 3 分ずらして
+    あるため、実際にはほぼ重ならない。
+    """
+    return (time.process_time_ns() - started_ns) // 1_000_000
 
 
 def _elapsed_ms(started: datetime) -> int:
@@ -436,6 +461,7 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         "unknown_ports": summary.n_unknown_ports,
         "rows": summary.n_rows,
         "duration_ms": summary.duration_ms,
+        "cpu_ms": summary.cpu_ms,
         "error": summary.error,
     }
 
@@ -451,4 +477,7 @@ def to_record(summary: InferSummary) -> dict[str, object]:
         "stations": summary.n_stations,
         "skipped": summary.n_skipped,
         "unknown_ports": summary.n_unknown_ports,
+        # **`cpu_ms` は列にしない。** 開発プラン §5.3 の DDL には在るが、実装では
+        # `detail` に入れる（列を足さずに済み、0030 でその口を作った）
+        "cpu_ms": summary.cpu_ms,
     }
