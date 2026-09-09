@@ -25,7 +25,7 @@ import json
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
-from typing import Protocol
+from typing import Final, Protocol
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -54,6 +54,9 @@ from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from bikechance_ml.jobs.snapshot_table import has_current_schema, parquet_path
 from bikechance_ml.jobs.snapshot_table import read_table as read_snapshot_table
 
+#: `job_runs` と `monitored_jobs` に載る名前。**毎日 1 回**（05:00 JST）。
+JOB_NAME: Final[str] = "build_reference"
+
 
 class ReferencePort(Protocol):
     """入出力の差し替え点。**このジョブが要る口だけ**を並べる（`compact` と同じ形）。"""
@@ -63,6 +66,8 @@ class ReferencePort(Protocol):
     def list_neighbors(self, system_id: str) -> tuple[NeighborRow, ...]: ...
     def download(self, bucket: str, path: str) -> bytes | None: ...
     def upload_parquet(self, path: str, body: bytes) -> None: ...
+    def job_started(self, job_name: str) -> int: ...
+    def job_finished(self, run_id: int, status: str, detail: Mapping[str, object]) -> None: ...
 
 
 def read_reference(source: ReferencePort, system_id: str) -> SystemReference:
@@ -162,20 +167,65 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _log(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def _started_quietly(source: ReferencePort) -> int | None:
+    """記録を始められなくても作る。**記録の不調で 1 日ぶんを落とさない**（`compact` と同じ）。"""
+    try:
+        return source.job_started(JOB_NAME)
+    except Exception as cause:
+        _log(f"job_started に失敗した: {type(cause).__name__}")
+        return None
+
+
+def _record_quietly(
+    source: ReferencePort, run_id: int | None, status: str, detail: Mapping[str, object]
+) -> None:
+    """記録の失敗でジョブを落とさない。置けたことのほうが大事。"""
+    if run_id is None:
+        return
+    try:
+        source.job_finished(run_id, status, detail)
+    except Exception as cause:
+        _log(f"job_finished に失敗した: {type(cause).__name__}")
+
+
 def build_and_upload(source: ReferencePort, day: date, now: datetime) -> dict[str, object]:
-    """作って置く。**同じパスに上書きする**ので、何度走らせても結果は変わらない。"""
-    stations, neighbors, missing = build_tables(source, day, built_at=now)
-    bodies = {
-        STATIONS_NAME: to_parquet_bytes(stations),
-        NEIGHBORS_NAME: to_parquet_bytes(neighbors),
-    }
-    for name, body in bodies.items():
-        source.upload_parquet(reference_path(day, name), body)
-    return {
+    """作って置き、`job_runs` に記録する。
+
+    **同じパスに上書きする**ので、何度走らせても結果は変わらない。
+
+    **記録するのは「毎日回っていること」を見張れるようにするため**（W4 プラン §12 の 116）。
+    `job_runs` に書かないと `check_jobs_missing` から見えず、止まっても誰も気づかない。
+    学習も推論も「基準時刻の**前日**の版」を読む設計なので、**止まった翌日に静かに壊れる**。
+
+    **失敗も記録してから投げ直す。** 記録が無いと「動いていない」ことしか分からず、
+    「動いたが失敗した」と区別できない。詰めるのは**例外の種類だけ**にする（`infer` と
+    同じ。文言に接続先が混じる経路を作らない）。
+    """
+    run_id = _started_quietly(source)
+    try:
+        stations, neighbors, missing = build_tables(source, day, built_at=now)
+        bodies = {
+            STATIONS_NAME: to_parquet_bytes(stations),
+            NEIGHBORS_NAME: to_parquet_bytes(neighbors),
+        }
+        for name, body in bodies.items():
+            source.upload_parquet(reference_path(day, name), body)
+    except Exception as cause:
+        _record_quietly(
+            source, run_id, "failed", {"date": day.isoformat(), "error": type(cause).__name__}
+        )
+        raise
+    summary = {
         "ok": True,
         "date": day.isoformat(),
         **to_summary(stations, neighbors, missing, {k: len(v) for k, v in bodies.items()}),
     }
+    _record_quietly(source, run_id, "ok", summary)
+    return summary
 
 
 def run(argv: Sequence[str] | None = None) -> int:

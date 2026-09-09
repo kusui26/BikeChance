@@ -8,7 +8,7 @@
 -- 確かめられるのは記録と抑制の論理まで（0007 と同じ）。
 
 begin;
-select plan(81);
+select plan(82);
 
 -- 自分の前提を作る
 delete from public.status_snapshots;
@@ -129,7 +129,15 @@ select is(
 );
 
 -- 0020 で 9 本、0021・0022・0025・0029 が 1 本ずつ足して 13 本
-select is((select count(*)::int from public.monitored_jobs), 13, '監視対象は 13 ジョブ');
+select is((select count(*)::int from public.monitored_jobs), 14, '監視対象は 14 ジョブ');
+
+-- **参照スナップショットは Vercel Cron だが、見張りには入れる**（0036。§12 の 116）。
+-- 学習も推論も「前日の版」を読むので、止まると翌日に静かに壊れる
+select ok(
+  (select is_active and cron_job_name is null
+      and expected_every = interval '1 day' and missing_after = interval '30 hours'
+     from public.monitored_jobs where job_name = 'build_reference'),
+  'build_reference は日次で見張る（pg_cron ではないので cron_job_name は NULL）');
 select is(
   (select array_agg(job_name order by job_name) from public.monitored_jobs where not is_active),
   array['trigger_backup_collect', 'trigger_infer'],
