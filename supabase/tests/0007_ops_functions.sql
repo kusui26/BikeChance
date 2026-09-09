@@ -5,7 +5,7 @@
 -- 到達の確認は本番での強制発火で行う。
 
 begin;
-select plan(58);
+select plan(61);
 
 -- テストはトランザクション内で完結し rollback するので、ここでの削除は外に影響しない
 delete from public.station_status_latest;
@@ -183,6 +183,35 @@ select is(
 
 -- 収集周期は出荷値（60）のまま次のブロックへ渡す
 update public.feed_state set last_fetch_at = null;
+
+-- ────────────────────────────────────────────────────────────────
+-- run_maintenance：推論ログの保持（0031、W3 プラン §14.2 の 4）
+-- ────────────────────────────────────────────────────────────────
+-- **消すのは `ok` だけ。** 失敗・二重抑止・閉じられなかった行は数が極小で、
+-- 「いつ何が起きたか」の記録として長く価値がある（`job_runs` の W7 の方針と同じ）。
+delete from public.inference_log where true;
+insert into public.inference_log (system_id, generated_at, base_observed_at, model_version, status)
+values
+  ('hellocycling', now() - interval '100 days', now() - interval '100 days', 'm1', 'ok'),
+  ('hellocycling', now() - interval '100 days', now() - interval '99 days',  'm1', 'failed'),
+  ('hellocycling', now() - interval '100 days', now() - interval '98 days',  'm1', 'skipped'),
+  ('hellocycling', now() - interval '100 days', now() - interval '97 days',  'm1', 'running'),
+  ('hellocycling', now() - interval '1 day',    now() - interval '1 day',    'm1', 'ok');
+
+select is(
+  public.run_maintenance() -> 'inference_logs_deleted', '1'::jsonb,
+  '90 日を超えた ok を 1 件だけ消す'
+);
+select is(
+  (select array_agg(status order by status) from public.inference_log),
+  array['failed', 'ok', 'running', 'skipped'],
+  '**ok 以外は 100 日前でも残る**（何が起きたかの記録）'
+);
+select is(
+  (select count(*)::int from public.inference_log
+    where status = 'ok' and generated_at < now() - interval '90 days'),
+  0, '古い ok は残らない'
+);
 
 -- ────────────────────────────────────────────────────────────────
 -- monitor_feeds：E1 の間はドコモの停滞で誤報を出さない（W1-29 の要）

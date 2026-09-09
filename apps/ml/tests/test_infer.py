@@ -366,12 +366,31 @@ def test_the_count_reaches_the_response_and_the_record() -> None:
     summary = run_inference(port, "hellocycling", "m1", NOW)
     assert summary.n_unknown_ports == 0
     assert to_detail(summary)["unknown_ports"] == 0
-    assert port.details == [{"stations": 3, "skipped": 0, "unknown_ports": 0}]
+    assert len(port.details) == 1
+    recorded = port.details[0]
+    assert recorded is not None
+    assert recorded["stations"] == 3
+    assert recorded["skipped"] == 0
+    assert recorded["unknown_ports"] == 0
 
 
 def test_the_record_does_not_repeat_the_columns() -> None:
-    """`inference_log` に列で在るものを jsonb にも並べない（0030 の冒頭）。"""
-    summary = InferSummary(
+    """`inference_log` に列で在るものを jsonb にも並べない（0030 の冒頭）。
+
+    `cpu_ms` だけは列にしない側に置く。開発プラン §5.3 の DDL には在るが、実装では
+    `detail` に入れる（列を足さずに済む。§13.7 の判断）。
+    """
+    assert set(to_record(_summary(cpu_ms=42))) == {
+        "stations",
+        "skipped",
+        "unknown_ports",
+        "cpu_ms",
+    }
+    assert to_record(_summary(cpu_ms=42))["cpu_ms"] == 42
+
+
+def _summary(*, cpu_ms: int) -> InferSummary:
+    return InferSummary(
         system_id="hellocycling",
         status="ok",
         base_observed_at=BASE,
@@ -381,8 +400,32 @@ def test_the_record_does_not_repeat_the_columns() -> None:
         n_unknown_ports=2,
         n_rows=9,
         duration_ms=123,
+        cpu_ms=cpu_ms,
     )
-    assert to_record(summary) == {"stations": 10, "skipped": 1, "unknown_ports": 2}
+
+
+# ── 所要 CPU（§13.7 の判断）─────────────────────────────────
+def test_cpu_time_is_measured_and_reported() -> None:
+    """**費用は実時間ではなく Active CPU で決まる**（開発プラン §4.5a）。
+
+    `duration_ms` は Storage の取得と PostgREST の往復を含むので、計算に使った時間を
+    分けて記録する。
+    """
+    port = ready_port()
+    summary = run_inference(port, "hellocycling", "m1", NOW)
+    assert summary.cpu_ms >= 0
+    assert to_detail(summary)["cpu_ms"] == summary.cpu_ms
+    recorded = port.details[0]
+    assert recorded is not None and recorded["cpu_ms"] == summary.cpu_ms
+
+
+def test_cpu_time_is_reported_even_when_nothing_was_inferred() -> None:
+    """掴めなかった回も測る。**二重起動の抑止にも CPU は使っている。**"""
+    port = ready_port()
+    port.base = None
+    summary = run_inference(port, "hellocycling", "m1", NOW)
+    assert summary.status == "skipped"
+    assert summary.cpu_ms >= 0
 
 
 def test_horizons_are_ordered_as_the_contract_says() -> None:

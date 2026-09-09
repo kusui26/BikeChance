@@ -8,7 +8,7 @@
 -- 確かめられるのは記録と抑制の論理まで（0007 と同じ）。
 
 begin;
-select plan(77);
+select plan(81);
 
 -- 自分の前提を作る
 delete from public.status_snapshots;
@@ -361,7 +361,37 @@ select ok(
   '**埋め合わせたことを知らせる**（慢性的な配信漏れがウォッチドッグに隠されないよう）'
 );
 
--- 親の検査に持ち込まないよう、両系とも新しい状態に戻しておく
+-- ────────────────────────────────────────────────────────────────
+-- 閉じられなかった行（0031、§12 の 111）
+-- ────────────────────────────────────────────────────────────────
+-- 掴んだあと `finish_inference` が失敗すると、行は `running` のまま残る。**それ自体は
+-- 正しい**（同じ表に「失敗した」とも書けない）。**誰も見ていない**のが問題だった。
+delete from public.alert_state;
+select pg_temp.put_forecast('hellocycling', interval '1 minute', interval '3 minutes');
+select pg_temp.put_forecast('docomo-cycle', interval '1 minute', interval '3 minutes');
+delete from public.inference_log where true;
+
+insert into public.inference_log (system_id, generated_at, base_observed_at, model_version, status)
+values ('hellocycling', now() - interval '1 minute', now() - interval '1 minute', 'm1', 'running');
+select is(
+  public.check_inference() -> 'stuck', '0'::jsonb, '走っている最中の running は数えない'
+);
+
+insert into public.inference_log (system_id, generated_at, base_observed_at, model_version, status)
+values ('hellocycling', now() - interval '30 minutes', now() - interval '30 minutes', 'm1', 'running');
+select is(
+  public.check_inference() -> 'stuck', '1'::jsonb,
+  '**閾値を過ぎた running は「閉じられなかった」**（5 分周期で maxDuration は 120 秒）'
+);
+select ok(pg_temp.has_alert('inference_stuck'), '通知する');
+select is(
+  (select last_value->>'systems' from public.alert_state where alert_key = 'inference_stuck'),
+  'hellocycling', 'どのシステムかを payload に入れる'
+);
+
+-- 親の検査に持ち込まないよう、片づけてから戻す
+delete from public.inference_log where true;
+delete from public.alert_state;
 select pg_temp.put_forecast('hellocycling', interval '1 minute', interval '3 minutes');
 select pg_temp.put_forecast('docomo-cycle', interval '1 minute', interval '3 minutes');
 
