@@ -75,6 +75,7 @@ export const stationRowSchema = z.object({
   name: z.string().nullable(),
   lat: z.number(),
   lon: z.number(),
+  /** **固定のラック数のみ**。動的な系統は NULL（0035）。 */
   capacity: z.number().int().nullable(),
   bikes: z.number().int().nullable(),
   docks: z.number().int().nullable(),

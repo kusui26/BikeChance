@@ -133,21 +133,44 @@ struct ContractTests {
         #expect(shown.count > response.stations.count / 2)
     }
 
-    @Test("ドコモのポートには動的容量の注記が付く")
-    func docomoStationsExplainTheirCapacity() throws {
+    @Test("**動的な容量のポートには、実応答でも数を出さない**（W4 プラン §12 の 115）")
+    func docomoStationsNeverShowACapacityNumber() throws {
+        // このフィクスチャは 0035 より前に取ったもので、ドコモの capacity に数が入っている。
+        // **サーバーが送ってきても画面には出さない**ことを、実データで固定する
         let response = try Self.decode(StationsResponse.self, "stations")
         let feeds = response.feedIndex()
-        let docomo = try #require(
-            response.stations.first {
-                feeds[$0.systemID]?.capacityIsDynamic == true && $0.capacity != nil
-            },
-            "動的容量のポートがフィクスチャに無い"
-        )
-        let detail = StationDetail(
-            station: docomo, feed: feeds[docomo.systemID], attribution: nil,
-            now: response.generatedAt)
-        let capacity = try #require(detail.facts.first { $0.label == "容量" })
-        #expect(capacity.note?.contains("固定の台数ではなく") == true)
+        let dynamic = response.stations.filter { feeds[$0.systemID]?.capacityIsDynamic == true }
+        #expect(!dynamic.isEmpty, "動的容量のポートがフィクスチャに無い")
+        for station in dynamic {
+            let detail = StationDetail(
+                station: station, feed: feeds[station.systemID], attribution: nil,
+                now: response.generatedAt)
+            let capacity = try #require(detail.facts.first { $0.label == "容量" })
+            #expect(capacity.value == StationDetail.unknownValue, "\(station.id) に容量の数が出ている")
+            #expect(capacity.note == StationDetail.dynamicCapacityNote)
+        }
+    }
+
+    @Test("**矛盾する数を画面に出さない**（容量より台数が多い行が実応答にある）")
+    func theRealResponseNoLongerContradictsItself() throws {
+        let response = try Self.decode(StationsResponse.self, "stations")
+        let feeds = response.feedIndex()
+        // 実応答には「capacity < bikes」の行が実在する（ドコモの 10.8%）。
+        // **表示に回った時点で、その矛盾が残っていない**ことを見る
+        let contradicting = response.stations.filter { station in
+            guard let capacity = station.capacity, let bikes = station.bikes else { return false }
+            return capacity < bikes
+        }
+        #expect(!contradicting.isEmpty, "矛盾する行がフィクスチャに無い（別の応答で測り直す）")
+        for station in contradicting {
+            let detail = StationDetail(
+                station: station, feed: feeds[station.systemID], attribution: nil,
+                now: response.generatedAt)
+            let capacity = try #require(detail.facts.first { $0.label == "容量" })
+            #expect(
+                capacity.value == StationDetail.unknownValue,
+                "\(station.id) は容量 \(station.capacity ?? -1)・台数 \(station.bikes ?? -1) で矛盾している")
+        }
     }
 
     // ── 予測（W4 の PR A・PR B）────────────────────────────

@@ -184,17 +184,45 @@ struct StationDetailTests {
         #expect(fact(detail(station(capacity: nil)), "容量")?.value == StationDetail.unknownValue)
     }
 
-    @Test("**動的な容量には注記を添える**（ドコモ）")
-    func dynamicCapacityIsExplained() {
-        // ドコモの capacity は bikes + docks の動的値で、固定のラック数ではない
-        let result = detail(feed: feed(dynamicCapacity: true))
-        #expect(fact(result, "容量")?.note?.contains("固定の台数ではなく") == true)
+    @Test("**容量が動的なシステムでは数を出さない**（W4 プラン §12 の 115）")
+    func dynamicCapacityIsNotShown() {
+        // ドコモの capacity は日次同期の瞬間の bikes + docks で、ラック数ではない。
+        // 出すと「容量 10・借りられる 27」のように同じ画面の 2 つの数が矛盾する
+        let result = detail(station(capacity: 10, bikes: 27), feed: feed(dynamicCapacity: true))
+        #expect(fact(result, "容量")?.value == StationDetail.unknownValue)
+        #expect(result.availability[0].value == "27")
     }
 
-    @Test("容量が無ければ動的の注記も出さない")
-    func noCapacityMeansNoNote() {
-        let result = detail(station(capacity: nil), feed: feed(dynamicCapacity: true))
+    @Test("数を出さない代わりに、なぜ出せないかを添える")
+    func dynamicCapacityIsExplained() {
+        let result = detail(feed: feed(dynamicCapacity: true))
+        #expect(fact(result, "容量")?.note == StationDetail.dynamicCapacityNote)
+        #expect(fact(result, "容量")?.note?.contains("固定のラック数") == true)
+    }
+
+    @Test("**サーバーが数を送ってきても出さない**（古いキャッシュや別経路への備え）")
+    func aStaleNumberIsStillNotShown() {
+        // 0035 で `/v1` は NULL を返すが、CDN に残った古い応答は数を持っている
+        let result = detail(station(capacity: 999), feed: feed(dynamicCapacity: true))
+        #expect(fact(result, "容量")?.value == StationDetail.unknownValue)
+    }
+
+    @Test("固定のシステムはそのまま出す（注記も付けない）")
+    func fixedCapacityIsShownAsIs() {
+        let result = detail(feed: feed(dynamicCapacity: false))
+        #expect(fact(result, "容量")?.value == "10")
         #expect(fact(result, "容量")?.note == nil)
+    }
+
+    @Test("**「未取得」と「公開していない」を区別する**")
+    func anUnsyncedCapacityIsNotTheSameAsADynamicOne() {
+        // 固定のシステムで属性がまだ無いだけなら、理由は言えない（注記は出さない）
+        let unsynced = detail(station(capacity: nil), feed: feed(dynamicCapacity: false))
+        #expect(fact(unsynced, "容量")?.value == StationDetail.unknownValue)
+        #expect(fact(unsynced, "容量")?.note == nil)
+        // 動的なシステムは「公開していない」と言える
+        let dynamic = detail(station(capacity: nil), feed: feed(dynamicCapacity: true))
+        #expect(fact(dynamic, "容量")?.note == StationDetail.dynamicCapacityNote)
     }
 
     // ── その他の情報 ──────────────────────────────────────────

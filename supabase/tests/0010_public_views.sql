@@ -10,7 +10,7 @@
 -- **行単位の検査は必ず `system_id` で絞る。** 他のデータが混ざっていても結果が変わらないように。
 
 begin;
-select plan(39);
+select plan(43);
 
 -- ────────────────────────────────────────────────────────────────
 -- 権限
@@ -83,19 +83,23 @@ select is(
 insert into public.systems
   (system_id, display_name, operator_name, gbfs_base_url, expected_cadence_s, poll_interval_s, lock_key, is_active, capacity_is_dynamic)
 values
-  ('t-active', '稼働中', '事業者', 'https://example.test/gbfs', 300, 60, 9101, true,  false),
-  ('t-halted', '停止中', '事業者', 'https://example.test/gbfs', 300, 60, 9102, false, true);
+  ('t-active',  '稼働中',   '事業者', 'https://example.test/gbfs', 300, 60, 9101, true,  false),
+  ('t-halted',  '停止中',   '事業者', 'https://example.test/gbfs', 300, 60, 9102, false, true),
+  -- 容量が動的なシステム（ドコモと同じ形）。**capacity をラック数として出さない**（0035）
+  ('t-dynamic', '動的容量', '事業者', 'https://example.test/gbfs', 300, 60, 9103, true,  true);
 
 insert into public.feed_state (system_id, last_observed_at) values
-  ('t-active', timestamptz '2026-09-08 00:00:00+00'),
-  ('t-halted', timestamptz '2026-09-08 00:00:00+00');
+  ('t-active',  timestamptz '2026-09-08 00:00:00+00'),
+  ('t-halted',  timestamptz '2026-09-08 00:00:00+00'),
+  ('t-dynamic', timestamptz '2026-09-08 00:00:00+00');
 
 insert into public.stations (system_id, station_id, idx) values
   ('t-active', 'plain',    0),
   ('t-active', 'geo-bad',  1),
   ('t-active', 'no-attr',  2),
   ('t-active', 'unseen',   3),
-  ('t-halted', 'halted',   0);
+  ('t-halted', 'halted',   0),
+  ('t-dynamic', 'dyn',     0);
 
 insert into public.station_attributes
   (system_id, station_id, valid_from, valid_to, name, lat, lon, capacity, geo_suspect, raw)
@@ -106,7 +110,9 @@ values
                                                               '昔の名前',     35.00, 139.00,  1, false, '{}'),
   ('t-active', 'geo-bad', timestamptz '2026-09-01 00:00+00', null, '壊れた座標', 35.90,  39.55,  5, true,  '{}'),
   ('t-active', 'unseen',  timestamptz '2026-09-01 00:00+00', null, '未観測',     35.70, 139.70,  8, false, '{}'),
-  ('t-halted', 'halted',  timestamptz '2026-09-01 00:00+00', null, '停止中',     35.60, 139.60,  4, false, '{}');
+  ('t-halted', 'halted',  timestamptz '2026-09-01 00:00+00', null, '停止中',     35.60, 139.60,  4, false, '{}'),
+  -- 属性には数が入っている。**ビューが出さないだけ**で、データは消さない
+  ('t-dynamic', 'dyn',   timestamptz '2026-09-01 00:00+00', null, '動的なポート', 35.65, 139.65, 20, false, '{}');
 
 insert into public.station_status_latest
   (system_id, station_id, bikes, docks, flags, is_present, last_changed_at)
@@ -116,7 +122,9 @@ values
   ('t-active', 'no-attr', 0, 5, 1, true,  timestamptz '2026-09-08 00:00+00'),
   -- 一度も観測されていないポート。本番に実在する（2026-09-08 の実測でドコモに 2 件）
   ('t-active', 'unseen', -1, -1, -1, false, timestamptz '2026-09-08 00:00+00'),
-  ('t-halted', 'halted',  2, 2, 7, true,  timestamptz '2026-09-08 00:00+00');
+  ('t-halted', 'halted',  2, 2, 7, true,  timestamptz '2026-09-08 00:00+00'),
+  -- 容量（20）より台数（27）が多い。**本番のドコモで 628 件起きていた形**（§12 の 115）
+  ('t-dynamic', 'dyn',   27, 0, 7, true,  timestamptz '2026-09-08 00:00+00');
 
 -- ────────────────────────────────────────────────────────────────
 -- ビューの中身
@@ -140,6 +148,32 @@ select is(
 select is(
   (select capacity from public.v1_stations_current where system_id = 't-active' and station_id = 'plain')::int,
   12, '容量も現在有効な行から取る');
+
+-- ────────────────────────────────────────────────────────────────
+-- capacity は「固定のラック数」だけ（0035。W4 プラン §12 の 115）
+-- ────────────────────────────────────────────────────────────────
+-- 動的なシステムの `capacity` は日次同期の瞬間の `bikes + docks` が凍結された値で、
+-- ラック数ではない。**そのまま渡すと「容量 20・借りられる 27」という矛盾が画面に出る。**
+select ok(
+  (select capacity is null from public.v1_stations_current
+    where system_id = 't-dynamic' and station_id = 'dyn'),
+  '容量が動的なシステムでは capacity を出さない（NULL）');
+
+select is(
+  (select capacity from public.station_attributes
+    where system_id = 't-dynamic' and station_id = 'dyn' and valid_to is null)::int,
+  20, '**属性の値は消さない**。ビューが出さないだけ（学習側はこちらを読む）');
+
+select ok(
+  (select bikes = 27 and docks = 0 and is_present
+     from public.v1_stations_current where system_id = 't-dynamic' and station_id = 'dyn'),
+  '容量を伏せても行は返り、台数はそのまま出る');
+
+-- **矛盾が 1 つも残らないこと**を網羅で見る。ここが破れると画面に嘘が出る
+select is(
+  (select count(*)::int from public.v1_stations_current
+    where capacity is not null and bikes is not null and capacity < bikes),
+  0, '「容量より台数が多い」行はビューに 1 つも無い');
 
 select ok(
   (select name is null and lat is null and lon is null and capacity is null

@@ -86,7 +86,14 @@ export const stationCurrentSchema = z.object({
   name: z.string().nullable(),
   lat: z.number(),
   lon: z.number(),
-  /** ドコモは動的値。解釈は `feeds[].capacity_is_dynamic` を見て決める。 */
+  /**
+   * **固定のラック数**。**容量が動的なシステム（`feeds[].capacity_is_dynamic`）では null**
+   * になる（W4 の PR B′、migration 0035）。
+   *
+   * ドコモの公開値は日次同期の瞬間の `bikes + docks` が凍結されたもので、ラック数では
+   * ない。渡すと「容量 5・借りられる 12」という矛盾が画面に出る（W4 プラン §12 の 115）。
+   * **ポートの大きさは W5 に `capacity_est` を別の欄として足して答える。**
+   */
   capacity: z.number().int().nonnegative().nullable(),
   bikes: z.number().int().nonnegative().nullable(),
   docks: z.number().int().nonnegative().nullable(),
