@@ -5,7 +5,7 @@
 -- 到達の確認は本番での強制発火で行う。
 
 begin;
-select plan(61);
+select plan(66);
 
 -- テストはトランザクション内で完結し rollback するので、ここでの削除は外に影響しない
 delete from public.station_status_latest;
@@ -204,13 +204,45 @@ select is(
 );
 select is(
   (select array_agg(status order by status) from public.inference_log),
-  array['failed', 'ok', 'running', 'skipped'],
-  '**ok 以外は 100 日前でも残る**（何が起きたかの記録）'
+  array['failed', 'failed', 'ok', 'skipped'],
+  '**ok 以外は 100 日前でも残る**（何が起きたかの記録）。'
+  '100 日前の running は同じ呼び出しで閉じられて failed になる（0032）'
 );
 select is(
   (select count(*)::int from public.inference_log
     where status = 'ok' and generated_at < now() - interval '90 days'),
   0, '古い ok は残らない'
+);
+
+-- **閉じられなかった行を閉じる**（0032）。検知だけ入れて解消の経路が無いと、
+-- 通知が永久に鳴り続ける（`running` の行は自分では閉じない）
+delete from public.inference_log where true;
+insert into public.inference_log (system_id, generated_at, base_observed_at, model_version, status)
+values
+  ('hellocycling', now() - interval '2 hours',  now() - interval '2 hours',  'm1', 'running'),
+  ('hellocycling', now() - interval '1 minute', now() - interval '1 minute', 'm1', 'running');
+
+select is(
+  public.run_maintenance() -> 'inference_runs_closed', '1'::jsonb,
+  '**1 時間を超えた running だけ**を閉じる（走っている最中には触らない）'
+);
+select is(
+  (select array_agg(status order by generated_at) from public.inference_log),
+  array['failed', 'running'], '閉じたほうは failed になる'
+);
+select is(
+  (select error from public.inference_log where status = 'failed'),
+  'never_finished',
+  '**「失敗した」と「閉じられなかった」を区別する**（原因を追うときに迷わない）'
+);
+select ok(
+  (select finished_at is not null and duration_ms is null
+     from public.inference_log where status = 'failed'),
+  '**`duration_ms` は入れない**（どれだけ走ったか分からないので推測で埋めない）'
+);
+select is(
+  (select count(*)::int from public.inference_log where status = 'running'),
+  1, '走っている最中の行は残る'
 );
 
 -- ────────────────────────────────────────────────────────────────
