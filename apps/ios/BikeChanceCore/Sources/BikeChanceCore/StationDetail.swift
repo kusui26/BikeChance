@@ -10,7 +10,7 @@ import Foundation
 ///   * **未観測は「—」。0 台と区別する**
 ///   * **鮮度を超えた値は「現在値」として出さない**
 ///   * **停止中は台数があっても借りられない**ことを言葉で添える
-///   * **ドコモの「容量」は固定のラック数ではない**ことを添える
+///   * **ドコモの「容量」は固定のラック数ではない**ので、**数を出さない**
 ///   * **予測と現在値を混ぜない。** 予測は別の欄に置き、出せなければ台数だけを出す
 public struct StationDetail: Equatable, Sendable {
     /// 値が分からないときの表示。**0 と混同させない。**
@@ -72,14 +72,29 @@ public struct StationDetail: Equatable, Sendable {
         return "\(value)"
     }
 
+    /// 動的な容量のシステムに添える説明。**「—」の理由を言う。**
+    public static let dynamicCapacityNote =
+        "この事業者は固定のラック数を公開していないため、表示していません。いまの受け入れ枠は上の 2 つの数の合計です。"
+
+    /// 容量の表示。**容量が動的なシステムでは数を出さない**（W4 プラン §12 の 115）。
+    ///
+    /// ドコモの `capacity` は**日次同期の瞬間の `bikes + docks` が凍結された値**で、
+    /// ラック数ではない（データ辞書 §4.3）。出すと「容量 5・借りられる 12」のように、
+    /// **同じ画面の 2 つの数が矛盾する**（本番で 628 ポート・ドコモの 10.8%）。
+    ///
+    /// **サーバー（migration 0035）も NULL を返すが、ここでも受け取らない。** CDN に
+    /// 残った古い応答や、将来の別の経路が数を持ってきても、画面には出さない。
+    private static func capacity(_ value: Int?, feed: FeedStatus?) -> String {
+        guard feed?.capacityIsDynamic != true, let value else { return unknownValue }
+        return "\(value)"
+    }
+
     private static func facts(station: StationCurrent, feed: FeedStatus?) -> [Fact] {
         [
             Fact(
                 label: "容量",
-                value: station.capacity.map(String.init) ?? unknownValue,
-                // ドコモの `capacity` は `bikes + docks` の動的値（開発プラン §3.6）
-                note: feed?.capacityIsDynamic == true && station.capacity != nil
-                    ? "固定の台数ではなく、その時点の台数と空き枠の合計です。" : nil
+                value: capacity(station.capacity, feed: feed),
+                note: feed?.capacityIsDynamic == true ? dynamicCapacityNote : nil
             ),
             Fact(label: "設置", value: installation(station.isInstalled), note: nil),
             Fact(label: "座標", value: coordinate(station), note: nil),
