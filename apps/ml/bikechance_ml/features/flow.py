@@ -12,6 +12,10 @@
 `-1`（観測されなかった）の行は差分の計算から外す。前後の観測どうしで差を取るので、
 穴が空いた区間の差分は「その穴をまたいだ変化量」になる。**補間はしない**
 （データ辞書 §10.1）。
+
+**`minutes_since_last_change` には上限がある**（`CHANGE_CAP_MINUTES`）。この列だけが
+読んだ窓の長さで値が変わるので、学習（25 時間）と推論（3 時間）で必ず食い違う。
+上限を決めて、どちらも同じ値を出せるようにしてある（W4 プラン §4 の W4-10）。
 """
 
 from dataclasses import dataclass
@@ -21,7 +25,7 @@ import numpy as np
 
 from bikechance_ml.features.arrays import Float32, Int32, Int64, Span
 from bikechance_ml.features.asof import Observations
-from bikechance_ml.features.constants import FLOW_MINUTES, MISSING
+from bikechance_ml.features.constants import CHANGE_CAP_MINUTES, FLOW_MINUTES, MISSING
 
 _MS_PER_MINUTE: Final[int] = 60_000
 
@@ -30,7 +34,8 @@ _MS_PER_MINUTE: Final[int] = 60_000
 class Flow:
     """観測 1 行ごとの流量。`Observations` の行と 1 対 1 に並ぶ。
 
-    `minutes_since_last_change` は、窓の中に変化が 1 度も無ければ NaN。
+    `minutes_since_last_change` は **`CHANGE_CAP_MINUTES`（180 分）で頭打ち**にする。
+    変化が見えなければ上限そのもの、観測が 2 つ未満なら NaN（**分からない**）。
     **0 で埋めない**（「たった今変わった」と区別がつかなくなる）。
     """
 
@@ -89,11 +94,21 @@ def _windowed_sum(values: Int32, at_from: Int64, at_to: Int64) -> Int32:
 
 
 def _since_last_change(times: Int64, change_times: Int64) -> Float32:
-    """最後に台数が変わってからの分。**窓では切らない**（変化の間隔そのものを見る）。"""
+    """最後に台数が変わってからの分。**`CHANGE_CAP_MINUTES` で頭打ちにする。**
+
+    上限を入れるのは、**この列だけが読んだ窓の長さで値が変わる**ためである。学習は
+    25 時間さかのぼって「420 分前に動いた」と言えるが、5 分毎に走る推論は同じ深さを
+    読めない。上限を決めておけば、**窓が上限より長いかぎり両方が同じ値を出す**
+    （W4 プラン §4 の W4-10）。
+
+    **変化が見えなければ上限そのもの**を返す（NaN にしない）。「180 分以上動いて
+    いない」は分かっている情報で、捨てる理由が無い。
+    """
+    cap = float(CHANGE_CAP_MINUTES)
     if len(change_times) == 0:
-        return np.full(len(times), np.nan, dtype=np.float32)
+        return np.full(len(times), cap, dtype=np.float32)
     taken = np.searchsorted(change_times, times, side="right")
     elapsed = np.where(
-        taken > 0, (times - change_times[np.maximum(taken - 1, 0)]) / _MS_PER_MINUTE, np.nan
+        taken > 0, (times - change_times[np.maximum(taken - 1, 0)]) / _MS_PER_MINUTE, cap
     )
-    return np.asarray(elapsed, dtype=np.float32)
+    return np.asarray(np.minimum(elapsed, cap), dtype=np.float32)

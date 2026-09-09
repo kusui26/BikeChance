@@ -7,6 +7,7 @@ Parquet のパスは **UTC**。両方をあちこちで書くと、日付の境�
 `datetime` の比較より速い。境界で `datetime` に戻すのはこのモジュールの仕事。
 """
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Final
@@ -55,26 +56,59 @@ def day_start(day: date) -> datetime:
     return datetime(day.year, day.month, day.day, tzinfo=JST).astimezone(UTC)
 
 
+class MissingShiftError(KeyError):
+    """疎な格子に、要求されたずらし量が無い。**黙って別の点を返さない。**
+
+    推論の格子は「要る点だけ」を持つ（`build_point_grid`）。特徴量を足して新しい
+    ずらし量が要るようになったのに格子を直し忘れると、ここで止まる。止めなければ
+    **別の時刻の値が特徴量に入る**（W4 プラン §6.3）。
+    """
+
+
 @dataclass(frozen=True)
 class Grid:
-    """基準時刻の並び。**当日の 288 点の前後に余白を持つ。**
+    """基準時刻の並びと、そこから `minutes` ずらした位置の引き方。
 
-    余白はラグ・流量（前）とラベル（後）のためで、`day_offset` から
-    `day_offset + GRID_POINTS_PER_DAY` が当日の 288 点にあたる。
+    **添字の算術をここに閉じ込める。** 学習は当日 288 点の連続格子（前後に余白）、
+    推論は 1 点だけの疎な格子で、**どちらも同じ `shifted()` で引ける**
+    （W4 プラン §6.3）。`features/build.py` は格子の作り方を知らない。
+
+    `base_offset` から `base_offset + base_count` が基準時刻にあたる。
     """
 
     times_ms: tuple[int, ...]
-    day_offset: int
+    base_offset: int
+    base_count: int
+    #: ずらし量（分）→ `times_ms` の先頭の添字。**疎な格子のときだけ持つ。**
+    #: 連続格子は歩数で引けるので None。
+    shifts: Mapping[int, int] | None = None
 
     def __len__(self) -> int:
         return len(self.times_ms)
 
     def day_slice(self) -> Span:
-        """当日の 288 点を指す。"""
-        return slice(self.day_offset, self.day_offset + GRID_POINTS_PER_DAY, 1)
+        """基準時刻を指す（ずらし 0）。"""
+        return self.shifted(0)
 
     def day_times_ms(self) -> tuple[int, ...]:
         return self.times_ms[self.day_slice()]
+
+    def shifted(self, minutes: int) -> Span:
+        """基準時刻の集合を `minutes` ずらした位置。**負は過去。**
+
+        連続格子では歩数、疎な格子では持っている表で引く。**どちらも `Span` を返す**
+        ので、呼ぶ側は numpy の view のまま扱える（複製が起きない）。
+        """
+        start = self._index_of(minutes)
+        return slice(start, start + self.base_count, 1)
+
+    def _index_of(self, minutes: int) -> int:
+        if self.shifts is None:
+            return self.base_offset + self.steps_per(minutes)
+        found = self.shifts.get(minutes)
+        if found is None:
+            raise MissingShiftError(f"{minutes} 分ずらした格子点を持っていません")
+        return found
 
     def steps_per(self, minutes: int) -> int:
         """`minutes` がグリッドの何点ぶんか。**割り切れなければ例外にする。**"""
@@ -88,14 +122,32 @@ def build_grid(
     lookback_hours: int = LOOKBACK_HOURS,
     lookahead_hours: int = LOOKAHEAD_HOURS,
 ) -> Grid:
-    """当日の 288 点と前後の余白を並べる。"""
+    """当日の 288 点と前後の余白を並べる（学習）。"""
     start = day_start(day)
     before = lookback_hours * 60 // GRID_MINUTES
     after = lookahead_hours * 60 // GRID_MINUTES
     first = to_epoch_ms(start) - before * GRID_MINUTES * _MS_PER_MINUTE
     total = before + GRID_POINTS_PER_DAY + after
     step = GRID_MINUTES * _MS_PER_MINUTE
-    return Grid(tuple(first + index * step for index in range(total)), before)
+    return Grid(tuple(first + index * step for index in range(total)), before, GRID_POINTS_PER_DAY)
+
+
+def build_point_grid(at: datetime, shifts: Sequence[int]) -> Grid:
+    """基準時刻 1 点と、そこから要るぶんだけの格子（推論）。
+
+    **要る点だけを持つ。** 連続した格子にすると 1,500 分ぶん（337 点）を並べることに
+    なり、`(ポート × 格子点)` の行列が 10 倍以上になる。実際に引くのは 24 点である。
+
+    `at` は **5 分格子の上**でなければならない。ずれた時刻を基準にすると、ラグや
+    同時刻履歴が格子から外れて `MissingShiftError` になる前に、静かに別の点を指す。
+    """
+    if to_epoch_ms(at) % (GRID_MINUTES * _MS_PER_MINUTE) != 0:
+        raise ValueError(f"基準時刻が {GRID_MINUTES} 分格子の上にありません: {at.isoformat()}")
+    base_ms = to_epoch_ms(at)
+    wanted = sorted({0, *shifts})
+    times = tuple(base_ms + minutes * _MS_PER_MINUTE for minutes in wanted)
+    index = {minutes: position for position, minutes in enumerate(wanted)}
+    return Grid(times, index[0], 1, index)
 
 
 def parquet_hours(

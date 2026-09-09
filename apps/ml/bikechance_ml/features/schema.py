@@ -141,6 +141,14 @@ SCHEMA: Final[pa.Schema] = pa.schema(
     ]
 )
 
+#: 推論では作らない列。**ラベルは未来、抽出は学習の都合**（W4 プラン §9 の契約 5）。
+SERVING_DROPPED: Final[tuple[str, ...]] = ("y_bike", "y_dock", "weight", "stratum")
+
+#: 推論の出力の列。**`SCHEMA` から引いて作る**（正を 2 つにしない）。
+SERVING_SCHEMA: Final[pa.Schema] = pa.schema(
+    [field for field in SCHEMA if field.name not in SERVING_DROPPED]
+)
+
 #: 学習に使ってはいけない列（開発プラン §6.3、データ辞書 §10.4）。キーと重みと版。
 NON_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     "system_id",
@@ -165,8 +173,17 @@ class MissingColumnError(ValueError):
 
 def to_table(columns: Mapping[str, pa.Array]) -> pa.Table:
     """列の辞書を表にする。**`SCHEMA` と過不足があれば例外にする。**"""
-    missing = [name for name in SCHEMA.names if name not in columns]
-    extra = [name for name in columns if name not in SCHEMA.names]
+    return _to_table(columns, SCHEMA)
+
+
+def to_serving_table(columns: Mapping[str, pa.Array]) -> pa.Table:
+    """推論の列の辞書を表にする。**ラベルと抽出が混じっていれば例外にする。**"""
+    return _to_table(columns, SERVING_SCHEMA)
+
+
+def _to_table(columns: Mapping[str, pa.Array], schema: pa.Schema) -> pa.Table:
+    missing = [name for name in schema.names if name not in columns]
+    extra = [name for name in columns if name not in schema.names]
     if missing or extra:
         raise MissingColumnError(f"足りない列: {missing} / 余分な列: {extra}")
-    return pa.table([columns[name] for name in SCHEMA.names], schema=SCHEMA)
+    return pa.table([columns[name] for name in schema.names], schema=schema)

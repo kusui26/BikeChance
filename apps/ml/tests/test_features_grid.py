@@ -41,8 +41,9 @@ def test_grid_has_288_points_for_the_day() -> None:
 def test_grid_has_margins_before_and_after() -> None:
     """余白はラグ・流量（前）とラベル（後）のためにある。"""
     grid = build_grid(DAY, lookback_hours=2, lookahead_hours=1)
-    assert grid.day_offset == 2 * 60 // GRID_MINUTES
-    assert len(grid) == grid.day_offset + GRID_POINTS_PER_DAY + 60 // GRID_MINUTES
+    assert grid.base_offset == 2 * 60 // GRID_MINUTES
+    assert grid.base_count == GRID_POINTS_PER_DAY
+    assert len(grid) == grid.base_offset + GRID_POINTS_PER_DAY + 60 // GRID_MINUTES
     assert grid.times_ms[grid.day_slice()][0] == to_epoch_ms(day_start(DAY))
 
 

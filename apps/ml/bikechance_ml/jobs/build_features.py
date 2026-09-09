@@ -24,7 +24,7 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -60,7 +60,15 @@ class MissingReferenceError(RuntimeError):
     """
 
 
-def read_reference(source: SupabaseIo, day: date) -> tuple[tuple[SystemReference, ...], Estimates]:
+class ReadsStorage(Protocol):
+    """参照スナップショットを読むのに要る口だけ。**学習も推論も同じ関数を通す。**"""
+
+    def download(self, bucket: str, path: str) -> bytes | None: ...
+
+
+def read_reference(
+    source: ReadsStorage, day: date
+) -> tuple[tuple[SystemReference, ...], Estimates]:
     """**基準時刻の前日**の参照スナップショットを読む（W3 プラン §14.3）。
 
     学習も推論も同じ規則で「前日の版」を読む。**「学習は前日、推論は最新」にすると、
@@ -69,7 +77,13 @@ def read_reference(source: SupabaseIo, day: date) -> tuple[tuple[SystemReference
     以前は `stations` / `station_attributes` / `station_neighbors` を DB から直に
     読んでいた。それだと過去の日を作り直すたびに値が変わる（§13.2）。
     """
-    source_day = day - timedelta(days=1)
+    return read_reference_on(source, day - timedelta(days=1))
+
+
+def read_reference_on(
+    source: ReadsStorage, source_day: date
+) -> tuple[tuple[SystemReference, ...], Estimates]:
+    """**その日付の版**をそのまま読む。無ければ `MissingReferenceError`。"""
     tables = {}
     for name in (STATIONS_NAME, NEIGHBORS_NAME):
         path = reference_path(source_day, name)

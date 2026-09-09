@@ -1,10 +1,13 @@
-"""先回り推論（`jobs/infer.py`、W3 プラン §5.10）。
+"""先回り推論（`jobs/infer.py`、W3 プラン §5.10、W4 プラン §6.3）。
 
 **この 1 ファイルの主題は 3 つ。**
 
   * **同じ観測時刻に対する 2 度目は何もしない**（Vercel Cron の二重起動を無害にする）
-  * **出せないポートは行を作らない**（0 や 0.5 で埋めない。学習と同じ除外規則）
+  * **出せないポートは行を作らない**（0 や 0.5 で埋めない。**学習と同じ `features/exclude.py`**）
   * 学習した成果物と**同じ関数**で確率を出す
+
+PR C から、除外も暦も**学習と同じ経路**（`build_now`）が決める。だからここには
+「推論だけの除外規則」は無く、仕込んだ観測がそのまま効くかどうかを見る。
 """
 
 from collections.abc import Iterator, Mapping, Sequence
@@ -12,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
+import pyarrow as pa
 import pytest
 from fastapi.testclient import TestClient
 
@@ -20,7 +24,6 @@ from bikechance_ml.baselines.artifact import Artifact, to_bytes
 from bikechance_ml.eval.dataset import to_samples
 from bikechance_ml.features.constants import HORIZONS_MIN, MAX_STALENESS_S
 from bikechance_ml.features.grid import JST
-from bikechance_ml.features.reference import StationStatusRow
 from bikechance_ml.jobs.fit_baseline import build_artifact
 from bikechance_ml.jobs.infer import (
     MODEL_BUCKET,
@@ -30,10 +33,11 @@ from bikechance_ml.jobs.infer import (
     batches,
     confidence_of,
     forget_artifacts,
-    is_predictable,
+    grid_time,
     load_artifact,
     model_path,
     predict,
+    read_features,
     run_inference,
     to_detail,
     to_payload,
@@ -41,7 +45,9 @@ from bikechance_ml.jobs.infer import (
     to_x1000,
     unknown_ports,
 )
+from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
 from tests import eval_fixture as fixture
+from tests import infer_fixture as serving
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +64,12 @@ def _clean_cache() -> Iterator[None]:
 
 OPEN, SUSPENDED, MISSING = 7, 1, -1
 NOW = datetime(2026, 9, 9, 10, 4, tzinfo=JST).astimezone(UTC)
-BASE = NOW - timedelta(minutes=2)
+#: 基準時刻は **5 分格子に落ちる**（`grid_time`）。特徴量も予測もこの時刻で作る。
+AT = grid_time(NOW)
+BASE = AT - timedelta(minutes=2)
+
+STATIONS = serving.STATIONS
+STATION_IDS = tuple(one[0] for one in STATIONS)
 
 
 def scenario() -> list[dict[str, object]]:
@@ -78,36 +89,23 @@ def artifact() -> Artifact:
 
 
 ARTIFACT = artifact()
-STATIONS = (
-    StationStatusRow("a", 0, 9, OPEN, True),
-    StationStatusRow("b", 1, 8, OPEN, True),
-    StationStatusRow("c", 7, 2, OPEN, True),
-)
-
-
-# ── 除外 ──────────────────────────────────────────────────────
-def test_absent_or_unobserved_ports_are_not_predicted() -> None:
-    """**学習と同じ除外規則**（`features/exclude.py`）。0 で埋めない。"""
-    assert is_predictable("hellocycling", StationStatusRow("a", 3, 3, OPEN, True))
-    assert not is_predictable("hellocycling", StationStatusRow("a", 3, 3, OPEN, False))
-    assert not is_predictable("hellocycling", StationStatusRow("a", MISSING, 3, OPEN, True))
-    assert not is_predictable("hellocycling", StationStatusRow("a", 3, MISSING, OPEN, True))
-
-
-def test_suspended_ports_are_not_predicted() -> None:
-    assert not is_predictable("hellocycling", StationStatusRow("a", 3, 3, SUSPENDED, True))
-    assert not is_predictable("hellocycling", StationStatusRow("a", 3, 3, MISSING, True))
-
-
-def test_phantom_station_is_not_predicted() -> None:
-    """実在しないポート（ドコモ `5753`）。**名前ではなく ID で弾く。**"""
-    assert not is_predictable("docomo-cycle", StationStatusRow("5753", 3, 3, OPEN, True))
-    assert is_predictable("hellocycling", StationStatusRow("5753", 3, 3, OPEN, True))
 
 
 # ── 予測 ──────────────────────────────────────────────────────
-def forecasts() -> tuple[Forecast, ...]:
-    return predict(ARTIFACT, "hellocycling", STATIONS, NOW, BASE, frozenset())
+def features(port: "FakePort", system_id: str = "hellocycling") -> pa.Table:
+    """**本番と同じ経路**で特徴量を作る（参照スナップショットと 2 つの窓）。"""
+    return read_features(port, system_id, AT, frozenset())[1].table
+
+
+def forecasts(
+    rows: Sequence[tuple[str, int, int, int]] = STATIONS,
+    *,
+    base: datetime = BASE,
+    system_id: str = "hellocycling",
+) -> tuple[Forecast, ...]:
+    port = ready_port(rows)
+    stale = (AT - base).total_seconds() > MAX_STALENESS_S
+    return predict(ARTIFACT, system_id, AT, features(port, system_id), stale)
 
 
 def test_one_row_per_port_with_all_horizons() -> None:
@@ -132,22 +130,34 @@ def test_more_bikes_means_a_higher_chance_of_renting() -> None:
     assert result["b"].p_bike_x1000[0] >= result["a"].p_bike_x1000[0]
 
 
-def test_skipped_ports_have_no_row() -> None:
-    rows = (*STATIONS, StationStatusRow("d", MISSING, MISSING, MISSING, False))
-    result = predict(ARTIFACT, "hellocycling", rows, NOW, BASE, frozenset())
-    assert [one.station_id for one in result] == ["a", "b", "c"]
+def test_unobserved_ports_have_no_row() -> None:
+    """**観測されなかったポートは行を作らない**（`-1` を 0 と読まない）。"""
+    rows = (*STATIONS, ("d", MISSING, MISSING, OPEN))
+    assert [one.station_id for one in forecasts(rows)] == ["a", "b", "c"]
+
+
+def test_suspended_ports_have_no_row() -> None:
+    """**貸出も返却も止まっていれば出さない**（学習の除外規則そのまま）。"""
+    rows = (*STATIONS, ("d", 3, 3, SUSPENDED))
+    assert [one.station_id for one in forecasts(rows)] == ["a", "b", "c"]
+
+
+def test_the_phantom_station_has_no_row() -> None:
+    """実在しないポート（ドコモ `5753`）。**名前ではなく ID で弾く。**"""
+    rows = (*STATIONS, ("5753", 3, 3, OPEN))
+    assert "5753" not in [one.station_id for one in forecasts(rows, system_id="docomo-cycle")]
+    # HELLO の同じ ID は落とさない（ID だけで弾くのは 1 系統ぶん）
+    assert "5753" in [one.station_id for one in forecasts(rows)]
 
 
 def test_no_usable_port_gives_no_forecast() -> None:
-    empty = (StationStatusRow("a", 3, 3, SUSPENDED, True),)
-    assert predict(ARTIFACT, "hellocycling", empty, NOW, BASE, frozenset()) == ()
+    assert forecasts((("a", 3, 3, SUSPENDED),)) == ()
 
 
 def test_stale_feed_lowers_the_confidence() -> None:
     """鮮度が落ちたら confidence を下げる（0026 の列）。"""
-    old = NOW - timedelta(seconds=MAX_STALENESS_S + 1)
-    result = predict(ARTIFACT, "hellocycling", STATIONS, NOW, old, frozenset())
-    assert {one.confidence for one in result} == {1}
+    old = AT - timedelta(seconds=MAX_STALENESS_S + 1)
+    assert {one.confidence for one in forecasts(base=old)} == {1}
 
 
 def test_confidence_rules() -> None:
@@ -168,12 +178,13 @@ def test_probability_rounding_stays_in_range() -> None:
 
 # ── 書き出す形 ────────────────────────────────────────────────
 def test_payload_matches_the_table() -> None:
-    payload = to_payload(forecasts(), NOW, BASE, "m1")
+    payload = to_payload(forecasts(), AT, BASE, "m1")
     assert len(payload) == len(STATIONS)
     first = payload[0]
     assert first["horizons_min"] == list(HORIZONS_MIN)
     assert first["model_version"] == "m1"
-    assert first["generated_at"] == NOW.isoformat()
+    # **書き込む `generated_at` は 5 分格子の基準時刻**（水平の起点。§12 の 114）
+    assert first["generated_at"] == AT.isoformat()
     assert first["base_observed_at"] == BASE.isoformat()
 
 
@@ -193,28 +204,44 @@ def test_model_path_uses_the_version() -> None:
 # ── 実行 ──────────────────────────────────────────────────────
 @dataclass
 class FakePort:
-    """`InferPort` の代役。**掴んだ回数と書いた行を覚える。**"""
+    """`InferPort` の代役。**掴んだ回数と書いた行を覚える。**
+
+    読ませるものは本番と同じ 3 つ：成果物・**前日の参照スナップショット**・観測の窓。
+    """
 
     base: datetime | None = BASE
+    rows: Sequence[tuple[str, int, int, int]] = STATIONS
     claims: list[tuple[str, datetime]] = field(default_factory=list)
     finished: list[tuple[int, str, int]] = field(default_factory=list)
     details: list[Mapping[str, object] | None] = field(default_factory=list)
     written: list[Mapping[str, object]] = field(default_factory=list)
+    reads: list[tuple[str, datetime, datetime]] = field(default_factory=list)
+    downloads: list[str] = field(default_factory=list)
     body: bytes | None = None
     next_id: int = 1
 
     def read_base_observed_at(self, system_id: str) -> datetime | None:
         return self.base
 
-    def list_station_status(self, system_id: str) -> tuple[StationStatusRow, ...]:
-        return STATIONS
+    def list_stations(self, system_id: str) -> tuple[StationRow, ...]:
+        return serving.ledger([one[0] for one in self.rows])
+
+    def list_snapshots(
+        self, system_id: str, start: datetime, end: datetime
+    ) -> tuple[Snapshot, ...]:
+        """**頼まれた窓を埋めて返す。** どの窓を読みに来たかは `reads` に残る。"""
+        self.reads.append((system_id, start, end))
+        return serving.fill(start, end, self.rows)
 
     def list_holidays(self) -> tuple[date, ...]:
         return ()
 
     def download(self, bucket: str, path: str) -> bytes | None:
-        assert bucket == MODEL_BUCKET
-        return self.body
+        if bucket == MODEL_BUCKET:
+            return self.body
+        # **頼まれた日の版**を返す（どの日を読みに来たかは `downloads` に残る）
+        self.downloads.append(path)
+        return serving.reference_files(serving.day_of(path), self.rows).get(path)
 
     def begin_inference(
         self, system_id: str, base_observed_at: datetime, model_version: str
@@ -242,8 +269,8 @@ class FakePort:
         return len(rows)
 
 
-def ready_port() -> FakePort:
-    return FakePort(body=to_bytes(ARTIFACT))
+def ready_port(rows: Sequence[tuple[str, int, int, int]] = STATIONS) -> FakePort:
+    return FakePort(body=to_bytes(ARTIFACT), rows=rows)
 
 
 def test_a_full_cycle_writes_one_row_per_port() -> None:
@@ -306,12 +333,9 @@ def test_detail_carries_only_the_exception_name() -> None:
 
 def test_unknown_port_still_gets_a_baseline() -> None:
     """成果物に無いポートは**気候値だけ引けない**。B1 には落とせる。"""
-    port = ready_port()
-    fresh = (StationStatusRow("zzz", 2, 7, OPEN, True),)
-    result = predict(ARTIFACT, "hellocycling", fresh, NOW, BASE, frozenset())
+    result = forecasts((("zzz", 2, 7, OPEN),))
     assert len(result) == 1
     assert result[0].confidence == 2
-    assert port.written == []
 
 
 def test_unknown_port_does_not_borrow_another_ports_climatology() -> None:
@@ -325,10 +349,8 @@ def test_unknown_port_does_not_borrow_another_ports_climatology() -> None:
     気候値が効いたか」しか見ておらず、**引いた先が別のポートでも 2 のまま**だったからで
     ある。確率そのものを見ないと分からない。
     """
-    empty = (StationStatusRow("a", 0, 9, OPEN, True),)
-    unknown = (StationStatusRow("zzz", 0, 9, OPEN, True),)
-    known = predict(ARTIFACT, "hellocycling", empty, NOW, BASE, frozenset())
-    fresh = predict(ARTIFACT, "hellocycling", unknown, NOW, BASE, frozenset())
+    known = forecasts((("a", 0, 9, OPEN),))
+    fresh = forecasts((("zzz", 0, 9, OPEN),))
     assert fresh[0].p_bike_x1000 == known[0].p_bike_x1000
     assert fresh[0].p_dock_x1000 == known[0].p_dock_x1000
     assert max(fresh[0].p_bike_x1000) < 100  # 直す前は 417
@@ -342,22 +364,22 @@ def test_unknown_ports_counts_only_what_is_predicted() -> None:
     「ドリフトが増えた」と誤読する。
     """
     rows = (
-        StationStatusRow("zzz", 2, 7, OPEN, True),  # 予測対象で成果物に無い ← 数える
-        StationStatusRow("a", 2, 7, OPEN, True),  # 成果物に在る
-        StationStatusRow("yyy", 2, 7, SUSPENDED, True),  # 止まっている
-        StationStatusRow("xxx", 2, 7, OPEN, False),  # 最新配列に居ない
+        ("zzz", 2, 7, OPEN),  # 予測対象で成果物に無い ← 数える
+        ("a", 2, 7, OPEN),  # 成果物に在る
+        ("yyy", 2, 7, SUSPENDED),  # 止まっている ← 行が作られないので数えない
     )
-    assert unknown_ports(ARTIFACT, "hellocycling", rows) == 1
+    table = features(ready_port(rows))
+    assert unknown_ports(ARTIFACT, "hellocycling", table) == 1
 
 
 def test_the_phantom_station_is_not_counted_as_drift() -> None:
     """幻のポート（ドコモ `5753`）は成果物に無くて当たり前である。"""
-    rows = (StationStatusRow("5753", 2, 7, OPEN, True),)
-    assert unknown_ports(ARTIFACT, "docomo-cycle", rows) == 0
+    table = features(ready_port((("5753", 2, 7, OPEN),)), "docomo-cycle")
+    assert unknown_ports(ARTIFACT, "docomo-cycle", table) == 0
 
 
 def test_no_drift_when_every_port_is_in_the_artifact() -> None:
-    assert unknown_ports(ARTIFACT, "hellocycling", STATIONS) == 0
+    assert unknown_ports(ARTIFACT, "hellocycling", features(ready_port())) == 0
 
 
 def test_the_count_reaches_the_response_and_the_record() -> None:
@@ -385,6 +407,9 @@ def test_the_record_does_not_repeat_the_columns() -> None:
         "skipped",
         "unknown_ports",
         "cpu_ms",
+        "features_ms",
+        "excluded",
+        "reference_date",
     }
     assert to_record(_summary(cpu_ms=42))["cpu_ms"] == 42
 
@@ -405,6 +430,21 @@ def _summary(*, cpu_ms: int) -> InferSummary:
 
 
 # ── 所要 CPU（§13.7 の判断）─────────────────────────────────
+def test_features_ms_is_reported() -> None:
+    """**推論の所要の大半は特徴量づくり**（W4 プラン §6.3 の完了条件）。"""
+    port = ready_port()
+    summary = run_inference(port, "hellocycling", "m1", NOW)
+    assert summary.features_ms > 0
+    assert to_detail(summary)["features_ms"] == summary.features_ms
+    recorded = port.details[0]
+    assert recorded is not None and recorded["features_ms"] == summary.features_ms
+    # 除外の内訳も残す（なぜ出せなかったかが分かる）
+    assert isinstance(recorded["excluded"], dict)
+    # **どの版の参照データを使ったか**も残す（00:00〜05:00 JST は 1 つ古い版になる）
+    yesterday = (AT.astimezone(JST).date() - timedelta(days=1)).isoformat()
+    assert recorded["reference_date"] == yesterday
+
+
 def test_cpu_time_is_measured_and_reported() -> None:
     """**費用は実時間ではなく Active CPU で決まる**（開発プラン §4.5a）。
 
@@ -429,7 +469,7 @@ def test_cpu_time_is_reported_even_when_nothing_was_inferred() -> None:
 
 
 def test_horizons_are_ordered_as_the_contract_says() -> None:
-    payload = to_payload(forecasts(), NOW, BASE, "m1")
+    payload = to_payload(forecasts(), AT, BASE, "m1")
     assert payload[0]["horizons_min"] == sorted(HORIZONS_MIN)
     assert HORIZONS_MIN[0] == 5
 
@@ -447,8 +487,58 @@ def test_probabilities_decay_with_the_horizon_for_an_empty_port() -> None:
 
 @pytest.mark.parametrize("system", ["hellocycling", "docomo-cycle"])
 def test_both_systems_can_be_predicted(system: str) -> None:
-    result = predict(ARTIFACT, system, STATIONS, NOW, BASE, frozenset())
-    assert len(result) == len(STATIONS)
+    assert len(forecasts(system_id=system)) == len(STATIONS)
+
+
+def test_it_falls_back_to_an_older_reference_before_dawn() -> None:
+    """**00:00〜05:00 JST は前日の版がまだ無い**（05:00 に書かれる。§12 の 118）。
+
+    そこで止めると 1 日の 5 分の 1 で予測が出なくなる。1 つ古い版に下がり、
+    **どちらを使ったかを記録する**。
+    """
+
+    @dataclass
+    class OnlyOlder(FakePort):
+        """前日の版がまだ置かれていない朝。"""
+
+        def download(self, bucket: str, path: str) -> bytes | None:
+            if bucket != MODEL_BUCKET and serving.day_of(path) == _yesterday():
+                return None
+            return super().download(bucket, path)
+
+    port = OnlyOlder(body=to_bytes(ARTIFACT))
+    reference_day, ready = read_features(port, "hellocycling", AT, frozenset())
+    assert reference_day == _yesterday() - timedelta(days=1)
+    assert ready.table.num_rows > 0
+
+
+def _yesterday() -> date:
+    return AT.astimezone(JST).date() - timedelta(days=1)
+
+
+def test_it_reads_yesterdays_reference() -> None:
+    """**学習と同じ規則で「前日の版」を読む**（W3 プラン §14.3）。
+
+    「学習は前日、推論は最新」にすると、そこが新しい train/serve skew になる。
+    """
+    port = ready_port()
+    features(port)
+    yesterday = (AT.astimezone(JST).date() - timedelta(days=1)).isoformat()
+    assert port.downloads, "参照スナップショットを読んでいない"
+    assert all(f"date={yesterday}" in path for path in port.downloads)
+
+
+def test_it_reads_the_two_windows_of_its_own_system_and_one_of_the_other() -> None:
+    """**他系統は近傍のためだけに居る。** 履歴まで読むと所要が倍になる（§6.3）。"""
+    port = ready_port()
+    features(port)
+    own = [one for one in port.reads if one[0] == "hellocycling"]
+    other = [one for one in port.reads if one[0] == "docomo-cycle"]
+    assert len(own) == 2
+    assert len(other) == 1
+    # 他系統の窓は、自系統のどの窓よりも短い
+    span = min((end - start) for _, start, end in own)
+    assert (other[0][2] - other[0][1]) < span
 
 
 # ── 入口（`/ml/infer/{system}`）────────────────────────────────
@@ -535,22 +625,22 @@ def test_artifact_is_fetched_once_per_version() -> None:
     port = CountingPort(body=to_bytes(ARTIFACT))
     load_artifact(port, ARTIFACT.model_version)
     load_artifact(port, ARTIFACT.model_version)
-    assert port.downloads == 1
+    assert port.fetches == 1
 
 
 def test_a_new_version_replaces_the_cache() -> None:
     port = CountingPort(body=to_bytes(ARTIFACT))
     load_artifact(port, ARTIFACT.model_version)
     load_artifact(port, "another-version")
-    assert port.downloads == 2
+    assert port.fetches == 2
 
 
 @dataclass
 class CountingPort(FakePort):
-    """取りに行った回数を数えるだけの口。"""
+    """成果物を取りに行った回数を数えるだけの口。"""
 
-    downloads: int = 0
+    fetches: int = 0
 
     def download(self, bucket: str, path: str) -> bytes | None:
-        self.downloads += 1
+        self.fetches += 1
         return self.body

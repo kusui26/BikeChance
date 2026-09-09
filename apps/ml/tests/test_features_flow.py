@@ -11,6 +11,7 @@ import numpy as np
 import pyarrow as pa
 
 from bikechance_ml.features.asof import to_observations
+from bikechance_ml.features.constants import CHANGE_CAP_MINUTES
 from bikechance_ml.features.flow import compute_flow
 from bikechance_ml.jobs.snapshot_table import SCHEMA
 
@@ -77,9 +78,28 @@ def test_unobserved_rows_are_not_treated_as_zero() -> None:
     assert flow_of([(0, 5), (1, -1), (2, 1)]) == (4, 0, 1)
 
 
-def test_minutes_since_last_change_is_nan_when_nothing_changed() -> None:
-    """**0 で埋めない。** 「たった今変わった」と区別がつかなくなる。"""
+def test_minutes_since_last_change_is_the_cap_when_nothing_changed() -> None:
+    """**0 で埋めない。** 「たった今変わった」と区別がつかなくなる。
+
+    上限そのものを返す。「180 分以上動いていない」は分かっている情報である
+    （W4 プラン §4 の W4-10）。
+    """
     observations = to_observations(build([(0, 5), (1, 5), (2, 5)]), KEYS)
+    flow = compute_flow(observations)
+    assert (flow.minutes_since_last_change == CHANGE_CAP_MINUTES).all()
+
+
+def test_minutes_since_last_change_is_capped() -> None:
+    """**窓の長さで値が変わらないようにする**（学習 25 時間・推論 3 時間）。"""
+    # 300 分前に変化。上限が無ければ 300 になる
+    observations = to_observations(build([(0, 5), (10, 4), (310, 4)]), KEYS)
+    flow = compute_flow(observations)
+    assert flow.minutes_since_last_change[2] == CHANGE_CAP_MINUTES
+
+
+def test_an_unobservable_station_is_still_unknown() -> None:
+    """観測が 2 つ未満なら**分からない**（NaN）。上限で埋めない。"""
+    observations = to_observations(build([(0, 5)]), KEYS)
     flow = compute_flow(observations)
     assert np.isnan(flow.minutes_since_last_change).all()
 
