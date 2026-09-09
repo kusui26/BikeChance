@@ -15,6 +15,7 @@ import {
   COMPACT_MAX_DURATION_S,
   INFER_CRON,
   INFER_MAX_DURATION_S,
+  REFERENCE_CRON,
   SYNC_STATIONS_CRON,
   SYSTEMS,
   SYSTEM_IDS,
@@ -25,6 +26,7 @@ const SYNC_PATH_PREFIX = "/api/jobs/sync-stations/";
 const WEATHER_PATH = "/api/jobs/archive-weather";
 const COMPACT_PATH = "/ml/compact";
 const INFER_PATH_PREFIX = "/ml/infer/";
+const REFERENCE_PATH = "/ml/reference";
 
 type CronEntry = {
   readonly path: string;
@@ -193,6 +195,35 @@ describe("vercel.json の推論 Cron", () => {
     ];
     for (const minute of minutes) {
       expect(busy).not.toContain(minute);
+    }
+  });
+});
+
+describe("vercel.json の参照スナップショット Cron", () => {
+  it("ちょうど 1 本ある", () => {
+    expect(readCrons(REFERENCE_PATH)).toHaveLength(1);
+  });
+
+  it("スケジュールが共有定数と一致する", () => {
+    expect(readCrons(REFERENCE_PATH)[0]?.schedule).toBe(REFERENCE_CRON);
+  });
+
+  it("rebuild_geo（pg_cron 19:30 UTC）より後に走る", () => {
+    // 近傍と行政区画がその日ぶん更新された状態を固めたい。**順番が意味を持つ**
+    const [minute, hour] = (readCrons(REFERENCE_PATH)[0]?.schedule ?? "").split(" ");
+    expect(Number(hour) * 60 + Number(minute)).toBeGreaterThan(19 * 60 + 30);
+  });
+
+  it("毎時のジョブと分が重ならない", () => {
+    const minute = readCrons(REFERENCE_PATH)[0]?.schedule.split(" ")[0];
+    expect(minute).not.toBe(readCrons(WEATHER_PATH)[0]?.schedule.split(" ")[0]);
+    expect(minute).not.toBe(readCrons(COMPACT_PATH)[0]?.schedule.split(" ")[0]);
+  });
+
+  it("属性同期（04:00 JST）と同じ時刻に重ならない", () => {
+    const reference = readCrons(REFERENCE_PATH)[0]?.schedule;
+    for (const cron of readCrons(SYNC_PATH_PREFIX)) {
+      expect(cron.schedule).not.toBe(reference);
     }
   });
 });

@@ -15,7 +15,7 @@ import os
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Final
 
 from fastapi import FastAPI, Request
@@ -25,6 +25,7 @@ from bikechance_ml import __version__
 from bikechance_ml.auth import is_authorized
 from bikechance_ml.config import MissingConfigError, read_config
 from bikechance_ml.io.supabase import SupabaseIo, open_supabase
+from bikechance_ml.jobs.build_reference import ReferencePort, build_and_upload, yesterday
 from bikechance_ml.jobs.compact import CompactPort, compact_hour
 from bikechance_ml.jobs.compact import to_detail as compact_detail
 from bikechance_ml.jobs.infer import InferPort, run_inference
@@ -52,6 +53,7 @@ KNOWN_SYSTEMS: Final[frozenset[str]] = frozenset({"hellocycling", "docomo-cycle"
 #: ほうだけを用意すればよく、本番はどちらにも同じ `SupabaseIo` を渡す。
 CompactPortFactory = Callable[[], AbstractContextManager[CompactPort]]
 InferPortFactory = Callable[[], AbstractContextManager[InferPort]]
+ReferencePortFactory = Callable[[], AbstractContextManager[ReferencePort]]
 
 
 @contextmanager
@@ -87,6 +89,7 @@ def parse_hour(text: str | None) -> datetime | None:
 def build_app(
     make_port: CompactPortFactory = _default_port,
     make_infer_port: InferPortFactory = _default_port,
+    make_reference_port: ReferencePortFactory = _default_port,
 ) -> FastAPI:
     """アプリを組み立てて返す。
 
@@ -146,6 +149,35 @@ def build_app(
         return JSONResponse(
             compact_detail(summary), status_code=200 if summary.ok else 500, headers=NO_STORE
         )
+
+    @app.get("/ml/reference")
+    def reference(request: Request, date_text: str | None = None) -> JSONResponse:
+        """日次の参照スナップショットを書く（W3 プラン §14.3）。
+
+        既定は**前日（JST）ぶん**。`rebuild_geo`（04:30 JST）の後に走らせるので、
+        その日の近傍と行政区画が入ったものが固まる。**同じパスに上書きする**ので、
+        何度実行しても結果は変わらない。
+        """
+        secret = os.environ.get("CRON_SECRET", "")
+        if not is_authorized(request.headers.get("authorization"), secret):
+            return _problem(401, "unauthorized", "CRON_SECRET が一致しません。")
+
+        now = datetime.now(UTC)
+        try:
+            day = date.fromisoformat(date_text) if date_text else yesterday(now)
+        except ValueError:
+            return _problem(400, "invalid_date", "date は YYYY-MM-DD（JST の暦日）です。")
+
+        try:
+            with make_reference_port() as port:
+                summary = build_and_upload(port, day, now)
+        except MissingConfigError as cause:
+            return _problem(500, "misconfigured", str(cause))
+        except Exception as cause:
+            print(f"未処理の例外: {type(cause).__name__}", file=sys.stderr)
+            return _problem(500, "unhandled", type(cause).__name__)
+
+        return JSONResponse(summary, status_code=200, headers=NO_STORE)
 
     @app.get("/ml/infer/{system}")
     def infer(request: Request, system: str) -> JSONResponse:
