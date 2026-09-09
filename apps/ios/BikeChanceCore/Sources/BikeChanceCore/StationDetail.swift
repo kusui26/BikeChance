@@ -6,11 +6,12 @@ import Foundation
 /// テストできる形にしておかないと、「未観測を 0 と出していないか」のような、
 /// 表示義務に直結する規則を機械で守れない。
 ///
-/// 守る規則は 4 つ（CLAUDE.md §2 の 7・8、データ辞書 §2）。
+/// 守る規則は 5 つ（CLAUDE.md §2 の 7・8、データ辞書 §2）。
 ///   * **未観測は「—」。0 台と区別する**
 ///   * **鮮度を超えた値は「現在値」として出さない**
 ///   * **停止中は台数があっても借りられない**ことを言葉で添える
 ///   * **ドコモの「容量」は固定のラック数ではない**ことを添える
+///   * **予測と現在値を混ぜない。** 予測は別の欄に置き、出せなければ台数だけを出す
 public struct StationDetail: Equatable, Sendable {
     /// 値が分からないときの表示。**0 と混同させない。**
     public static let unknownValue = "—"
@@ -20,12 +21,25 @@ public struct StationDetail: Equatable, Sendable {
     public let freshness: Freshness
     /// 借りられる／返せる。画面の一番上に大きく出す。
     public let availability: [Availability]
+    /// 到着時刻の予測（W4 の PR B）。**現在値とは別の情報**なので、欄を分ける。
+    public let forecast: ForecastState
     /// 容量・設置・座標など、観測ではない情報。
     public let facts: [Fact]
     /// そのポートのデータ提供元。**表示は義務**（CC BY 4.0）。
     public let credit: String?
 
-    public init(station: StationCurrent, feed: FeedStatus?, attribution: Attribution?, now: Date) {
+    /// - Parameters:
+    ///   - intent: 借りたいのか返したいのか。**予測はどちらか片方だけを出す。**
+    ///   - arrival: **応答が指している到着時刻**（`StationsResponse.forecastArrival`）。
+    ///     端末の時計から計算し直さない（W4 プラン §12 の 114）。nil なら予測を出さない。
+    public init(
+        station: StationCurrent,
+        feed: FeedStatus?,
+        attribution: Attribution?,
+        intent: RideIntent = .borrow,
+        arrival: Date? = nil,
+        now: Date
+    ) {
         let freshness = station.freshness(feed: feed, now: now)
         self.name = station.name ?? "（名称未取得）"
         self.systemName = feed?.displayName ?? station.systemID
@@ -43,6 +57,8 @@ public struct StationDetail: Equatable, Sendable {
                 caution: station.isReturning == false ? "返却停止中" : nil
             ),
         ]
+        self.forecast = ForecastState.make(
+            station: station, feed: feed, intent: intent, arrival: arrival)
         self.facts = Self.facts(station: station, feed: feed)
         self.credit = attribution?.credit
     }

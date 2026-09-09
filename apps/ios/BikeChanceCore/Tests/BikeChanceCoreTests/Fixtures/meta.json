@@ -1,26 +1,26 @@
 {
     "api_version": "v1",
-    "generated_at": "2026-09-08T01:43:36.907Z",
+    "generated_at": "2026-09-09T05:43:24.890Z",
     "stale": false,
-    "model_version": null,
+    "model_version": "baseline-b3-v0-20260908",
     "feeds": [
-        {
-            "system_id": "hellocycling",
-            "display_name": "HELLO CYCLING",
-            "data_updated_at": "2026-09-08T01:41:35.000Z",
-            "expected_cadence_s": 300,
-            "stale_after_s": 960,
-            "stale": false,
-            "capacity_is_dynamic": false
-        },
         {
             "system_id": "docomo-cycle",
             "display_name": "\u30c9\u30b3\u30e2\u30fb\u30d0\u30a4\u30af\u30b7\u30a7\u30a2",
-            "data_updated_at": "2026-09-08T01:43:05.000Z",
+            "data_updated_at": "2026-09-09T05:42:13.000Z",
             "expected_cadence_s": 81,
             "stale_after_s": 303,
             "stale": false,
             "capacity_is_dynamic": true
+        },
+        {
+            "system_id": "hellocycling",
+            "display_name": "HELLO CYCLING",
+            "data_updated_at": "2026-09-09T05:41:36.000Z",
+            "expected_cadence_s": 300,
+            "stale_after_s": 960,
+            "stale": false,
+            "capacity_is_dynamic": false
         }
     ],
     "attribution": [

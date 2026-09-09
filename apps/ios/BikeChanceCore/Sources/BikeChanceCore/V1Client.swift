@@ -23,17 +23,35 @@ public struct V1Client: Sendable {
         self.init(baseURL: baseURL, transport: { request in try await session.data(for: request) })
     }
 
-    /// 矩形の中のポートの現在値。
+    /// 矩形の中のポートの現在値と、指定した到着時刻の予測。
     ///
     /// **渡した矩形はそのまま送らない。** 上限まで縮めてから格子に丸める。細かい位置が
     /// 要求に載らず（CLAUDE.md §5）、近い要求が同じ URL になって CDN も効く。
-    public func stations(in bbox: Bbox, system: String? = nil) async throws -> StationsResponse {
+    ///
+    /// - Parameter at: 到着時刻。**渡さなければ予測は返らない**（「いまの確率」は現在値
+    ///   そのもの）。**相対の `in_min` ではなく絶対の時刻を送る**：応答は CDN に最大 3 分
+    ///   留まりうるので、相対で頼むと指している到着が読むたびにずれる（W4 プラン §12 の 114）。
+    public func stations(in bbox: Bbox, system: String? = nil, at: Date? = nil) async throws
+        -> StationsResponse
+    {
         let requested = bbox.clampedToRequestable().quantized()
         var items = [URLQueryItem(name: "bbox", value: requested.queryValue)]
         if let system {
             items.append(URLQueryItem(name: "system", value: system))
         }
+        if let at {
+            items.append(URLQueryItem(name: "at", value: V1Client.timestamp(at)))
+        }
         return try await get(path: "/v1/stations", query: items)
+    }
+
+    /// `at` に載せる時刻。**UTC の `Z` で書く。**
+    ///
+    /// サーバーはタイムゾーンを必須にしている（素の日時を UTC と決めつけないため）。
+    /// `+09:00` で書くと、クエリの中の `+` を `URLComponents` が符号化せずそのまま通し、
+    /// 受け手によっては空白として解釈される。**`Z` なら符号化の問題が起きない。**
+    static func timestamp(_ date: Date) -> String {
+        date.formatted(.iso8601)
     }
 
     /// データの鮮度・クレジット・通知文。

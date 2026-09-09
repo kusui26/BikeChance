@@ -7,20 +7,29 @@ import SwiftUI
 /// 「未観測は 0 と出さない」「鮮度切れの値を『現在値』として出さない」といった規則は
 /// `BikeChanceCore` 側でテストしている。
 ///
-/// **予測と履歴は出さない。** 予測は W4（`/v1` がまだ返さない）、履歴は W5
-/// （`/v1/stations/{id}` と同じ PR）。
+/// **予測は到着時刻を選んだときだけ出す**（W4 の PR B）。10 水平の曲線と履歴は W5
+/// （`/v1/stations/{system}/{id}` と同じ PR）。
+///
+/// **予測と現在値を混ぜない。** 欄を分け、予測が出せなくても台数は出す。
 struct StationDetailScreen: View {
     let station: StationCurrent
     let feed: FeedStatus?
     let attribution: Attribution?
+    let intent: RideIntent
+    /// **応答が指している到着時刻**（`StationsResponse.forecastArrival`）。nil なら予測を出さない。
+    let arrival: Date?
     let now: Date
 
     private var detail: StationDetail {
-        StationDetail(station: station, feed: feed, attribution: attribution, now: now)
+        StationDetail(
+            station: station, feed: feed, attribution: attribution, intent: intent,
+            arrival: arrival, now: now)
     }
 
     var body: some View {
         List {
+            // **確率が主、台数は従**（CLAUDE.md §2 の 7）。出せるときは先に置く
+            forecastSection
             availabilitySection
             factsSection
             creditSection
@@ -28,6 +37,59 @@ struct StationDetailScreen: View {
         .listStyle(.insetGrouped)
         .navigationTitle(detail.name)
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// 到着時刻の確率。**断定しない**（「借りられます」ではなく「借りられる可能性 80%」）。
+    ///
+    /// 出せないときも欄は出す。**「出せない」ことを伝えるのも情報**で、黙って消すと
+    /// 「予測が無い」のか「そもそも選んでいない」のかが分からない。
+    @ViewBuilder
+    private var forecastSection: some View {
+        switch detail.forecast {
+        case .notRequested:
+            EmptyView()
+        case .available(let display):
+            Section {
+                forecastBody(display)
+            } header: {
+                Text(display.arrival)
+            } footer: {
+                Label(display.basis, systemImage: "chart.line.uptrend.xyaxis")
+            }
+        case .unavailable(let message):
+            Section {
+                Label(message, systemImage: "questionmark.circle")
+                    .foregroundStyle(.secondary)
+                    .font(.subheadline)
+            } footer: {
+                Text("下の台数は予測ではなく、いまの観測値です。")
+            }
+        }
+    }
+
+    private func forecastBody(_ display: ForecastDisplay) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(display.headline)
+                .font(.system(.title2, design: .rounded).weight(.semibold))
+                .foregroundStyle(display.band.textColor)
+            HStack(spacing: 8) {
+                Text(display.band.label)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                if display.isReference {
+                    // 確度が低い（新設ポート・鮮度不良・再配置直後）。数字を鵜呑みにさせない
+                    Text("参考値")
+                        .font(.caption2.weight(.medium))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.quaternary, in: Capsule())
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(display.accessibilityLabel)
     }
 
     /// 借りられる／返せる。**実測値なので、観測時刻を必ず添える**（CLAUDE.md §2 の 7）。

@@ -14,7 +14,7 @@ struct MarkerSelectionTests {
             systemID: "t", stationID: id, name: id, latitude: lat, longitude: lon,
             capacity: 10, bikes: 1, docks: 1, isInstalled: true, isRenting: true,
             isReturning: true, isPresent: true, observedAt: nil,
-            lastChangedAt: Date(timeIntervalSince1970: 0)
+            lastChangedAt: Date(timeIntervalSince1970: 0), forecast: nil
         )
     }
 

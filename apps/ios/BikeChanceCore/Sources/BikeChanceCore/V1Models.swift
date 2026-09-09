@@ -22,6 +22,9 @@ public struct StationCurrent: Decodable, Hashable, Sendable, Identifiable {
     public let isPresent: Bool
     public let observedAt: Date?
     public let lastChangedAt: Date
+    /// 到着時刻の予測。**`at` を送らなければ nil**（「いまの確率」は現在値そのもの）。
+    /// 送っても nil になることがある（予測が無い・観測が古い）。**理由は返らない。**
+    public let forecast: StationForecast?
 
     /// システムをまたいで一意。`station_id` はシステム内でしか一意でない。
     public var id: String { "\(systemID)/\(stationID)" }
@@ -41,6 +44,40 @@ public struct StationCurrent: Decodable, Hashable, Sendable, Identifiable {
         case isPresent = "is_present"
         case observedAt = "observed_at"
         case lastChangedAt = "last_changed_at"
+        case forecast
+    }
+}
+
+/// 1 ポート・1 到着時刻ぶんの予測（W4 の PR A）。
+///
+/// **確率が指すのは `StationsResponse.generatedAt ＋ forecastInMinutes` の時刻**であって、
+/// 端末が受け取った時刻ではない。応答は CDN に最大 3 分留まりうるので、**画面には
+/// 「約 30 分後」ではなく到着の時刻を出す**（W4 プラン §12 の 114）。
+public struct StationForecast: Decodable, Hashable, Sendable {
+    /// 借りられる確率（0〜1）。
+    public let rentProbability: Double
+    /// 返せる確率（0〜1）。
+    public let returnProbability: Double
+    /// 0〜3。**1 以下は「参考値」**として出す（開発プラン §9.3）。
+    public let confidence: Int
+    /// **この予測が基づく観測の時刻。** 「○時○分時点の予測」に使う（開発プラン §9.2）。
+    public let baseObservedAt: Date
+    public let modelVersion: String
+
+    private enum CodingKeys: String, CodingKey {
+        case rentProbability = "p_bike"
+        case returnProbability = "p_dock"
+        case confidence
+        case baseObservedAt = "base_observed_at"
+        case modelVersion = "model_version"
+    }
+
+    /// 利用者が見たいほうの確率。**借りると返すは別の数**で、混ぜない。
+    public func probability(for intent: RideIntent) -> Double {
+        switch intent {
+        case .borrow: rentProbability
+        case .returnBike: returnProbability
+        }
     }
 }
 
@@ -108,6 +145,11 @@ public struct StationsResponse: Decodable, Equatable, Sendable {
     public let bbox: BboxEnvelope
     public let count: Int
     public let isStale: Bool
+    /// 予測を出した到着（**5 分に丸めた後**の分数）。`at` を送らなければ nil。
+    ///
+    /// **確率が指すのは `generatedAt` からこの分数だけ先**である。端末が受け取った時刻
+    /// からではない（W4 プラン §12 の 114）。
+    public let forecastInMinutes: Int?
     public let feeds: [FeedStatus]
     public let stations: [StationCurrent]
     public let attribution: [Attribution]
@@ -118,9 +160,15 @@ public struct StationsResponse: Decodable, Equatable, Sendable {
         case bbox
         case count
         case isStale = "stale"
+        case forecastInMinutes = "forecast_in_min"
         case feeds
         case stations
         case attribution
+    }
+
+    /// この応答の確率が指している時刻。**表示に使うのは「約 N 分後」ではなくこれ。**
+    public var forecastArrival: Date? {
+        forecastInMinutes.map { generatedAt.addingTimeInterval(TimeInterval($0 * 60)) }
     }
 }
 

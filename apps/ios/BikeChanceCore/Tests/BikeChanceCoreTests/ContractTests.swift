@@ -74,8 +74,8 @@ struct ContractTests {
         #expect(meta.attribution.count == 2)
         #expect(meta.notice.contains("公共交通事業者への直接の問合せは行わないでください"))
         #expect(meta.disclaimer.contains("独自に予測"))
-        // W2 時点でモデルは無い
-        #expect(meta.modelVersion == nil)
+        // W4 の PR A から、いま配信している版が入る（それまでは常に nil だった）
+        #expect(meta.modelVersion?.isEmpty == false)
     }
 
     @Test("鮮度の閾値が応答に入っている（端末で同じ判定ができる）")
@@ -148,6 +148,127 @@ struct ContractTests {
             now: response.generatedAt)
         let capacity = try #require(detail.facts.first { $0.label == "容量" })
         #expect(capacity.note?.contains("固定の台数ではなく") == true)
+    }
+
+    // ── 予測（W4 の PR A・PR B）────────────────────────────
+    @Test("**到着を頼まなければ予測は入らない**（応答の形が W2 のまま）")
+    func withoutAnArrivalThereIsNoForecast() throws {
+        let response = try Self.decode(StationsResponse.self, "stations")
+        #expect(response.forecastInMinutes == nil)
+        #expect(response.forecastArrival == nil)
+        #expect(response.stations.allSatisfy { $0.forecast == nil })
+    }
+
+    @Test("**`at` を送った応答から予測を読める**")
+    func decodesTheForecast() throws {
+        let response = try Self.decode(StationsResponse.self, "stations_arrival")
+        let minutes = try #require(response.forecastInMinutes)
+        #expect(minutes >= Arrival.minMinutes && minutes <= Arrival.maxMinutes)
+        #expect(minutes % Arrival.stepMinutes == 0)
+        // このフィクスチャは全ポートに予測が付いている（本番の実測で 99% 台）
+        #expect(response.stations.allSatisfy { $0.forecast != nil })
+        let forecast = try #require(response.stations.first?.forecast)
+        #expect((0...1).contains(forecast.rentProbability))
+        #expect((0...1).contains(forecast.returnProbability))
+        #expect((0...3).contains(forecast.confidence))
+        #expect(!forecast.modelVersion.isEmpty)
+    }
+
+    @Test("**確率が指す時刻は `generated_at ＋ forecast_in_min`**（§12 の 114）")
+    func theForecastPointsAtAnAbsoluteTime() throws {
+        let response = try Self.decode(StationsResponse.self, "stations_arrival")
+        let arrival = try #require(response.forecastArrival)
+        let minutes = try #require(response.forecastInMinutes)
+        #expect(arrival == response.generatedAt.addingTimeInterval(TimeInterval(minutes * 60)))
+        // 予測の基準になった観測は、応答よりも前
+        for station in response.stations {
+            guard let forecast = station.forecast else { continue }
+            #expect(forecast.baseObservedAt <= response.generatedAt)
+            #expect(arrival > forecast.baseObservedAt)
+        }
+    }
+
+    @Test("**到着時刻を変えると確率が変わる**（本番の 2 応答で確かめる）")
+    func theProbabilityDependsOnTheArrival() throws {
+        let near = try Self.decode(StationsResponse.self, "stations_arrival")
+        let far = try Self.decode(StationsResponse.self, "stations_arrival_late")
+        #expect(near.forecastInMinutes != far.forecastInMinutes)
+        let farByID = Dictionary(far.stations.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let compared = near.stations.compactMap { station -> (Double, Double)? in
+            guard let here = station.forecast?.rentProbability,
+                let there = farByID[station.id]?.forecast?.rentProbability
+            else { return nil }
+            return (here, there)
+        }
+        #expect(compared.count > 10, "比べられるポートが少なすぎる")
+        // **同じポート・同じ指標で、到着が違えば値も違う。** 同じなら補間か起点が壊れている
+        #expect(compared.allSatisfy { $0.0 != $0.1 })
+    }
+
+    @Test("**実応答から予測の表示を作れる**（全ポートで出せる）")
+    func buildsTheForecastDisplayFromTheRealResponse() throws {
+        let response = try Self.decode(StationsResponse.self, "stations_arrival")
+        let feeds = response.feedIndex()
+        let arrival = try #require(response.forecastArrival)
+        for station in response.stations {
+            for intent in RideIntent.allCases {
+                let state = ForecastState.make(
+                    station: station, feed: feeds[station.systemID], intent: intent,
+                    arrival: arrival)
+                let display = try #require(state.display, "\(station.id) の予測が出せない")
+                #expect(display.percent >= 0 && display.percent <= ForecastDisplay.maxPercent)
+                #expect(display.headline.contains("可能性"))
+                #expect(display.arrival.hasSuffix("到着"))
+                #expect(display.basis.hasSuffix("時点の観測にもとづく予測"))
+            }
+        }
+    }
+
+    @Test("**予測の無いポートでも行は返り、台数は出る**（本番の実データ）")
+    func stationsWithoutAForecastKeepTheirCounts() throws {
+        // このフィクスチャの 2 件は貸出も返却も止まっているポート（W3 プラン §12 の 109）。
+        // サーバーは行を返し、予測だけを null にする（W4-02）
+        let response = try Self.decode(StationsResponse.self, "stations_partial_forecast")
+        #expect(response.forecastInMinutes != nil)
+        let missing = response.stations.filter { $0.forecast == nil }
+        let present = response.stations.filter { $0.forecast != nil }
+        #expect(!missing.isEmpty, "予測の無いポートがフィクスチャに無い")
+        #expect(!present.isEmpty, "予測のあるポートがフィクスチャに無い")
+
+        let feeds = response.feedIndex()
+        let arrival = try #require(response.forecastArrival)
+        for station in missing {
+            let detail = StationDetail(
+                station: station, feed: feeds[station.systemID], attribution: nil,
+                arrival: arrival, now: response.generatedAt)
+            // **「いまは予測できません」と出す。理由は言わない**
+            #expect(detail.forecast == .unavailable(ForecastState.unavailableText))
+            // **台数は出る**（現在値は別の情報）
+            #expect(detail.facts.first { $0.label == "座標" } != nil)
+            #expect(detail.availability.count == 2)
+        }
+    }
+
+    @Test("**予測を出しても台数の表示は変わらない**（混ぜていない）")
+    func theForecastDoesNotDisturbTheCounts() throws {
+        let plain = try Self.decode(StationsResponse.self, "stations")
+        let withForecast = try Self.decode(StationsResponse.self, "stations_arrival")
+        let feeds = withForecast.feedIndex()
+        let arrival = withForecast.forecastArrival
+        let byID = Dictionary(plain.stations.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        for station in withForecast.stations {
+            guard let before = byID[station.id] else { continue }
+            let detail = StationDetail(
+                station: station, feed: feeds[station.systemID], attribution: nil,
+                arrival: arrival, now: withForecast.generatedAt)
+            let plainDetail = StationDetail(
+                station: before, feed: feeds[before.systemID], attribution: nil,
+                now: plain.generatedAt)
+            // 台数は観測が進めば変わるので、**「出す／出さない」の判断が同じ**ことを見る
+            #expect(
+                (detail.availability[0].value == StationDetail.unknownValue)
+                    == (plainDetail.availability[0].value == StationDetail.unknownValue))
+        }
     }
 
     @Test("Problem Details をデコードできる")
