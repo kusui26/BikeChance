@@ -353,3 +353,155 @@ struct AutoRefreshTests {
         #expect(StationsModel.refreshInterval == 60)
     }
 }
+
+/// 到着時刻の選択（W4 の PR B）。
+///
+/// **主題は「いつ投げ直すか」。** 到着が変われば URL が変わるので取り直す。
+/// **借りる／返すは応答に両方入っている**ので、切り替えても取りに行かない。
+@MainActor
+@Suite("到着時刻の選択")
+struct ArrivalSelectionTests {
+    /// 2026-09-09 14:03:20 JST。**格子から外れた時刻**を基準にする。
+    let now = Date(timeIntervalSince1970: 1_788_930_200)
+    let tokyo = Bbox(west: 139.76, south: 35.67, east: 139.78, north: 35.69)
+
+    final class Clock: @unchecked Sendable {
+        var now: Date
+        init(_ now: Date) { self.now = now }
+        func advance(_ seconds: TimeInterval) { now += seconds }
+    }
+
+    final class Recorder: @unchecked Sendable {
+        var queries: [String] = []
+        /// 直近の要求に載った `at`。無ければ nil。
+        var lastAt: String? {
+            guard let query = queries.last else { return nil }
+            return URLComponents(string: "https://x/?\(query)")?
+                .queryItems?.first { $0.name == "at" }?.value
+        }
+    }
+
+    func make() throws -> (StationsModel, Clock, Recorder) {
+        let clock = Clock(now)
+        let recorder = Recorder()
+        let body = try ContractTests.fixture("stations_arrival")
+        let client = V1Client(baseURL: URL(string: "https://example.test")!) { request in
+            recorder.queries.append(request.url?.query ?? "")
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (body, response)
+        }
+        return (StationsModel(client: client, clock: { clock.now }), clock, recorder)
+    }
+
+    func settle(_ recorder: Recorder, until count: Int) async {
+        for _ in 0..<200 {
+            if recorder.queries.count >= count { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+
+    @Test("**既定は「いま」で、`at` を送らない**（応答の形が W2 のまま）")
+    func theDefaultAsksForNoForecast() async throws {
+        let (model, _, recorder) = try make()
+        #expect(model.arrival == .now)
+        model.viewportChanged(to: tokyo)
+        await settle(recorder, until: 1)
+        #expect(recorder.lastAt == nil)
+    }
+
+    @Test("**到着を選ぶと取り直す**（URL が変わる）")
+    func choosingAnArrivalReloads() async throws {
+        let (model, _, recorder) = try make()
+        model.viewportChanged(to: tokyo)
+        await settle(recorder, until: 1)
+
+        model.select(arrival: .later(minutes: 30))
+        await settle(recorder, until: 2)
+        #expect(recorder.queries.count == 2)
+        #expect(recorder.lastAt != nil)
+    }
+
+    @Test("**送るのは絶対の時刻**（相対だと CDN から返った応答が別の到着を指す）")
+    func sendsAnAbsoluteTimestamp() async throws {
+        let (model, _, recorder) = try make()
+        model.viewportChanged(to: tokyo)
+        await settle(recorder, until: 1)
+        model.select(arrival: .later(minutes: 30))
+        await settle(recorder, until: 2)
+
+        let at = try #require(recorder.lastAt)
+        // 14:03:20 JST の 30 分後を 5 分の格子に丸めた 14:35 JST ＝ 05:35 UTC
+        #expect(at == "2026-09-09T05:35:00Z")
+        // in_min は送らない（相対の指定はキャッシュと相性が悪い。§12 の 114）
+        #expect(recorder.queries.last?.contains("in_min") == false)
+    }
+
+    @Test("同じ到着を選び直しても投げ直さない")
+    func choosingTheSameArrivalIsANoOp() async throws {
+        let (model, _, recorder) = try make()
+        model.viewportChanged(to: tokyo)
+        await settle(recorder, until: 1)
+        model.select(arrival: .later(minutes: 30))
+        await settle(recorder, until: 2)
+
+        model.select(arrival: .later(minutes: 30))
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(recorder.queries.count == 2)
+    }
+
+    @Test("**借りる／返すの切替では取りに行かない**（応答に両方入っている）")
+    func switchingTheIntentDoesNotRefetch() async throws {
+        let (model, _, recorder) = try make()
+        model.viewportChanged(to: tokyo)
+        await settle(recorder, until: 1)
+
+        model.intent = .returnBike
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(recorder.queries.count == 1)
+        #expect(model.intent == .returnBike)
+    }
+
+    @Test("**時計が進めば次の格子を頼む**（開いたまま置かれても「30 分後」を指し続ける）")
+    func theArrivalFollowsTheClock() async throws {
+        let (model, clock, recorder) = try make()
+        model.viewportChanged(to: tokyo)
+        await settle(recorder, until: 1)
+        model.select(arrival: .later(minutes: 30))
+        await settle(recorder, until: 2)
+        let first = try #require(recorder.lastAt)
+
+        // 5 分進めれば、格子も 1 つ先へ動く
+        clock.advance(300)
+        #expect(model.refreshIfDue())
+        await settle(recorder, until: 3)
+        let second = try #require(recorder.lastAt)
+        #expect(second != first)
+        #expect(second == "2026-09-09T05:40:00Z")
+    }
+
+    @Test("到着を選んでも、まだ矩形が無ければ投げない")
+    func doesNotRequestBeforeTheFirstViewport() async throws {
+        let (model, _, recorder) = try make()
+        model.select(arrival: .later(minutes: 30))
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(recorder.queries.isEmpty)
+        // 選択そのものは覚えておく。矩形が来たときに効く
+        #expect(model.arrival == .later(minutes: 30))
+    }
+
+    @Test("「いま」に戻せば `at` を送らなくなる")
+    func goingBackToNowDropsTheParameter() async throws {
+        let (model, _, recorder) = try make()
+        model.viewportChanged(to: tokyo)
+        await settle(recorder, until: 1)
+        model.select(arrival: .later(minutes: 30))
+        await settle(recorder, until: 2)
+        #expect(recorder.lastAt != nil)
+
+        model.select(arrival: .now)
+        await settle(recorder, until: 3)
+        #expect(recorder.lastAt == nil)
+    }
+}

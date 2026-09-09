@@ -4,8 +4,12 @@ import SwiftUI
 
 /// ホーム。現在地周辺のポートを地図に出す。
 ///
-/// **W2 の範囲は実測値だけ**（予測は W4）。値には必ず観測時刻を添え、フィードが滞って
-/// いれば「現在値」として出さない（CLAUDE.md §2 の 7・8）。
+/// 値には必ず観測時刻を添え、フィードが滞っていれば「現在値」として出さない
+/// （CLAUDE.md §2 の 7・8）。
+///
+/// **現在値の色と予測の色を混ぜない**（W4 の PR B）。到着時刻を選んでいなければ現在値の
+/// 色（借りられる／返せる）で塗り、選べば**その時刻の確率の帯**で塗る。1 枚の地図に
+/// 2 つの意味の色が同時に出ることはない。
 ///
 /// 位置情報の許可が無くても使える。初回は東京駅を中心に置き、あとは地図の操作で完結する
 /// （App Store 審査ガイドライン 5.1.2、開発プラン §9.2）。
@@ -20,6 +24,9 @@ struct MapScreen: View {
     @State private var selected: StationCurrent?
     @State private var showsCredits = false
     @State private var now = Date()
+    /// **いま出している応答が指している到着時刻。** 端末の時計から計算し直さない
+    /// （応答は CDN に留まりうる。W4 プラン §12 の 114）。
+    @State private var forecastArrival: Date?
 
     /// 東京駅まわり。**約 0.02 度四方**で、件数の上限にも表示上限にも余裕がある。
     static let initialRegion = MKCoordinateRegion(
@@ -46,6 +53,8 @@ struct MapScreen: View {
                         station: latest,
                         feed: feeds[latest.systemID],
                         attribution: attributions[latest.systemID],
+                        intent: model.intent,
+                        arrival: forecastArrival,
                         now: now
                     )
                 }
@@ -74,7 +83,14 @@ struct MapScreen: View {
         .onMapCameraChange(frequency: .onEnd) { context in
             model.viewportChanged(to: Bbox(region: context.region))
         }
-        .safeAreaInset(edge: .top) { StatusBanner(state: model.state, now: now) }
+        .safeAreaInset(edge: .top) {
+            VStack(spacing: 8) {
+                StatusBanner(state: model.state, now: now)
+                ArrivalBar(
+                    arrival: model.arrival, intent: $model.intent, now: now,
+                    select: { model.select(arrival: $0) })
+            }
+        }
         .safeAreaInset(edge: .bottom) { CreditFooter(showsCredits: $showsCredits) }
         .sheet(isPresented: $showsCredits) { CreditsScreen() }
         .onChange(of: model.state) { _, state in apply(state) }
@@ -105,6 +121,9 @@ struct MapScreen: View {
         }
         feeds = response.feedIndex()
         attributions = response.attributionIndex()
+        // **応答が指している到着時刻を持つ。** 選択中の到着ではない（取り直しの最中は
+        // まだ前の応答が出ており、ピンの色はそちらの時刻の話をしている）
+        forecastArrival = response.forecastArrival
         let center = response.bbox.bbox
         visible = MarkerSelection.nearest(
             response.stations,
@@ -113,11 +132,20 @@ struct MapScreen: View {
         )
     }
 
-    /// マーカーの色。**予測の色ではない**（W4 まで確率は出さない）。
+    /// マーカーの色。**到着を選んでいれば確率の帯、選んでいなければ現在値。**
     ///
-    /// 借りられる／返せるだけを区別する。分からないもの（未観測・鮮度切れ）は灰色にして、
-    /// 「現在値」として読ませない。
+    /// 分からないもの（未観測・鮮度切れ・予測が出せない）はどちらの場合も灰色にして、
+    /// 「現在値」としても「予測」としても読ませない。
     private func tint(for station: StationCurrent) -> Color {
+        guard let arrival = forecastArrival else { return currentTint(for: station) }
+        let state = ForecastState.make(
+            station: station, feed: feeds[station.systemID], intent: model.intent,
+            arrival: arrival)
+        return state.band?.color ?? .gray
+    }
+
+    /// 現在値の色。借りられる／返せるだけを区別する。
+    private func currentTint(for station: StationCurrent) -> Color {
         guard station.freshness(feed: feeds[station.systemID], now: now).isPresentable else {
             return .gray
         }
@@ -126,6 +154,27 @@ struct MapScreen: View {
         case (true?, _): return .blue
         case (_, true?): return .orange
         default: return .red
+        }
+    }
+}
+
+extension ProbabilityBand {
+    /// 地図のピンの色（開発プラン §9.3 の表）。**判断は `BikeChanceCore` にあり、ここは色だけ。**
+    var color: Color {
+        switch self {
+        case .high: .green
+        case .medium: .yellow
+        case .low: .red
+        }
+    }
+
+    /// 文字に使う色。**中を橙にする**のは、黄色の文字が白地の上で読めないため。
+    /// ピンは色面なので黄でよく、文字は線なので同じ色では細くて消える。
+    var textColor: Color {
+        switch self {
+        case .high: .green
+        case .medium: .orange
+        case .low: .red
         }
     }
 }

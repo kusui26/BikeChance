@@ -45,7 +45,8 @@ struct FreshnessTests {
             isReturning: isReturning,
             isPresent: isPresent,
             observedAt: observedAgo.map { now.addingTimeInterval(-$0) },
-            lastChangedAt: now
+            lastChangedAt: now,
+            forecast: nil
         )
     }
 

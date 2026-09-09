@@ -18,6 +18,14 @@ public final class StationsModel {
     }
 
     public private(set) var state: State = .idle
+
+    /// いつ着くか。**既定は「いま」＝予測を頼まない**（応答の形も大きさも W2 のまま）。
+    public private(set) var arrival: ArrivalChoice = .now
+
+    /// 借りたいのか返したいのか。**確率が変わるだけで、要求は変わらない**
+    /// （応答に両方の確率が入っている）。切り替えても取りに行かない。
+    public var intent: RideIntent = .borrow
+
     private let client: V1Client
     private let clock: @Sendable () -> Date
     /// 直前に要求した矩形。**同じ矩形なら投げ直さない**（地図の微動で無駄に叩かない）。
@@ -68,6 +76,16 @@ public final class StationsModel {
         reload(bbox: lastRequested)
     }
 
+    /// 到着時刻が変わった。**URL が変わるので取り直す。**
+    ///
+    /// 利用者の操作なので**静かにはしない**（`loading` を出し、失敗も伝える）。地図の
+    /// ピンは前の応答のまま残り、新しい応答が来たときに一度に切り替わる。
+    public func select(arrival choice: ArrivalChoice) {
+        guard choice != arrival else { return }
+        arrival = choice
+        reloadCurrent()
+    }
+
     /// 画面を開いたまま置かれたときの自動再取得（W3 プラン §12 の 107）。
     ///
     /// **時刻を進めるだけでは値は新しくならない。** 地図を動かさない利用者には、
@@ -98,9 +116,12 @@ public final class StationsModel {
         task?.cancel()
         lastRequestedAt = clock()
         if !silently { state = .loading }
+        // **到着時刻は投げる瞬間に決める。** 5 分の格子に丸めるので、時計が進めば
+        // 次の格子に移る。開いたまま置かれても、予測は「いまから N 分後」を指し続ける
+        let at = arrival.at(now: clock())
         task = Task { [client] in
             do {
-                let response = try await client.stations(in: bbox)
+                let response = try await client.stations(in: bbox, at: at)
                 guard !Task.isCancelled else { return }
                 state = .loaded(response)
             } catch let error as V1Error {

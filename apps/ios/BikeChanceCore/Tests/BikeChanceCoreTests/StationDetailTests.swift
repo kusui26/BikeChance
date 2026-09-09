@@ -33,7 +33,8 @@ struct StationDetailTests {
         docks: Int? = 7,
         isInstalled: Bool? = true,
         isRenting: Bool? = true,
-        isReturning: Bool? = true
+        isReturning: Bool? = true,
+        forecast: StationForecast? = nil
     ) -> StationCurrent {
         StationCurrent(
             systemID: "hellocycling",
@@ -49,7 +50,8 @@ struct StationDetailTests {
             isReturning: isReturning,
             isPresent: isPresent,
             observedAt: observedAgo.map { now.addingTimeInterval(-$0) },
-            lastChangedAt: now
+            lastChangedAt: now,
+            forecast: forecast
         )
     }
 
@@ -64,14 +66,28 @@ struct StationDetailTests {
     func detail(
         _ station: StationCurrent? = nil,
         feed: FeedStatus? = nil,
-        attribution: Attribution? = nil
+        attribution: Attribution? = nil,
+        intent: RideIntent = .borrow,
+        arrival: Date? = nil
     ) -> StationDetail {
         StationDetail(
             station: station ?? self.station(),
             feed: feed ?? self.feed(),
             attribution: attribution,
+            intent: intent,
+            arrival: arrival,
             now: now
         )
+    }
+
+    /// 30 分後に着く、という指定。**応答が指している時刻**を渡す。
+    var arrival: Date { now.addingTimeInterval(30 * 60) }
+
+    func forecast(bike: Double = 0.8, dock: Double = 0.4, confidence: Int = 3) -> StationForecast {
+        StationForecast(
+            rentProbability: bike, returnProbability: dock, confidence: confidence,
+            baseObservedAt: now.addingTimeInterval(-120),
+            modelVersion: "baseline-b3-v0-20260908")
     }
 
     func fact(_ detail: StationDetail, _ label: String) -> Fact? {
@@ -227,6 +243,7 @@ struct StationDetailTests {
             bbox: BboxEnvelope(west: 139.7, south: 35.6, east: 139.8, north: 35.7),
             count: 0,
             isStale: false,
+            forecastInMinutes: nil,
             feeds: [],
             stations: [],
             attribution: [attribution]
@@ -241,5 +258,63 @@ struct StationDetailTests {
         let result = detail()
         #expect(Set(result.availability.map(\.id)).count == result.availability.count)
         #expect(Set(result.facts.map(\.id)).count == result.facts.count)
+    }
+}
+
+/// 詳細画面の予測（W4 の PR B）。
+///
+/// **主題は「予測と現在値を混ぜないこと」。** 予測が出せなくても台数は出るし、
+/// 台数が出せなくても予測は出る。片方の欠けがもう片方を消してはいけない。
+@Suite("ポート詳細の予測")
+struct StationDetailForecastTests {
+    let base = StationDetailTests()
+
+    @Test("**到着を選んでいなければ予測の欄は出ない**")
+    func noArrivalMeansNoForecastSection() {
+        #expect(base.detail().forecast == .notRequested)
+    }
+
+    @Test("到着を選べば確率が出る")
+    func showsTheProbabilityForTheArrival() throws {
+        let station = base.station(forecast: base.forecast())
+        let display = try #require(
+            base.detail(station, arrival: base.arrival).forecast.display)
+        #expect(display.headline == "借りられる可能性 80%")
+    }
+
+    @Test("借りる／返すで見る数が変わる")
+    func theIntentPicksTheProbability() throws {
+        let station = base.station(forecast: base.forecast(bike: 0.8, dock: 0.4))
+        let borrow = try #require(base.detail(station, arrival: base.arrival).forecast.display)
+        let giveBack = try #require(
+            base.detail(station, intent: .returnBike, arrival: base.arrival).forecast.display)
+        #expect(borrow.percent == 80)
+        #expect(giveBack.percent == 40)
+    }
+
+    @Test("**予測が無くても台数は出す**（現在値は別の情報）")
+    func theCountsSurviveAMissingForecast() {
+        let result = base.detail(base.station(forecast: nil), arrival: base.arrival)
+        #expect(result.forecast == .unavailable(ForecastState.unavailableText))
+        #expect(result.availability[0].value == "3")
+        #expect(result.availability[1].value == "7")
+    }
+
+    @Test("**台数が出せなくても予測は出す**（鮮度切れでも予測は別に判定する）")
+    func theForecastSurvivesUnknownCounts() throws {
+        // 未観測のポート。台数は「—」になるが、予測が来ていれば出す
+        let station = base.station(bikes: nil, docks: nil, forecast: base.forecast())
+        let result = base.detail(station, arrival: base.arrival)
+        #expect(result.availability[0].value == StationDetail.unknownValue)
+        #expect(try #require(result.forecast.display).percent == 80)
+    }
+
+    @Test("停止中でも予測の欄は独立している（サーバーが出さない側で決まる）")
+    func aStoppedStationStillHasItsOwnForecastRule() {
+        // 貸出停止のポートには、そもそもサーバーが予測を作らない（is_predictable）
+        let station = base.station(isRenting: false, forecast: nil)
+        let result = base.detail(station, arrival: base.arrival)
+        #expect(result.availability[0].caution == "貸出停止中")
+        #expect(result.forecast == .unavailable(ForecastState.unavailableText))
     }
 }

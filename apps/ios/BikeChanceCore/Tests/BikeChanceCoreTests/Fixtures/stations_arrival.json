@@ -1,6 +1,6 @@
 {
     "api_version": "v1",
-    "generated_at": "2026-09-09T05:43:24.114Z",
+    "generated_at": "2026-09-09T05:43:24.472Z",
     "bbox": {
         "west": 139.76,
         "south": 35.67,
@@ -9,7 +9,7 @@
     },
     "count": 47,
     "stale": false,
-    "forecast_in_min": null,
+    "forecast_in_min": 30,
     "feeds": [
         {
             "system_id": "docomo-cycle",
@@ -46,7 +46,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:34:10.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.995,
+                "p_dock": 0.974,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -63,7 +69,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:26:06.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 0.982,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -80,7 +92,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:23:26.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.999,
+                "p_dock": 0.006,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -97,7 +115,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:40:52.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -114,7 +138,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:38:11.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -131,7 +161,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:42:13.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.996,
+                "p_dock": 0.996,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -148,7 +184,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T04:29:31.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 0.996,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -165,7 +207,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:22:05.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.997,
+                "p_dock": 0.969,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -182,7 +230,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:35:30.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.114,
+                "p_dock": 0.006,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -199,7 +253,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:39:31.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -216,7 +276,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:42:13.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.989,
+                "p_dock": 0.996,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -233,7 +299,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:42:13.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 0.996,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -250,7 +322,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:39:31.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.857,
+                "p_dock": 0.919,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -267,7 +345,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:38:11.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.997,
+                "p_dock": 0.028,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -284,7 +368,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-08T23:30:38.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 0.032,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -301,7 +391,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:39:31.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 0.845,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -318,7 +414,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:40:52.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.997,
+                "p_dock": 0.979,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -335,7 +437,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:42:13.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.966,
+                "p_dock": 0.995,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -352,7 +460,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:40:52.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -369,7 +483,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:30:07.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 0.028,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -386,7 +506,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:40:52.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -403,7 +529,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:23:26.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 0.032,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -420,7 +552,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:39:31.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -437,7 +575,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:42:13.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.996,
+                "p_dock": 0.996,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -454,7 +598,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T02:59:38.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.989,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -471,7 +621,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T04:17:20.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 0.028,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -488,7 +644,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:34:10.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.996,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -505,7 +667,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:36:50.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.997,
+                "p_dock": 0.996,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -522,7 +690,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:04:36.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.996,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -539,7 +713,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:22:05.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.96,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -556,7 +736,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T04:40:21.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.47,
+                "p_dock": 0.998,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -573,7 +759,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:42:13.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 0.032,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -590,7 +782,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T04:52:31.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.996,
+                "p_dock": 0.032,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -607,7 +805,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:40:52.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 0.919,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -624,7 +828,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:40:52.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.418,
+                "p_dock": 0.011,
+                "confidence": 3,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -641,7 +851,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:40:52.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.999,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -658,7 +874,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:39:31.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.877,
+                "p_dock": 0.996,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -675,7 +897,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:42:13.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.851,
+                "p_dock": 0.985,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -692,7 +920,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T03:44:37.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.54,
+                "p_dock": 0.963,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -709,7 +943,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:31:28.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.991,
+                "p_dock": 0.915,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -726,7 +966,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:42:13.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.877,
+                "p_dock": 0.978,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -743,7 +989,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:32:49.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -760,7 +1012,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:38:11.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "docomo-cycle",
@@ -777,7 +1035,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:42:13.000Z",
             "last_changed_at": "2026-09-09T05:32:49.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.998,
+                "p_dock": 1,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:39:31.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "hellocycling",
@@ -794,7 +1058,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:41:36.000Z",
             "last_changed_at": "2026-09-09T04:06:34.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.961,
+                "p_dock": 0.868,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:36:36.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "hellocycling",
@@ -811,7 +1081,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:41:36.000Z",
             "last_changed_at": "2026-09-09T00:01:38.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.996,
+                "p_dock": 0.057,
+                "confidence": 2,
+                "base_observed_at": "2026-09-09T05:36:36.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         },
         {
             "system_id": "hellocycling",
@@ -828,7 +1104,13 @@
             "is_present": true,
             "observed_at": "2026-09-09T05:41:36.000Z",
             "last_changed_at": "2026-09-09T03:01:36.000Z",
-            "forecast": null
+            "forecast": {
+                "p_bike": 0.996,
+                "p_dock": 0.057,
+                "confidence": 3,
+                "base_observed_at": "2026-09-09T05:36:36.000Z",
+                "model_version": "baseline-b3-v0-20260908"
+            }
         }
     ],
     "attribution": [
