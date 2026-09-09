@@ -21,7 +21,7 @@ export const STATION_COLUMNS =
   "system_id,station_id,name,lat,lon,capacity,bikes,docks,is_installed,is_renting,is_returning," +
   "is_present,last_changed_at," +
   "forecast_horizons_min,forecast_p_bike_x1000,forecast_p_dock_x1000,forecast_confidence," +
-  "forecast_base_observed_at,forecast_model_version";
+  "forecast_base_observed_at,forecast_model_version,forecast_generated_at";
 
 /** 絞り込み 1 つ。`op` は supabase-js の同名メソッドに対応する。 */
 export type Filter =
@@ -95,8 +95,11 @@ export const stationRowSchema = z.object({
   forecast_p_bike_x1000: z.array(z.number().int()).nullable(),
   forecast_p_dock_x1000: z.array(z.number().int()).nullable(),
   forecast_confidence: z.number().int().nullable(),
+  /** **鮮度の判定に使う**（どの観測に基づくか）。 */
   forecast_base_observed_at: z.string().nullable(),
   forecast_model_version: z.string().nullable(),
+  /** **水平の起点**（0034）。補間する位置は `in_min ＋（いま − これ）`。 */
+  forecast_generated_at: z.string().nullable(),
 });
 
 export type FeedRow = z.infer<typeof feedRowSchema>;

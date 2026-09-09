@@ -10,7 +10,7 @@
 -- **行単位の検査は必ず `system_id` で絞る。** 他のデータが混ざっていても結果が変わらないように。
 
 begin;
-select plan(38);
+select plan(39);
 
 -- ────────────────────────────────────────────────────────────────
 -- 権限
@@ -191,7 +191,8 @@ select columns_are('public'::name, 'v1_stations_current'::name, array[
   'system_id', 'station_id', 'name', 'lat', 'lon', 'capacity', 'bikes', 'docks',
   'is_installed', 'is_renting', 'is_returning', 'is_present', 'last_changed_at',
   'forecast_horizons_min', 'forecast_p_bike_x1000', 'forecast_p_dock_x1000',
-  'forecast_confidence', 'forecast_base_observed_at', 'forecast_model_version'
+  'forecast_confidence', 'forecast_base_observed_at', 'forecast_model_version',
+  'forecast_generated_at'
 ]::name[], 'v1_stations_current の列は view-query.ts の STATION_COLUMNS と同じ');
 
 select columns_are('public'::name, 'v1_feeds'::name, array[
@@ -237,14 +238,24 @@ select ok(
       and forecast_model_version = 'b1-2026-09-08'
       and forecast_confidence = 3
      from public.v1_stations_current where system_id = 't-active' and station_id = 'plain'),
-  '鮮度に使う base_observed_at と版・確度を返す（generated_at ではない）');
+  '鮮度に使う base_observed_at と版・確度を返す');
+
+-- **2 つの時刻は役目が違う**（0034）。取り違えると、鮮度で切る物差しと補間の起点が入れ替わる
+--   base_observed_at … その予測がどの観測に基づくか。古ければ出さない
+--   generated_at     … 水平の起点。補間する位置を決める
+select ok(
+  (select forecast_generated_at = timestamptz '2026-09-08 00:00:30+00'
+      and forecast_generated_at <> forecast_base_observed_at
+     from public.v1_stations_current where system_id = 't-active' and station_id = 'plain'),
+  '水平の起点として generated_at を返す（base_observed_at とは別の列）');
 
 select ok(
   (select forecast_horizons_min is null and forecast_p_bike_x1000 is null
       and forecast_p_dock_x1000 is null and forecast_confidence is null
       and forecast_base_observed_at is null and forecast_model_version is null
+      and forecast_generated_at is null
      from public.v1_stations_current where system_id = 't-active' and station_id = 'no-attr'),
-  '予測の無いポートは 6 列とも NULL（台数は出せるので行は残す）');
+  '予測の無いポートは 7 列とも NULL（台数は出せるので行は残す）');
 
 select is(
   (select bikes from public.v1_stations_current where system_id = 't-active' and station_id = 'no-attr')::int,

@@ -65,6 +65,8 @@ const station = (overrides: Partial<StationRow> = {}): StationRow => ({
   forecast_confidence: 3,
   forecast_base_observed_at: "2026-09-07T23:58:00.000Z",
   forecast_model_version: "b1-2026-09-08",
+  // 水平の起点。NOW の 90 秒前＝推論周期の途中という現実的な年齢
+  forecast_generated_at: "2026-09-07T23:58:30.000Z",
   ...overrides,
 });
 
@@ -327,21 +329,24 @@ describe("予測（W4 の PR A）", () => {
   const forecastOf = (overrides: Partial<StationRow>, in_min: number | null = 30) =>
     build([station(overrides)], in_min).stations[0]?.forecast ?? null;
 
+  /** 起点の効果を分けて見るための、年齢 0 の行。 */
+  const justGenerated = { forecast_generated_at: NOW.toISOString() };
+
   it("**指定が無ければ返さない**（いままでの呼び出しの形を変えない）", () => {
     const response = build([station()], null);
     expect(response.forecast_in_min).toBeNull();
     expect(response.stations[0]?.forecast).toBeNull();
   });
 
-  it("指定があれば水平ちょうどの値をそのまま返す", () => {
-    const forecast = forecastOf({}, 30);
+  it("指定があれば水平ちょうどの値をそのまま返す（年齢 0 のとき）", () => {
+    const forecast = forecastOf(justGenerated, 30);
     expect(forecast?.p_bike).toBe(0.8);
     expect(forecast?.p_dock).toBe(0.2);
   });
 
   it("水平の間は補間する", () => {
     // 20 分（840）と 30 分（800）の中点 → 820
-    expect(forecastOf({}, 25)?.p_bike).toBe(0.82);
+    expect(forecastOf(justGenerated, 25)?.p_bike).toBe(0.82);
   });
 
   it("**丸めた後の分を応答に書く**（何分の予測を見ているかが応答から読める）", async () => {
@@ -349,8 +354,9 @@ describe("予測（W4 の PR A）", () => {
     expect(outcome.ok).toBe(true);
     if (outcome.ok) {
       expect(outcome.response.forecast_in_min).toBe(35);
-      // 30 分（800）と 45 分（750）の 1/3 → 783.33 → 1/1000 に丸めて 783
-      expect(outcome.response.stations[0]?.forecast?.p_bike).toBe(0.783);
+      // 35 分 ＋ 行の年齢 1.5 分 = 36.5 分。30 分（800）と 45 分（750）の 0.433 →
+      // 778.33 → 1/1000 に丸めて 778
+      expect(outcome.response.stations[0]?.forecast?.p_bike).toBe(0.778);
     }
   });
 
@@ -434,7 +440,8 @@ describe("到着の指定の検証", () => {
     expect(outcome.ok).toBe(true);
     if (outcome.ok) {
       expect(outcome.response.forecast_in_min).toBe(30);
-      expect(outcome.response.stations[0]?.forecast?.p_bike).toBe(0.8);
+      // 30 分 ＋ 行の年齢 1.5 分 = 31.5 分の位置（水平ちょうどの 0.8 ではない）
+      expect(outcome.response.stations[0]?.forecast?.p_bike).toBe(0.795);
     }
   });
 
@@ -445,5 +452,59 @@ describe("到着の指定の検証", () => {
       expect(outcome.response.forecast_in_min).toBeNull();
       expect(outcome.response.stations[0]?.forecast).toBeNull();
     }
+  });
+});
+
+describe("水平の起点（W4 プラン §12 の 114）", () => {
+  const build = (rows: readonly StationRow[], in_min: number | null) =>
+    buildStationsResponse({
+      bbox: { west: 139.76, south: 35.67, east: 139.78, north: 35.69 },
+      feeds: FEEDS,
+      rows,
+      in_min,
+      now: NOW,
+    });
+
+  const aged = (age_s: number) =>
+    build(
+      [station({ forecast_generated_at: new Date(NOW.getTime() - age_s * 1000).toISOString() })],
+      30,
+    ).stations[0]?.forecast ?? null;
+
+  it("**行の年齢を足した位置で読む**（起点は generated_at）", () => {
+    // 30 分 ＋ 1.5 分 = 31.5 分 → 30 分（800）と 45 分（750）の 0.1 → 795
+    expect(aged(90)?.p_bike).toBe(0.795);
+    expect(aged(90)?.p_dock).toBe(0.205);
+  });
+
+  it("年齢を無視すると別の時刻の確率になる（回帰の見張り）", () => {
+    // 起点を足さなければ 0.8（＝水平 30 分ちょうど）。足せば 0.795
+    expect(aged(90)?.p_bike).not.toBe(0.8);
+  });
+
+  it("年齢が大きいほど先を読む", () => {
+    expect(aged(0)?.p_bike).toBe(0.8);
+    expect(aged(300)?.p_bike).toBe(0.783);
+    // 単調に下がる表なので、古い行ほど小さい値になる
+    const values = [aged(0), aged(90), aged(300)].map((one) => one?.p_bike ?? 0);
+    expect(values[0]).toBeGreaterThan(values[1] ?? 0);
+    expect(values[1]).toBeGreaterThan(values[2] ?? 0);
+  });
+
+  it("未来の時刻は 0 として扱う（頼まれた到着より手前を読まない）", () => {
+    expect(aged(-600)?.p_bike).toBe(0.8);
+  });
+
+  it("起点が無ければ予測を返さない（位置を決められない）", () => {
+    const forecast =
+      build([station({ forecast_generated_at: null })], 30).stations[0]?.forecast ?? null;
+    expect(forecast).toBeNull();
+  });
+
+  it("返す確率が指すのは generated_at ＋ forecast_in_min の時刻", () => {
+    const response = build([station()], 30);
+    // 応答の generated_at は呼び出し時刻。利用者はこの 2 つで到着の時刻を復元できる
+    expect(response.generated_at).toBe(NOW.toISOString());
+    expect(response.forecast_in_min).toBe(30);
   });
 });

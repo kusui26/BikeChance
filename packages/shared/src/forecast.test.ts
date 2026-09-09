@@ -14,6 +14,7 @@ import {
   ARRIVAL_MAX_MIN,
   ARRIVAL_MIN_MIN,
   ARRIVAL_STEP_MIN,
+  forecastHorizon,
   interpolateForecast,
   parseArrival,
   roundArrival,
@@ -180,7 +181,7 @@ describe("interpolateForecast", () => {
   const ramp = horizons.map((minutes) => minutes);
 
   const at = (in_min: number, values: readonly number[] = ramp) =>
-    interpolateForecast({ horizons_min: horizons, values_x1000: values, in_min });
+    interpolateForecast({ horizons_min: horizons, values_x1000: values, horizon_min: in_min });
 
   it("水平そのものは、その値をそのまま返す", () => {
     expect(at(30)).toBe(0.03);
@@ -201,11 +202,13 @@ describe("interpolateForecast", () => {
 
   it("確率は 0〜1 に写る（元は 1/1000 刻み）", () => {
     const values = horizons.map(() => 0);
-    expect(interpolateForecast({ horizons_min: horizons, values_x1000: values, in_min: 30 })).toBe(
-      0,
-    );
+    expect(
+      interpolateForecast({ horizons_min: horizons, values_x1000: values, horizon_min: 30 }),
+    ).toBe(0);
     const full = horizons.map(() => 1000);
-    expect(interpolateForecast({ horizons_min: horizons, values_x1000: full, in_min: 30 })).toBe(1);
+    expect(
+      interpolateForecast({ horizons_min: horizons, values_x1000: full, horizon_min: 30 }),
+    ).toBe(1);
   });
 
   it("1/1000 の分解能に丸める（見せかけの精度を作らない）", () => {
@@ -218,41 +221,45 @@ describe("interpolateForecast", () => {
   });
 
   it("配列が無ければ null（欠けた表から数を作らない）", () => {
-    expect(interpolateForecast({ horizons_min: null, values_x1000: ramp, in_min: 30 })).toBeNull();
     expect(
-      interpolateForecast({ horizons_min: horizons, values_x1000: null, in_min: 30 }),
+      interpolateForecast({ horizons_min: null, values_x1000: ramp, horizon_min: 30 }),
+    ).toBeNull();
+    expect(
+      interpolateForecast({ horizons_min: horizons, values_x1000: null, horizon_min: 30 }),
     ).toBeNull();
   });
 
   it("長さがそろわなければ null", () => {
     expect(
-      interpolateForecast({ horizons_min: horizons, values_x1000: [1, 2], in_min: 30 }),
+      interpolateForecast({ horizons_min: horizons, values_x1000: [1, 2], horizon_min: 30 }),
     ).toBeNull();
   });
 
   it("空でも null（0 と言わない）", () => {
-    expect(interpolateForecast({ horizons_min: [], values_x1000: [], in_min: 30 })).toBeNull();
+    expect(interpolateForecast({ horizons_min: [], values_x1000: [], horizon_min: 30 })).toBeNull();
   });
 
   it("水平が重複していても NaN を作らない", () => {
     const result = interpolateForecast({
       horizons_min: [5, 30, 30, 180],
       values_x1000: [100, 200, 300, 400],
-      in_min: 20,
+      horizon_min: 20,
     });
     expect(result).not.toBeNull();
     expect(Number.isNaN(result)).toBe(false);
   });
 
   it("1 点しか無くても答えを返す（張り付け）", () => {
-    expect(interpolateForecast({ horizons_min: [30], values_x1000: [250], in_min: 60 })).toBe(0.25);
+    expect(interpolateForecast({ horizons_min: [30], values_x1000: [250], horizon_min: 60 })).toBe(
+      0.25,
+    );
   });
 
   it("下りの表でも補間の向きを間違えない", () => {
     const falling = horizons.map((minutes) => 1000 - minutes * 5);
-    expect(interpolateForecast({ horizons_min: horizons, values_x1000: falling, in_min: 25 })).toBe(
-      0.875,
-    );
+    expect(
+      interpolateForecast({ horizons_min: horizons, values_x1000: falling, horizon_min: 25 }),
+    ).toBe(0.875);
   });
 });
 
@@ -266,10 +273,71 @@ describe("parseArrival と interpolateForecast のつなぎ", () => {
         const value = interpolateForecast({
           horizons_min: [...HORIZONS_MIN],
           values_x1000: values,
-          in_min: parsed.in_min,
+          horizon_min: parsed.in_min,
         });
         expect(value).not.toBeNull();
       }
     }
+  });
+});
+
+describe("forecastHorizon", () => {
+  const horizonOf = (age_s: number, in_min = 30) =>
+    forecastHorizon({
+      in_min,
+      generated_at: new Date(NOW.getTime() - age_s * 1000),
+      now: NOW,
+    });
+
+  it("**予測行の年齢を足す**（水平の起点は generated_at）", () => {
+    expect(horizonOf(120)).toBe(32);
+    expect(horizonOf(126)).toBe(32.1);
+  });
+
+  it("同じ瞬間に作られた行なら in_min のまま", () => {
+    expect(horizonOf(0)).toBe(30);
+  });
+
+  it("未来の時刻は 0 として扱う（頼まれた到着より手前を読まない）", () => {
+    expect(horizonOf(-600)).toBe(30);
+  });
+
+  it("推論周期（5 分）ぶん古い行でも、足すのは 5 分だけ", () => {
+    expect(horizonOf(300)).toBe(35);
+  });
+
+  it("鮮度の上限まで古いと 15 分足される（それ以上は返さない側で切る）", () => {
+    expect(horizonOf(900)).toBe(45);
+  });
+
+  it("**足すと 180 を超えることがある**（張り付けて返す）", () => {
+    const horizon = horizonOf(300, ARRIVAL_MAX_MIN);
+    expect(horizon).toBeGreaterThan(ARRIVAL_MAX_MIN);
+    const values = [...HORIZONS_MIN].map((minutes) => minutes * 5);
+    expect(
+      interpolateForecast({
+        horizons_min: [...HORIZONS_MIN],
+        values_x1000: values,
+        horizon_min: horizon,
+      }),
+    ).toBe(0.9);
+  });
+
+  it("起点を無視すると別の時刻の確率になる（この関数が守っているもの）", () => {
+    const horizons = [...HORIZONS_MIN];
+    // 30 分（800）と 45 分（600）の間で、2 分ぶんずれると 26.7 ポイント動く
+    const values = [1000, 1000, 1000, 1000, 800, 600, 400, 300, 200, 100];
+    const naive = interpolateForecast({
+      horizons_min: horizons,
+      values_x1000: values,
+      horizon_min: 30,
+    });
+    const correct = interpolateForecast({
+      horizons_min: horizons,
+      values_x1000: values,
+      horizon_min: horizonOf(120),
+    });
+    expect(naive).toBe(0.8);
+    expect(correct).toBe(0.773);
   });
 });

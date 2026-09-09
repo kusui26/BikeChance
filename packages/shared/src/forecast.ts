@@ -10,6 +10,8 @@
  *     補間するので、同じ分を指した要求は同じ URL・同じ応答になる
  *   * **持っていない先は作らない。** 水平は最大 180 分で、それより先は 400 で断る。
  *     末尾の値に張り付けて返すと、3 時間先も 5 時間先も同じ数になる
+ *   * **水平の起点は `generated_at`。** 利用者の「いま」ではない。補間する位置は
+ *     `in_min` そのものではなく `in_min ＋ 予測行の年齢`（W4 プラン §12 の 114）
  */
 
 import { HORIZONS_MIN } from "./constants";
@@ -119,6 +121,32 @@ export const parseArrival = (params: {
   return at === null ? { ok: true, in_min: null } : fromTimestamp(at, params.now);
 };
 
+/**
+ * 補間する位置（分）。**水平の起点は `generated_at` であって、利用者の「いま」ではない。**
+ *
+ * `p[h]` が指すのは「`generated_at` から h 分後」の確率である（`jobs/infer.py` は推論を
+ * 回した時刻で標本を作り、`minute_of_day` も `dow_type` もそこから決まる）。利用者が
+ * 欲しいのは「**読んだ時刻 ＋ `in_min`**」なので、**予測行の年齢を足した位置**で補間する。
+ *
+ * 年齢は推論周期（5 分）ぶんあり、実測で中央 2.1 分・最大 5.3 分。足さないと、30 分先で
+ * **2.62% が表示の刻み（5%）を跨いでずれる**（W4 プラン §12 の 114）。
+ *
+ * **年齢が負なら 0 にする。** 時計のずれで `generated_at` が未来になっても、頼まれた
+ * 到着より手前を読まない。
+ *
+ * 足した結果が最後の水平（180 分）を超えることがあるが、そのときは末尾に張り付く
+ * （`interpolateForecast`）。**それでよい**：利用者は範囲内を頼んでおり、はみ出したのは
+ * こちらの行が古いからで、断る理由にはならない。差は年齢のぶん（最大 5 分）である。
+ */
+export const forecastHorizon = (params: {
+  readonly in_min: number;
+  readonly generated_at: Date;
+  readonly now: Date;
+}): number => {
+  const age_min = (params.now.getTime() - params.generated_at.getTime()) / MS_PER_MINUTE;
+  return params.in_min + Math.max(age_min, 0);
+};
+
 /** 水平 1 点。`horizons_min` と `p_*_x1000` を組にして、添字のずれを持ち回らない。 */
 type Point = { readonly min: number; readonly value_x1000: number };
 
@@ -147,12 +175,12 @@ const toPoints = (
 const toProbability = (value_x1000: number): number => Math.round(value_x1000) / PROBABILITY_SCALE;
 
 /**
- * `in_min` を挟む 2 点から線形に補間する。呼ぶのは両端の外を除いたあとだけ。
+ * `horizon_min` を挟む 2 点から線形に補間する。呼ぶのは両端の外を除いたあとだけ。
  *
  * 水平が重複していれば割れない。**0 除算で NaN を作らず、手前の値を使う**。
  */
-const between = (points: readonly Point[], in_min: number): number | null => {
-  const index = points.findIndex((point) => point.min >= in_min);
+const between = (points: readonly Point[], horizon_min: number): number | null => {
+  const index = points.findIndex((point) => point.min >= horizon_min);
   const upper = points[index];
   const lower = points[index - 1];
   if (upper === undefined || lower === undefined) {
@@ -162,26 +190,30 @@ const between = (points: readonly Point[], in_min: number): number | null => {
   if (span <= 0) {
     return toProbability(lower.value_x1000);
   }
-  const ratio = (in_min - lower.min) / span;
+  const ratio = (horizon_min - lower.min) / span;
   return toProbability(lower.value_x1000 + ratio * (upper.value_x1000 - lower.value_x1000));
 };
 
 /**
- * 水平の並びから `in_min` の確率を線形に補間する。
+ * 水平の並びから `horizon_min` の確率を線形に補間する。
+ *
+ * **引数は `in_min` ではなく水平**である。起点が違う（`forecastHorizon` を通すこと）。
+ * 名前を分けているのは、PR A でここに `in_min` をそのまま渡して、**利用者の到着より
+ * 早い時刻の確率を返していた**ためである（W4 プラン §12 の 114）。
  *
  * **確率のまま補間する**（logit ではない）。刻みは 5〜60 分で、表示は 10% 単位なので
  * 曲率の影響は表示の分解能に埋もれる。logit で補間すると、`p = 0` や `p = 1` の
  * 端で無限大を扱うことになり、得るものより面倒のほうが大きい。
  *
- * **範囲の外には張り付ける。** `parseArrival` が 5〜180 分に絞っているので、ここに
- * 来るのは端ちょうどの場合だけである。
+ * **範囲の外には張り付ける。** 到着そのものは `parseArrival` が 5〜180 分に絞るが、
+ * 年齢を足した水平は 180 を少し超えうる（最大 5 分ぶん）。
  *
  * 返すのは **0〜1 の確率**。元が 1/1000 刻みなので、その分解能のまま丸める。
  */
 export const interpolateForecast = (params: {
   readonly horizons_min: readonly number[] | null;
   readonly values_x1000: readonly number[] | null;
-  readonly in_min: number;
+  readonly horizon_min: number;
 }): number | null => {
   const points = toPoints(params.horizons_min, params.values_x1000);
   if (points === null) {
@@ -192,10 +224,10 @@ export const interpolateForecast = (params: {
   if (first === undefined || last === undefined) {
     return null;
   }
-  if (params.in_min <= first.min) {
+  if (params.horizon_min <= first.min) {
     return toProbability(first.value_x1000);
   }
-  return params.in_min >= last.min
+  return params.horizon_min >= last.min
     ? toProbability(last.value_x1000)
-    : between(points, params.in_min);
+    : between(points, params.horizon_min);
 };

@@ -13,6 +13,7 @@ import {
   ATTRIBUTIONS,
   STATIONS_MAX_RESULTS,
   SYSTEM_IDS,
+  forecastHorizon,
   interpolateForecast,
   isForecastFresh,
   isStale,
@@ -121,28 +122,39 @@ const toStation = (
  *
  * **3 を `generated_at` ではなく `base_observed_at` で測る**のが要点。利用者に効くのは
  * 「どの観測に基づくか」で、現在値の `stale` 判定と同じ物差しになる。
+ *
+ * **補間する位置は `in_min` ではない。** 水平の起点は `generated_at` なので、行の年齢を
+ * 足した位置で読む（`forecastHorizon`。W4 プラン §12 の 114）。この 2 つを取り違えると、
+ * **利用者の到着より早い時刻の確率**を、到着時刻の確率として出すことになる。
+ *
+ * これで、返す確率が指すのは常に **`response.generated_at ＋ forecast_in_min`** になる。
  */
 const toForecast = (row: StationRow, in_min: number | null, now: Date): StationForecast | null => {
   if (in_min === null) {
     return null;
   }
   const base = row.forecast_base_observed_at;
-  if (base === null || row.forecast_confidence === null || row.forecast_model_version === null) {
+  const generated = row.forecast_generated_at;
+  if (base === null || generated === null) {
+    return null;
+  }
+  if (row.forecast_confidence === null || row.forecast_model_version === null) {
     return null;
   }
   const base_observed_at = new Date(base);
   if (!isForecastFresh({ base_observed_at, now })) {
     return null;
   }
+  const horizon_min = forecastHorizon({ in_min, generated_at: new Date(generated), now });
   const p_bike = interpolateForecast({
     horizons_min: row.forecast_horizons_min,
     values_x1000: row.forecast_p_bike_x1000,
-    in_min,
+    horizon_min,
   });
   const p_dock = interpolateForecast({
     horizons_min: row.forecast_horizons_min,
     values_x1000: row.forecast_p_dock_x1000,
-    in_min,
+    horizon_min,
   });
   // **片方だけ返さない。** borrow と return はどちらも表示に要る
   if (p_bike === null || p_dock === null) {
