@@ -179,8 +179,10 @@ create function pg_temp.cron_only() returns text[] language sql immutable as $$
     -- pg_cron から呼ぶ（PostgREST から呼ばないので grant は要らない）
     'watchdog_collect', 'monitor_feeds', 'monitor_jobs', 'run_maintenance',
     'refresh_station_activity', 'compute_daily_quality', 'trigger_backup_collect',
+    'trigger_infer',
     'check_jobs_missing', 'check_jobs_failed', 'check_cron_jobs', 'check_parquet_gap',
-    'check_reference_data', 'rebuild_geo', 'rebuild_station_geo', 'rebuild_station_neighbors',
+    'check_reference_data', 'check_inference',
+    'rebuild_geo', 'rebuild_station_geo', 'rebuild_station_neighbors',
     -- 他の関数の中からだけ呼ぶ補助
     'send_alert', 'config_int', 'jsonb_boolean', 'jsonb_number',
     -- Supabase が作る（こちらの管理外）
