@@ -44,6 +44,7 @@ const stationRow = {
   forecast_confidence: 3,
   forecast_base_observed_at: "2026-09-07T23:58:00.000Z",
   forecast_model_version: "b1-2026-09-08",
+  forecast_generated_at: "2026-09-07T23:58:30.000Z",
 };
 
 const feedRow = {
@@ -180,6 +181,7 @@ describe("予測の列（0033）", () => {
       forecast_confidence: null,
       forecast_base_observed_at: null,
       forecast_model_version: null,
+      forecast_generated_at: null,
     };
     expect(stationRowSchema.safeParse(unknown).success).toBe(true);
   });

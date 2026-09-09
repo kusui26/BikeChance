@@ -61,6 +61,11 @@ export const metaResponseSchema = z.object({
  * 指定があっても null になる場合が 3 つある：貸出も返却も止まっている／観測が古い／
  * 成果物にそのポートが無い。**理由は返さない。** 利用者にとっては「いまは出せない」で
  * 十分で、原因は `inference_log` と監視が持つ（内部の都合を API の契約に漏らさない）。
+ *
+ * **確率が指す時刻は `generated_at ＋ forecast_in_min`**（どちらも応答の中にある）。
+ * 応答が CDN に留まっていた時間だけ、読んだ人の「いま」からは離れる（最大 3 分。
+ * `s-maxage=60` ＋ `stale-while-revalidate=120`）。**「約 30 分後」ではなく到着の時刻で
+ * 表示する**のが安全である（W4 プラン §12 の 114）。
  */
 export const stationForecastSchema = z.object({
   /** 借りられる確率（0〜1）。元は 1/1000 刻み。 */
@@ -121,6 +126,9 @@ export const stationsResponseSchema = z.object({
    *
    * **丸めた後の値を返す**ので、`in_min=37` で要求すると 35 が返る。何分の予測を見て
    * いるのかを、利用者が要求の文字列ではなく応答から読めるようにする。
+   *
+   * **確率が指すのは `generated_at` からこの分数だけ先**である。`generated_at` は応答を
+   * 作った時刻で、読んだ時刻ではない。
    */
   forecast_in_min: z.number().int().positive().nullable(),
   feeds: z.array(feedStatusSchema),
