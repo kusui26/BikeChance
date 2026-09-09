@@ -9,6 +9,8 @@
  * 検知の遅れを足さないと正常な揺らぎで古い判定が出る（ドコモの実測で 244 秒 > 240 秒）。
  */
 
+import { FORECAST_STALE_AFTER_S } from "./constants";
+
 /** 期待周期の何倍まで待つか。0013 の `expected_cadence_s * 3` と揃える。 */
 export const STALE_CADENCE_MULTIPLIER = 3;
 
@@ -45,4 +47,31 @@ export const isStale = (params: {
   }
   const age_s = (params.now.getTime() - params.last_observed_at.getTime()) / MS_PER_S;
   return age_s > staleAfterSeconds(params.cadence);
+};
+
+/**
+ * 予測をまだ「現在の予測」として出せるか（W4 プラン §4 の W4-01）。
+ *
+ * **測るのは `generated_at` ではなく `base_observed_at`。** 利用者に効くのは「いつ計算
+ * したか」ではなく「**どの観測に基づくか**」で、現在値の `stale` 判定と同じ物差しに
+ * なる。「台数は現在値なのに予測だけ古い」という食い違いが起きない。
+ *
+ * 閾値の `FORECAST_STALE_AFTER_S`（900 秒）は **`app_config.infer_alert_s` と同じ値**に
+ * してある（migration 0029）。**利用者に出せなくなった瞬間に、監視も鳴る。**
+ *
+ * **フィードごとの `stale_after_s` は使わない。** ドコモは 303 秒で推論周期（300 秒）と
+ * ほぼ同じになり、正常運転でも切れたり戻ったりする。
+ *
+ * **未計算（null）は「古い」扱い。** 「まだ一度も出ていない」を「新しい」と言わない
+ * （`isStale` と同じ考え方）。
+ */
+export const isForecastFresh = (params: {
+  readonly base_observed_at: Date | null;
+  readonly now: Date;
+}): boolean => {
+  if (params.base_observed_at === null) {
+    return false;
+  }
+  const age_s = (params.now.getTime() - params.base_observed_at.getTime()) / MS_PER_S;
+  return age_s <= FORECAST_STALE_AFTER_S;
 };

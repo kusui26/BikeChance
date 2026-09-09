@@ -6,9 +6,15 @@
  *   * **上限を超えたら切り捨てずに 400**（穴の開いた地図を黙って返さない）
  *   * 値には観測時刻が付き、**不在のポートは null**
  *   * bbox は外側へ丸めた実効値を返す
+ *   * **予測は指定があるときだけ返し、古ければ返さない**（W4 の PR A）
  */
 import { describe, expect, it, vi } from "vitest";
-import { STATIONS_MAX_RESULTS, stationsResponseSchema } from "@bikechance/shared";
+import {
+  FORECAST_STALE_AFTER_S,
+  HORIZONS_MIN,
+  STATIONS_MAX_RESULTS,
+  stationsResponseSchema,
+} from "@bikechance/shared";
 import { buildStationsResponse, queryStations } from "./stations";
 import type { FeedRow, ReadPort, StationRow } from "./read-port";
 
@@ -22,6 +28,8 @@ const FEEDS: readonly FeedRow[] = [
     poll_interval_s: 60,
     capacity_is_dynamic: false,
     last_observed_at: "2026-09-07T23:58:00.000Z",
+    forecast_model_version: "b1-2026-09-08",
+    forecast_generated_at: "2026-09-07T23:58:30.000Z",
   },
   {
     system_id: "docomo-cycle",
@@ -31,6 +39,8 @@ const FEEDS: readonly FeedRow[] = [
     capacity_is_dynamic: true,
     // 303 秒（stale_after_s）を超えている
     last_observed_at: "2026-09-07T23:50:00.000Z",
+    forecast_model_version: "b1-2026-09-08",
+    forecast_generated_at: "2026-09-07T23:50:30.000Z",
   },
 ];
 
@@ -48,6 +58,13 @@ const station = (overrides: Partial<StationRow> = {}): StationRow => ({
   is_returning: true,
   is_present: true,
   last_changed_at: "2026-09-07T23:55:00.000Z",
+  // 予測は 5 分刻みで下がっていく表。補間の結果を暗算で確かめられる
+  forecast_horizons_min: [...HORIZONS_MIN],
+  forecast_p_bike_x1000: [900, 880, 860, 840, 800, 750, 700, 600, 500, 300],
+  forecast_p_dock_x1000: [100, 120, 140, 160, 200, 250, 300, 400, 500, 700],
+  forecast_confidence: 3,
+  forecast_base_observed_at: "2026-09-07T23:58:00.000Z",
+  forecast_model_version: "b1-2026-09-08",
   ...overrides,
 });
 
@@ -192,11 +209,12 @@ describe("DB の不調", () => {
 });
 
 describe("buildStationsResponse", () => {
-  const build = (rows: readonly StationRow[]) =>
+  const build = (rows: readonly StationRow[], in_min: number | null = null) =>
     buildStationsResponse({
       bbox: { west: 139.76, south: 35.67, east: 139.78, north: 35.69 },
       feeds: FEEDS,
       rows,
+      in_min,
       now: NOW,
     });
 
@@ -288,9 +306,144 @@ describe("時刻の扱い", () => {
       bbox: { west: 0, south: 0, east: 1, north: 1 },
       feeds: FEEDS,
       rows: [],
+      in_min: null,
       now: new Date(),
     });
     expect(response.generated_at).toBe(NOW.toISOString());
     vi.useRealTimers();
+  });
+});
+
+describe("予測（W4 の PR A）", () => {
+  const build = (rows: readonly StationRow[], in_min: number | null) =>
+    buildStationsResponse({
+      bbox: { west: 139.76, south: 35.67, east: 139.78, north: 35.69 },
+      feeds: FEEDS,
+      rows,
+      in_min,
+      now: NOW,
+    });
+
+  const forecastOf = (overrides: Partial<StationRow>, in_min: number | null = 30) =>
+    build([station(overrides)], in_min).stations[0]?.forecast ?? null;
+
+  it("**指定が無ければ返さない**（いままでの呼び出しの形を変えない）", () => {
+    const response = build([station()], null);
+    expect(response.forecast_in_min).toBeNull();
+    expect(response.stations[0]?.forecast).toBeNull();
+  });
+
+  it("指定があれば水平ちょうどの値をそのまま返す", () => {
+    const forecast = forecastOf({}, 30);
+    expect(forecast?.p_bike).toBe(0.8);
+    expect(forecast?.p_dock).toBe(0.2);
+  });
+
+  it("水平の間は補間する", () => {
+    // 20 分（840）と 30 分（800）の中点 → 820
+    expect(forecastOf({}, 25)?.p_bike).toBe(0.82);
+  });
+
+  it("**丸めた後の分を応答に書く**（何分の予測を見ているかが応答から読める）", async () => {
+    const { outcome } = await run(`${BBOX}&in_min=37`);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.response.forecast_in_min).toBe(35);
+      // 30 分（800）と 45 分（750）の 1/3 → 783.33 → 1/1000 に丸めて 783
+      expect(outcome.response.stations[0]?.forecast?.p_bike).toBe(0.783);
+    }
+  });
+
+  it("confidence と model_version はそのまま渡す", () => {
+    const forecast = forecastOf({ forecast_confidence: 1 });
+    expect(forecast?.confidence).toBe(1);
+    expect(forecast?.model_version).toBe("b1-2026-09-08");
+  });
+
+  it("base_observed_at を返す（利用者が自分でも鮮度を測れる）", () => {
+    expect(forecastOf({})?.base_observed_at).toBe("2026-09-07T23:58:00.000Z");
+  });
+
+  it("**予測の無いポートも行は返す**（台数は出せる）", () => {
+    const response = build([station({ forecast_base_observed_at: null })], 30);
+    expect(response.count).toBe(1);
+    expect(response.stations[0]?.bikes).toBe(3);
+    expect(response.stations[0]?.forecast).toBeNull();
+  });
+
+  it("**古い予測は返さない**（11 時間前の確率を「現在の予測」として出さない）", () => {
+    const old = new Date(NOW.getTime() - (FORECAST_STALE_AFTER_S + 60) * 1000).toISOString();
+    expect(forecastOf({ forecast_base_observed_at: old })).toBeNull();
+  });
+
+  it("閾値のちょうどはまだ返す", () => {
+    const edge = new Date(NOW.getTime() - FORECAST_STALE_AFTER_S * 1000).toISOString();
+    expect(forecastOf({ forecast_base_observed_at: edge })).not.toBeNull();
+  });
+
+  it("配列の長さがそろわなければ返さない（欠けた表から数を作らない）", () => {
+    expect(forecastOf({ forecast_p_bike_x1000: [900, 880] })).toBeNull();
+  });
+
+  it("片方だけでは返さない（借りると返すはどちらも表示に要る）", () => {
+    expect(forecastOf({ forecast_p_dock_x1000: null })).toBeNull();
+  });
+
+  it("confidence や model_version が欠けていれば返さない", () => {
+    expect(forecastOf({ forecast_confidence: null })).toBeNull();
+    expect(forecastOf({ forecast_model_version: null })).toBeNull();
+  });
+
+  it("予測が無いことを理由として返さない（内部の都合を契約に漏らさない）", () => {
+    const response = build([station({ forecast_horizons_min: null })], 30);
+    expect(JSON.stringify(response)).not.toContain("reason");
+  });
+
+  it("スキーマに適合する（予測あり・なしのどちらも）", () => {
+    const rows = [station(), station({ station_id: "s-2", forecast_base_observed_at: null })];
+    expect(() => stationsResponseSchema.parse(build(rows, 30))).not.toThrow();
+  });
+});
+
+describe("到着の指定の検証", () => {
+  it("at と in_min の同時指定は 400（DB には触らない）", async () => {
+    const { outcome, calls } = await run(`${BBOX}&at=2026-09-08T00:30:00Z&in_min=30`);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.failure.code).toBe("arrival_conflict");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("範囲の外は 400（末尾の値を張り付けて返さない）", async () => {
+    expect(await failureOf(`${BBOX}&in_min=999`)).toBe("arrival_out_of_range");
+    expect(await failureOf(`${BBOX}&in_min=1`)).toBe("arrival_out_of_range");
+  });
+
+  it("読めない指定は 400", async () => {
+    expect(await failureOf(`${BBOX}&in_min=abc`)).toBe("arrival_malformed");
+    // タイムゾーンなし
+    expect(await failureOf(`${BBOX}&at=2026-09-08T00:30:00`)).toBe("arrival_malformed");
+  });
+
+  it("誤った指定でも DB には触らない（無駄な問い合わせを出さない）", async () => {
+    const { calls } = await run(`${BBOX}&in_min=999`);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("at でも予測が付く", async () => {
+    const { outcome } = await run(`${BBOX}&at=2026-09-08T00:30:00Z`);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.response.forecast_in_min).toBe(30);
+      expect(outcome.response.stations[0]?.forecast?.p_bike).toBe(0.8);
+    }
+  });
+
+  it("指定が無ければ予測は付かない（既定の応答）", async () => {
+    const { outcome } = await run(BBOX);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.response.forecast_in_min).toBeNull();
+      expect(outcome.response.stations[0]?.forecast).toBeNull();
+    }
   });
 });

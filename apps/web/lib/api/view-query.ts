@@ -14,10 +14,14 @@ export const STATIONS_VIEW = "v1_stations_current";
 
 /** `v1_feeds` から読む列。`select("*")` にしないのは、列が増えたときに気づけるようにするため。 */
 export const FEED_COLUMNS =
-  "system_id,display_name,expected_cadence_s,poll_interval_s,capacity_is_dynamic,last_observed_at";
+  "system_id,display_name,expected_cadence_s,poll_interval_s,capacity_is_dynamic,last_observed_at," +
+  "forecast_model_version,forecast_generated_at";
 
 export const STATION_COLUMNS =
-  "system_id,station_id,name,lat,lon,capacity,bikes,docks,is_installed,is_renting,is_returning,is_present,last_changed_at";
+  "system_id,station_id,name,lat,lon,capacity,bikes,docks,is_installed,is_renting,is_returning," +
+  "is_present,last_changed_at," +
+  "forecast_horizons_min,forecast_p_bike_x1000,forecast_p_dock_x1000,forecast_confidence," +
+  "forecast_base_observed_at,forecast_model_version";
 
 /** 絞り込み 1 つ。`op` は supabase-js の同名メソッドに対応する。 */
 export type Filter =
@@ -53,6 +57,9 @@ export const feedRowSchema = z.object({
   poll_interval_s: z.number().int().positive(),
   capacity_is_dynamic: z.boolean(),
   last_observed_at: z.string().nullable(),
+  /** いま配信している予測の版。**まだ 1 度も推論していなければ null**（0033）。 */
+  forecast_model_version: z.string().nullable(),
+  forecast_generated_at: z.string().nullable(),
 });
 
 /**
@@ -76,6 +83,20 @@ export const stationRowSchema = z.object({
   is_returning: z.boolean().nullable(),
   is_present: z.boolean(),
   last_changed_at: z.string(),
+  /**
+   * 予測（0033）。**予測の無いポートがあるので、すべて null になり得る。**
+   *
+   * 配列の長さは `horizons_min` と `p_*_x1000` でそろっているはずだが、**ここでは
+   * そろっていることを要求しない**。ビューは `station_forecasts` を素直に写すだけで、
+   * そろっているかを保証するのは書き手（`upsert_forecasts`）である。読む側は
+   * `interpolateForecast` が長さを見て null を返す（欠けた表から数を作らない）。
+   */
+  forecast_horizons_min: z.array(z.number().int()).nullable(),
+  forecast_p_bike_x1000: z.array(z.number().int()).nullable(),
+  forecast_p_dock_x1000: z.array(z.number().int()).nullable(),
+  forecast_confidence: z.number().int().nullable(),
+  forecast_base_observed_at: z.string().nullable(),
+  forecast_model_version: z.string().nullable(),
 });
 
 export type FeedRow = z.infer<typeof feedRowSchema>;

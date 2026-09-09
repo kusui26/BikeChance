@@ -13,7 +13,10 @@ import {
   ATTRIBUTIONS,
   STATIONS_MAX_RESULTS,
   SYSTEM_IDS,
+  interpolateForecast,
+  isForecastFresh,
   isStale,
+  parseArrival,
   parseBbox,
   quantizeBbox,
   staleAfterSeconds,
@@ -21,6 +24,7 @@ import {
   type Bbox,
   type FeedStatus,
   type StationCurrent,
+  type StationForecast,
   type StationsResponse,
   type SystemId,
 } from "@bikechance/shared";
@@ -84,7 +88,11 @@ const toFeedStatus = (feed: FeedRow, now: Date): FeedStatus => {
  * ポートが最新のフィードに現れていない（`is_present` が false）なら、その値がいつのものかは
  * 分からないので null にする。
  */
-const toStation = (row: StationRow, observed_at: string | null): StationCurrent => ({
+const toStation = (
+  row: StationRow,
+  observed_at: string | null,
+  forecast: StationForecast | null,
+): StationCurrent => ({
   system_id: row.system_id,
   station_id: row.station_id,
   name: row.name,
@@ -99,18 +107,72 @@ const toStation = (row: StationRow, observed_at: string | null): StationCurrent 
   is_present: row.is_present,
   observed_at: row.is_present ? observed_at : null,
   last_changed_at: new Date(row.last_changed_at).toISOString(),
+  forecast,
 });
+
+/**
+ * 1 ポートぶんの予測を組み立てる（W4 プラン §4 の W4-01・W4-02）。
+ *
+ * **null になる道が 4 つある。** どれも「出せない」として同じ形で返し、理由は返さない。
+ *   1. 要求に `at` / `in_min` が無い（`in_min` が null）
+ *   2. そのポートの予測がまだ無い（貸出も返却も止まっている・成果物に無い）
+ *   3. **基づく観測が古い**（`FORECAST_STALE_AFTER_S` を超えた）
+ *   4. 配列の長さがそろっていない（欠けた表から数を作らない）
+ *
+ * **3 を `generated_at` ではなく `base_observed_at` で測る**のが要点。利用者に効くのは
+ * 「どの観測に基づくか」で、現在値の `stale` 判定と同じ物差しになる。
+ */
+const toForecast = (row: StationRow, in_min: number | null, now: Date): StationForecast | null => {
+  if (in_min === null) {
+    return null;
+  }
+  const base = row.forecast_base_observed_at;
+  if (base === null || row.forecast_confidence === null || row.forecast_model_version === null) {
+    return null;
+  }
+  const base_observed_at = new Date(base);
+  if (!isForecastFresh({ base_observed_at, now })) {
+    return null;
+  }
+  const p_bike = interpolateForecast({
+    horizons_min: row.forecast_horizons_min,
+    values_x1000: row.forecast_p_bike_x1000,
+    in_min,
+  });
+  const p_dock = interpolateForecast({
+    horizons_min: row.forecast_horizons_min,
+    values_x1000: row.forecast_p_dock_x1000,
+    in_min,
+  });
+  // **片方だけ返さない。** borrow と return はどちらも表示に要る
+  if (p_bike === null || p_dock === null) {
+    return null;
+  }
+  return {
+    p_bike,
+    p_dock,
+    confidence: row.forecast_confidence,
+    base_observed_at: base_observed_at.toISOString(),
+    model_version: row.forecast_model_version,
+  };
+};
 
 export const buildStationsResponse = (params: {
   readonly bbox: Bbox;
   readonly feeds: readonly FeedRow[];
   readonly rows: readonly StationRow[];
+  /** 何分先の予測を出すか。**5 分に丸めた後**の値。指定が無ければ null。 */
+  readonly in_min: number | null;
   readonly now: Date;
 }): StationsResponse => {
   const feeds = params.feeds.map((feed) => toFeedStatus(feed, params.now));
   const observedBySystem = new Map(feeds.map((feed) => [feed.system_id, feed.data_updated_at]));
   const stations = params.rows.map((row) =>
-    toStation(row, observedBySystem.get(row.system_id) ?? null),
+    toStation(
+      row,
+      observedBySystem.get(row.system_id) ?? null,
+      toForecast(row, params.in_min, params.now),
+    ),
   );
   return stationsResponseSchema.parse({
     api_version: "v1",
@@ -118,6 +180,7 @@ export const buildStationsResponse = (params: {
     bbox: params.bbox,
     count: stations.length,
     stale: feeds.some((feed) => feed.stale),
+    forecast_in_min: params.in_min,
     feeds,
     stations,
     attribution: ATTRIBUTIONS,
@@ -143,6 +206,15 @@ export const queryStations = async (params: {
   if (!system.ok) {
     return badRequest("unknown_system", `system は ${SYSTEM_IDS.join(" か ")} です。`);
   }
+  // 到着の指定も **DB に触る前に**検証する。入力の誤りは常に 400 で返す
+  const arrival = parseArrival({
+    at: params.search.get("at"),
+    in_min: params.search.get("in_min"),
+    now: params.now,
+  });
+  if (!arrival.ok) {
+    return badRequest(arrival.problem, arrival.detail);
+  }
 
   // 格子に外側へ丸めてから問い合わせる。細かい位置は問い合わせにも記録にも残らない
   const bbox = quantizeBbox(parsed.bbox);
@@ -164,7 +236,13 @@ export const queryStations = async (params: {
     }
     return {
       ok: true,
-      response: buildStationsResponse({ bbox, feeds, rows: page.rows, now: params.now }),
+      response: buildStationsResponse({
+        bbox,
+        feeds,
+        rows: page.rows,
+        in_min: arrival.in_min,
+        now: params.now,
+      }),
     };
     // 設定の欠落（環境変数）も DB の不調も、呼び出し側から見れば「いま応えられない」。
     // 理由は応答に載せない（設定の内容が漏れる経路を作らない）

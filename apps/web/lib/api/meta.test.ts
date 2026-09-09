@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { SYSTEM_IDS, metaResponseSchema } from "@bikechance/shared";
-import { buildMeta } from "./meta";
+import { buildMeta, servingModelVersion } from "./meta";
 import type { FeedRow } from "./read-port";
 
 const NOW = new Date("2026-09-08T00:00:00.000Z");
@@ -18,6 +18,8 @@ const feed = (overrides: Partial<FeedRow> = {}): FeedRow => ({
   poll_interval_s: 60,
   capacity_is_dynamic: false,
   last_observed_at: "2026-09-07T23:58:00.000Z",
+  forecast_model_version: null,
+  forecast_generated_at: null,
   ...overrides,
 });
 
@@ -104,5 +106,49 @@ describe("連絡先", () => {
 
   it("与えられた宛先を使う", () => {
     expect(build([feed()]).notice).toContain("test@example.com");
+  });
+});
+
+describe("配信している予測の版（W4 の PR A）", () => {
+  const served = (overrides: Partial<FeedRow>): FeedRow =>
+    feed({
+      forecast_model_version: "b1-2026-09-08",
+      forecast_generated_at: "2026-09-07T23:58:30.000Z",
+      ...overrides,
+    });
+
+  it("推論が済んでいれば、その版を返す", () => {
+    expect(build([served({})]).model_version).toBe("b1-2026-09-08");
+  });
+
+  it("**1 度も推論していなければ null**（W2 からの意味を変えない）", () => {
+    expect(build([feed()]).model_version).toBeNull();
+    expect(servingModelVersion([feed()])).toBeNull();
+  });
+
+  it("系統で版が違うときは、新しく推論したほうを返す", () => {
+    const older = served({ forecast_model_version: "b1-2026-09-07" });
+    const newer = served({
+      system_id: "docomo-cycle",
+      forecast_model_version: "b1-2026-09-08",
+      forecast_generated_at: "2026-09-07T23:59:30.000Z",
+    });
+    expect(servingModelVersion([older, newer])).toBe("b1-2026-09-08");
+    // 並び順に依存しない
+    expect(servingModelVersion([newer, older])).toBe("b1-2026-09-08");
+  });
+
+  it("片方だけ推論済みなら、そちらを返す", () => {
+    expect(servingModelVersion([feed(), served({ system_id: "docomo-cycle" })])).toBe(
+      "b1-2026-09-08",
+    );
+  });
+
+  it("DB から取れなければ null（分からないものを版として出さない）", () => {
+    expect(build(null).model_version).toBeNull();
+  });
+
+  it("版が入っても stale はデータの鮮度のまま", () => {
+    expect(build([served({})]).stale).toBe(false);
   });
 });

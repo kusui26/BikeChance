@@ -20,6 +20,9 @@ export const PROBLEM_CODES = [
   "bbox_too_large",
   "unknown_system",
   "too_many_stations",
+  "arrival_conflict",
+  "arrival_malformed",
+  "arrival_out_of_range",
   "upstream_unavailable",
 ] as const;
 
@@ -33,6 +36,9 @@ const TITLES: Readonly<Record<ProblemCode, string>> = {
   bbox_too_large: "bbox が大きすぎます",
   unknown_system: "未知のシステムです",
   too_many_stations: "該当するポートが多すぎます",
+  arrival_conflict: "at と in_min は同時に指定できません",
+  arrival_malformed: "到着時刻の形式が正しくありません",
+  arrival_out_of_range: "到着時刻が予測できる範囲の外です",
   upstream_unavailable: "データベースに接続できません",
 };
 

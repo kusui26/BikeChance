@@ -21,7 +21,15 @@ export const PROBABILITY_DISPLAY_MAX = 0.99;
 /** 確率の表示刻み（過度な精度を見せない）。 */
 export const PROBABILITY_DISPLAY_STEP = 0.05;
 
-/** 予測が古いと判断するまでの秒数。超えたら API は stale を返す。 */
+/**
+ * 予測を「現在の予測」として出せなくなるまでの秒数（`base_observed_at` から）。
+ *
+ * 超えたら `/v1` は**予測の欄そのものを null にする**（行は返す。W4 の W4-01・W4-02）。
+ * 応答の `stale` はフィードの鮮度であって、こちらとは別である。
+ *
+ * **`app_config.infer_alert_s` と同じ値**にしてある（migration 0029）。
+ * **利用者に出せなくなった瞬間に、監視も鳴る。**
+ */
 export const FORECAST_STALE_AFTER_S = 15 * 60;
 
 export const SYSTEM_IDS = ["hellocycling", "docomo-cycle"] as const;

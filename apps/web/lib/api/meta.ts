@@ -46,6 +46,29 @@ const toFeedStatus = (feed: FeedRow, now: Date): FeedStatus => {
   };
 };
 
+/**
+ * いま配信している予測の版（W4 プラン §6.1 の PR A）。
+ *
+ * **いちばん新しい推論が使った版を返す。** 系統ごとに違うのは、片方の周期がデプロイを
+ * またいだ直後だけで、そのときは新しいほうを出すのが「いま何が出ているか」に近い。
+ *
+ * **1 度も推論していなければ null。** それが W2 からの状態で、`null` は「予測がまだ
+ * 無い」を表していた。意味を変えない。
+ */
+export const servingModelVersion = (feeds: readonly FeedRow[]): string | null => {
+  const served = feeds.filter(
+    (feed): feed is FeedRow & { forecast_model_version: string; forecast_generated_at: string } =>
+      feed.forecast_model_version !== null && feed.forecast_generated_at !== null,
+  );
+  if (served.length === 0) {
+    return null;
+  }
+  const newest = served.reduce((latest, feed) =>
+    feed.forecast_generated_at > latest.forecast_generated_at ? feed : latest,
+  );
+  return newest.forecast_model_version;
+};
+
 export const buildMeta = (params: {
   /** DB から取れた鮮度。取れなかったときは null を渡す。 */
   readonly feeds: readonly FeedRow[] | null;
@@ -61,7 +84,7 @@ export const buildMeta = (params: {
     generated_at: params.now.toISOString(),
     // 予測の有無ではなく**データの鮮度**を表す。予測は model_version を見る
     stale: feeds.some((feed) => feed.stale),
-    model_version: null,
+    model_version: params.feeds === null ? null : servingModelVersion(params.feeds),
     feeds,
     attribution: ATTRIBUTIONS,
     notice: buildOdptNotice(params.contact_email ?? FALLBACK_CONTACT_EMAIL),

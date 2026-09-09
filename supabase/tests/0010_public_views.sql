@@ -1,15 +1,16 @@
 -- pgTAP: 公開 API のビューと権限（W2 プラン §5.7、PR E）
 --
--- ここで固定したいのは 2 つ。
+-- ここで固定したいのは 3 つ。
 --   1. **匿名はビューだけを読める。** 基底テーブルには一切手が届かない（CLAUDE.md §5）
 --   2. **ビューが内部の約束を外に漏らさない。** `-1`（未観測）は NULL、`flags` は真偽値、
 --      壊れた座標と停止中システムは出さない
+--   3. **予測が無くても行は落ちない**（0033）。台数は出せるので、予測だけを NULL にする
 --
 -- 前提条件はこのテストが自分で作る（0007 と同じ方針）。ローカルの状態に依存させない。
 -- **行単位の検査は必ず `system_id` で絞る。** 他のデータが混ざっていても結果が変わらないように。
 
 begin;
-select plan(26);
+select plan(38);
 
 -- ────────────────────────────────────────────────────────────────
 -- 権限
@@ -179,6 +180,101 @@ select ok(
   (select last_observed_at is not null and expected_cadence_s = 300 and poll_interval_s = 60
      from public.v1_feeds where system_id = 't-active'),
   'v1_feeds は鮮度の判定に要る値を揃えて返す');
+
+-- ────────────────────────────────────────────────────────────────
+-- 列の一覧（0033）
+-- ────────────────────────────────────────────────────────────────
+-- 公開側は `select *` をせず列を並べて読む（`apps/web/lib/api/view-query.ts` の
+-- `STATION_COLUMNS` / `FEED_COLUMNS`）。**片方だけ変えると実行時まで気づけない**ので、
+-- ビューの側でも列を固定する。増やすときは両方を直すことになる。
+select columns_are('public'::name, 'v1_stations_current'::name, array[
+  'system_id', 'station_id', 'name', 'lat', 'lon', 'capacity', 'bikes', 'docks',
+  'is_installed', 'is_renting', 'is_returning', 'is_present', 'last_changed_at',
+  'forecast_horizons_min', 'forecast_p_bike_x1000', 'forecast_p_dock_x1000',
+  'forecast_confidence', 'forecast_base_observed_at', 'forecast_model_version'
+]::name[], 'v1_stations_current の列は view-query.ts の STATION_COLUMNS と同じ');
+
+select columns_are('public'::name, 'v1_feeds'::name, array[
+  'system_id', 'display_name', 'expected_cadence_s', 'poll_interval_s',
+  'capacity_is_dynamic', 'last_observed_at', 'forecast_model_version', 'forecast_generated_at'
+]::name[], 'v1_feeds の列は view-query.ts の FEED_COLUMNS と同じ');
+
+-- ────────────────────────────────────────────────────────────────
+-- 予測（0033）
+-- ────────────────────────────────────────────────────────────────
+-- 推論がまだ 1 度も走っていない状態。**「予測が無い」は「まだ」であって異常ではない**
+select ok(
+  (select forecast_model_version is null and forecast_generated_at is null
+     from public.v1_feeds where system_id = 't-active'),
+  '推論がまだなら v1_feeds の版は NULL（W2 からの意味を変えない）');
+
+select ok(
+  (select forecast_base_observed_at is null and forecast_horizons_min is null
+     from public.v1_stations_current where system_id = 't-active' and station_id = 'plain'),
+  '予測がまだ無いポートは、予測の列がすべて NULL');
+
+-- 1 ポートにだけ予測を入れる。**残りの 2 ポートが消えないこと**がこの節の主眼
+insert into public.station_forecasts
+  (system_id, station_id, generated_at, base_observed_at, model_version,
+   horizons_min, p_bike_x1000, p_dock_x1000, confidence)
+values
+  ('t-active', 'plain', timestamptz '2026-09-08 00:00:30+00', timestamptz '2026-09-08 00:00:00+00',
+   'b1-2026-09-08', '{5,10,15}', '{900,880,860}', '{100,120,140}', 3);
+
+select is(
+  (select count(*)::int from public.v1_stations_current where system_id = 't-active'),
+  3, '1 ポートにしか予測が無くても 3 件のまま（left join。行を落とさない）');
+
+select ok(
+  (select forecast_horizons_min = '{5,10,15}'::smallint[]
+      and forecast_p_bike_x1000 = '{900,880,860}'::smallint[]
+      and forecast_p_dock_x1000 = '{100,120,140}'::smallint[]
+     from public.v1_stations_current where system_id = 't-active' and station_id = 'plain'),
+  '予測の配列はそのまま渡す（ビューで加工しない）');
+
+select ok(
+  (select forecast_base_observed_at = timestamptz '2026-09-08 00:00:00+00'
+      and forecast_model_version = 'b1-2026-09-08'
+      and forecast_confidence = 3
+     from public.v1_stations_current where system_id = 't-active' and station_id = 'plain'),
+  '鮮度に使う base_observed_at と版・確度を返す（generated_at ではない）');
+
+select ok(
+  (select forecast_horizons_min is null and forecast_p_bike_x1000 is null
+      and forecast_p_dock_x1000 is null and forecast_confidence is null
+      and forecast_base_observed_at is null and forecast_model_version is null
+     from public.v1_stations_current where system_id = 't-active' and station_id = 'no-attr'),
+  '予測の無いポートは 6 列とも NULL（台数は出せるので行は残す）');
+
+select is(
+  (select bikes from public.v1_stations_current where system_id = 't-active' and station_id = 'no-attr')::int,
+  0, '予測が無くても現在値は返る');
+
+-- ────────────────────────────────────────────────────────────────
+-- v1_feeds の「いま配信している版」（0033）
+-- ────────────────────────────────────────────────────────────────
+insert into public.inference_log
+  (system_id, generated_at, base_observed_at, model_version, status, n_rows)
+values
+  ('t-active', timestamptz '2026-09-07 23:50:30+00', timestamptz '2026-09-07 23:50:00+00', 'b0-old',  'ok',     10),
+  ('t-active', timestamptz '2026-09-07 23:55:30+00', timestamptz '2026-09-07 23:55:00+00', 'b0-bad',  'failed',  0),
+  ('t-active', timestamptz '2026-09-08 00:00:30+00', timestamptz '2026-09-08 00:00:00+00', 'b1-2026-09-08', 'ok', 10),
+  -- 最新だが失敗。**失敗した回の版を「配信中」と言わない**
+  ('t-active', timestamptz '2026-09-08 00:05:30+00', timestamptz '2026-09-08 00:05:00+00', 'b2-bad',  'failed',  0),
+  -- 走っている最中の回も「配信中」ではない
+  ('t-active', timestamptz '2026-09-08 00:10:30+00', timestamptz '2026-09-08 00:10:00+00', 'b3-run',  'running', 0);
+
+select is(
+  (select forecast_model_version from public.v1_feeds where system_id = 't-active'),
+  'b1-2026-09-08', '最後に成功した推論の版を返す（失敗・実行中は数えない）');
+
+select is(
+  (select forecast_generated_at from public.v1_feeds where system_id = 't-active'),
+  timestamptz '2026-09-08 00:00:30+00', 'その回の generated_at を添える');
+
+select is(
+  (select count(*)::int from public.v1_feeds where system_id = 't-active'),
+  1, '推論の記録が何行あってもフィードは 1 行（lateral が行を増やさない）');
 
 select * from finish();
 rollback;
