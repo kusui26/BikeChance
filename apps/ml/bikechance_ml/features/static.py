@@ -12,16 +12,14 @@ HELLO は宣言値（`vehicle_capacity`）をそのまま使う。こちらは�
 動かない。
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
 import numpy as np
 
 from bikechance_ml.features.arrays import Bools, Float32, Float64, Int8, Int32, Int64
-from bikechance_ml.features.asof import Observations
 from bikechance_ml.features.constants import (
-    MISSING,
     SYSTEMS_WITH_DYNAMIC_CAPACITY,
     SYSTEMS_WITH_GAP,
     SYSTEMS_WITH_REPORTED_AGE,
@@ -52,6 +50,9 @@ class StationFacts:
     lat: Float64
     lon: Float64
     declared_capacity: Int32
+    #: 前日までの 7 日の `max(bikes + docks)`（参照スナップショット。W3 プラン §14.3）。
+    #: **動的な容量のシステムはこちらを使う。** 無ければ `-1`
+    capacity_est: Int32
     pref_code: Int32
     muni_code: Int32
     region_id: Int32
@@ -71,12 +72,20 @@ class StationFacts:
         return tuple(zip(self.system_ids, self.station_ids, strict=True))
 
 
-def to_facts(systems: Sequence[SystemReference]) -> StationFacts:
+def to_facts(
+    systems: Sequence[SystemReference],
+    capacity_estimates: Mapping[tuple[str, str], int] | None = None,
+) -> StationFacts:
     """参照データを、**システムの順 → 台帳の順**に並べた配列にする。
 
     属性を持たないポートがある（`status` にしか現れない）。その場合は座標も容量も
     「無い」として並べる。**行を落とさない**（落とすと近傍の位置がずれる）。
+
+    `capacity_estimates` は参照スナップショットの `capacity_est`。**渡さなければ
+    すべて `-1`**（＝無い）になる。動的な容量のシステムでは、無い＝容量不明として
+    `fill_ratio` と `gap` が NaN になる（0 で埋めない）。
     """
+    estimates = capacity_estimates or {}
     pairs = [pair for system in systems for pair in _ordered(system)]
     return StationFacts(
         system_ids=tuple(system_id for system_id, _, _ in pairs),
@@ -88,6 +97,9 @@ def to_facts(systems: Sequence[SystemReference]) -> StationFacts:
         lon=_floats(attribute.lon if attribute else None for _, _, attribute in pairs),
         declared_capacity=_codes(
             attribute.capacity if attribute else None for _, _, attribute in pairs
+        ),
+        capacity_est=_codes(
+            estimates.get((system_id, geo.station_id)) for system_id, geo, _ in pairs
         ),
         pref_code=_codes(geo.pref_code for _, geo, _ in pairs),
         muni_code=_codes(geo.muni_code for _, geo, _ in pairs),
@@ -145,24 +157,6 @@ def station_age_days(first_seen_ms: Int64, grid_ms: Sequence[int]) -> Float32:
     grid = np.asarray(grid_ms, dtype=np.int64)
     days = (grid[None, :] - first_seen_ms[:, None]) / _MS_PER_DAY
     return np.asarray(days, dtype=np.float32)
-
-
-def running_capacity(observations: Observations) -> Int32:
-    """観測 1 行ごとの `max(bikes + docks)`（そのポートの、その時点までの累積最大）。
-
-    **未来を覗かない**ように累積で取る。観測されていない行（`-1`）は数えず、
-    その時点までに 1 度も観測が無ければ `-1` を残す。
-    """
-    result = np.full(observations.n_rows, NO_CODE, dtype=np.int32)
-    for station in range(observations.n_stations):
-        rows = observations.rows_of(station)
-        if rows.stop == rows.start:
-            continue
-        bikes = observations.bikes[rows].astype(np.int32)
-        docks = observations.docks[rows].astype(np.int32)
-        total = np.where(bikes == MISSING, NO_CODE, bikes + docks)
-        result[rows] = np.maximum.accumulate(total).astype(np.int32)
-    return result
 
 
 def declared_capacity_grid(facts: StationFacts, n_grid: int) -> Int32:

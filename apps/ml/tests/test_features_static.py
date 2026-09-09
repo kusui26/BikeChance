@@ -22,7 +22,6 @@ from bikechance_ml.features.static import (
     declared_capacity_grid,
     fill_ratio,
     gap,
-    running_capacity,
     station_age_days,
     to_facts,
 )
@@ -112,15 +111,20 @@ def observations_of(values: list[int]) -> Observations:
     return to_observations(table, (("docomo-cycle", "z"),))
 
 
-def test_running_capacity_never_looks_ahead() -> None:
-    """**「その日の最大」を使うと未来を覗く。** 累積最大なら覗かない。"""
-    observations = observations_of([2, 5, 3])
-    assert running_capacity(observations).tolist() == [3, 6, 6]
+def test_capacity_est_comes_from_the_reference_snapshot() -> None:
+    """**動的な容量は前日までの 7 日の推定値**（W3 プラン §14.2 の 2）。
+
+    以前はビルド窓の累積最大だった。窓の長さで値が変わるのをやめ、
+    参照スナップショットの `capacity_est` を使う（§13.3）。
+    """
+    facts = to_facts([system("docomo-cycle", ["z"], ["z"])], {("docomo-cycle", "z"): 14})
+    assert facts.capacity_est.tolist() == [14]
 
 
-def test_running_capacity_ignores_unobserved_rows() -> None:
-    observations = observations_of([-1, 4])
-    assert running_capacity(observations).tolist() == [NO_CODE, 5]
+def test_a_port_missing_from_the_snapshot_has_no_estimate() -> None:
+    """**0 で埋めない。** 当日現れたポートは前日の版に無く、容量は「無い」。"""
+    facts = to_facts([system("docomo-cycle", ["z"], ["z"])], {})
+    assert facts.capacity_est.tolist() == [NO_CODE]
 
 
 def test_declared_capacity_is_spread_over_the_grid() -> None:

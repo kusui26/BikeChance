@@ -25,7 +25,7 @@ import json
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
-from typing import Final, Protocol
+from typing import Protocol
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -40,6 +40,8 @@ from bikechance_ml.features.reference import (
 )
 from bikechance_ml.features.reference_snapshot import (
     CAPACITY_DAYS,
+    NEIGHBORS_NAME,
+    STATIONS_NAME,
     STATIONS_SCHEMA,
     daily_capacity_max,
     to_daily_max,
@@ -51,10 +53,6 @@ from bikechance_ml.jobs.build_features import SYSTEM_IDS, to_parquet_bytes
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from bikechance_ml.jobs.snapshot_table import has_current_schema, parquet_path
 from bikechance_ml.jobs.snapshot_table import read_table as read_snapshot_table
-
-#: 書き出すファイルの名前。パスは `reference_path` が組み立てる。
-STATIONS_NAME: Final[str] = "stations"
-NEIGHBORS_NAME: Final[str] = "neighbors"
 
 
 class ReferencePort(Protocol):

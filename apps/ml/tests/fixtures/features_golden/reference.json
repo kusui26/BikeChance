@@ -2,7 +2,8 @@
   "_comment": [
     "特徴量パイプラインのゴールデンフィクスチャ（参照データ）。手で書いたもの。",
     "p1 と p2 は 80 m、p1 とドコモの d1 は 420 m。300 m の帯と 500 m の帯で中身が変わる。",
-    "d1 の capacity は station_attributes の凍結値で、特徴量は使わない（動的なので推定する）。"
+    "d1 の capacity は station_attributes の凍結値で、特徴量は使わない（動的なので推定する）。",
+    "capacity_est は参照スナップショット（前日の版）の値。動的な容量のドコモだけが使う。"
   ],
   "holidays": ["2026-09-21", "2026-09-22", "2026-09-23"],
   "systems": [
@@ -13,13 +14,15 @@
           "station_id": "p1",
           "first_seen_at": "2026-09-01T00:00:00+09:00",
           "pref_code": 13,
-          "muni_code": 13101
+          "muni_code": 13101,
+          "capacity_est": 11
         },
         {
           "station_id": "p2",
           "first_seen_at": "2026-09-06T12:00:00+09:00",
           "pref_code": 13,
-          "muni_code": 13102
+          "muni_code": 13102,
+          "capacity_est": 11
         }
       ],
       "attributes": [
@@ -76,18 +79,32 @@
           "station_id": "5753",
           "first_seen_at": "2026-09-01T00:00:00+09:00",
           "pref_code": null,
-          "muni_code": null
+          "muni_code": null,
+          "capacity_est": 9999
         },
         {
           "station_id": "d1",
           "first_seen_at": "2026-09-01T00:00:00+09:00",
           "pref_code": null,
-          "muni_code": null
+          "muni_code": null,
+          "capacity_est": 14
         }
       ],
       "attributes": [
-        { "station_id": "5753", "lat": 35.0, "lon": 140.5, "capacity": 9999, "region_id": 1 },
-        { "station_id": "d1", "lat": 35.6822, "lon": 139.76, "capacity": 12, "region_id": 3 }
+        {
+          "station_id": "5753",
+          "lat": 35.0,
+          "lon": 140.5,
+          "capacity": 9999,
+          "region_id": 1
+        },
+        {
+          "station_id": "d1",
+          "lat": 35.6822,
+          "lon": 139.76,
+          "capacity": 12,
+          "region_id": 3
+        }
       ],
       "neighbors": [
         {

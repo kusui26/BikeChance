@@ -98,6 +98,8 @@ class DayStats:
     date: str
     feature_set: str
     stations: int
+    #: 観測にあって参照スナップショットに無かったポート。**当日現れたぶん**が出る
+    stations_unreferenced: int
     pairs_total: int
     pairs_kept: int
     rows: int
@@ -110,6 +112,7 @@ class DayStats:
             "date": self.date,
             "feature_set": self.feature_set,
             "stations": self.stations,
+            "stations_unreferenced": self.stations_unreferenced,
             "pairs_total": self.pairs_total,
             "pairs_kept": self.pairs_kept,
             "rows": self.rows,
@@ -190,7 +193,7 @@ def _grid_state(inputs: DayInputs, grid: Grid) -> GridState:
         label_docks=asof.gather(observations.docks, label_row, MISSING),
         label_flags=asof.gather(observations.flags, label_row, MISSING),
         label_observed_ms=asof.gather(observations.observed_at_ms, label_row, 0),
-        capacity=_capacity(inputs, observations, feature_row, len(grid)),
+        capacity=_capacity(inputs, len(grid)),
         valid=_valid(feature_row, bikes, observed, times),
         rentals=asof.gather(flows.rentals, feature_row, 0),
         returns=asof.gather(flows.returns, feature_row, 0),
@@ -205,12 +208,19 @@ def _valid(feature_row: Int32, bikes: Int16, observed_ms: Int64, times: Int64) -
     return np.asarray((feature_row != asof.NO_ROW) & (bikes != MISSING) & fresh, dtype=np.bool_)
 
 
-def _capacity(
-    inputs: DayInputs, observations: asof.Observations, feature_row: Int32, n_grid: int
-) -> Int32:
-    """容量。**動的なシステムは累積最大の推定値、他は宣言値**（開発プラン §6.3）。"""
+def _capacity(inputs: DayInputs, n_grid: int) -> Int32:
+    """容量。**動的なシステムは前日までの 7 日の推定値、他は宣言値**（開発プラン §3）。
+
+    以前はビルド窓（`LOOKBACK_HOURS` と対象日で約 49 時間）の累積最大だった。
+    **窓の長さを変えると値が変わり**、再現性が窓に縛られる（W3 プラン §13.3）。
+    参照スナップショットの `capacity_est` は**前日までの 7 日**から作るので、窓に
+    依存せず、未来も覗かない。
+
+    参照に無いポート（当日現れたもの）は `-1` のままで、`fill_ratio` と `gap` が
+    NaN になる。**0 で埋めない。**
+    """
     facts = inputs.reference.facts
-    estimated = asof.gather(static.running_capacity(observations), feature_row, static.NO_CODE)
+    estimated = np.broadcast_to(facts.capacity_est[:, None], (len(facts), n_grid))
     declared = static.declared_capacity_grid(facts, n_grid)
     return np.asarray(
         np.where(facts.has_dynamic_capacity[:, None], estimated, declared), dtype=np.int32
@@ -696,6 +706,9 @@ def _stats(inputs: DayInputs, table: pa.Table, counts: dict[str, int], total: in
         date=inputs.day.isoformat(),
         feature_set=FEATURE_SET,
         stations=len(inputs.reference.facts),
+        stations_unreferenced=asof.unreferenced_stations(
+            inputs.table, inputs.reference.facts.station_keys()
+        ),
         pairs_total=total,
         pairs_kept=total - sum(counts.values()),
         rows=int(table.num_rows),

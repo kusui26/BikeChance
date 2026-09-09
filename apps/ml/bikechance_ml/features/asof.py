@@ -92,6 +92,27 @@ def to_observations(table: pa.Table, keys: Sequence[tuple[str, str]]) -> Observa
     )
 
 
+def unreferenced_stations(table: pa.Table, keys: Sequence[tuple[str, str]]) -> int:
+    """観測にあって参照に無いポートの数。
+
+    `to_observations` はそういう行を黙って捨てる（台帳が正）。**捨てた件数を数える口を
+    別に置く**：参照スナップショットは前日の版なので、当日現れたポート（1 日約 100 件）
+    がここに出る。0 のまま増えないことを確かめるためのもの（W3 プラン §14.2 の 2）。
+    """
+    if table.num_rows == 0:
+        return 0
+    columns = ["system_id", "station_id"]
+    seen = table.select(columns).group_by(columns).aggregate([])
+    observed = set(
+        zip(
+            seen.column("system_id").to_pylist(),
+            seen.column("station_id").to_pylist(),
+            strict=True,
+        )
+    )
+    return len(observed - set(keys))
+
+
 def _int64(table: pa.Table, name: str) -> Int64:
     """時刻の列をエポックミリ秒の int64 にする。"""
     column = table.column(name).cast(pa.int64()).combine_chunks()

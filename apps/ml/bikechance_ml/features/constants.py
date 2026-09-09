@@ -22,7 +22,13 @@ GRID_POINTS_PER_DAY: Final[int] = 24 * 60 // GRID_MINUTES
 MAX_STALENESS_S: Final[int] = 600
 
 #: 特徴量の版。モデルはこの値を記録し、推論時に照合する（CLAUDE.md §2 の原則 4）。
-FEATURE_SET: Final[str] = "v0"
+#:
+#: v1（2026-09-09）：**参照データを日次スナップショットから読むようにした**（W3 プラン
+#: §14.2 の 2）。列は増えていないが、値が変わる 3 つがある。
+#:   * `capacity`（動的な容量のシステム）… ビルド窓の累積最大 → **前日までの 7 日の最大**
+#:   * `fill_ratio` / `gap` / `is_over_capacity` … 上に乗っているので一緒に動く
+#:   * 近傍と静的属性 … その日の値ではなく**前日の版**で固定される（再現性が戻る）
+FEATURE_SET: Final[str] = "v1"
 
 #: 難所の判定（開発プラン §6.2）。`bikes <= 2` または `docks <= 2`。
 TIGHT_THRESHOLD: Final[int] = 2
