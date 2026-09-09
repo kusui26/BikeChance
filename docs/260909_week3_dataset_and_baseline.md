@@ -2710,7 +2710,7 @@ W3 の実装は終わっていて、**9/16 までは段 7 の測り直し待ち�
 
 | # | やること | 規模 | 根拠 |
 |---|---|---|---|
-| **1** | **日次の参照スナップショット**（§14.3） | 中（新ジョブ 1 本＋読み手） | §13.2・§13.3 |
+| **1** | ~~**日次の参照スナップショット**（§14.3）~~ **済（2026-09-09）** | 中（新ジョブ 1 本＋読み手） | §13.2・§13.3 |
 | **2** | `build_features` をスナップショット読みに切り替え、`FEATURE_SET` を上げる | 小 | 1 の適用 |
 | **3** | 成果物に無いポートの数を `inference_log.detail` に出す | 小 | §12 の 110 |
 | **4** | `inference_log` の保持を `run_maintenance` に足す | 小 | §13.6（W7 の予定を前倒す） |
@@ -2742,10 +2742,14 @@ reference/date=YYYY-MM-DD/stations.parquet    約 20,750 行
 reference/date=YYYY-MM-DD/neighbors.parquet   約 106,516 行
 ```
 
-| ファイル | 列 |
+| ファイル | 列（実装 `features/reference_snapshot.py`） |
 |---|---|
-| `stations` | `system_id`・`station_id`・`idx`・`first_seen_at`・`is_active`・`lat`・`lon`・`capacity_declared`・`capacity_is_dynamic`・`is_charging_station`・`region_id`・`pref_code`・`muni_code`・**`capacity_daily_max`**・**`capacity_est`**・**`capacity_days`** |
-| `neighbors` | `system_id`・`station_id`・`neighbor_system_id`・`neighbor_station_id`・`distance_m` |
+| `stations` | `system_id`・`station_id`・`first_seen_at`・`pref_code`・`muni_code`・**`has_attributes`**・`lat`・`lon`・`capacity`・`is_charging_station`・`region_id`・**`capacity_daily_max`**・**`capacity_est`**・**`capacity_days`** |
+| `neighbors` | `system_id`・`station_id`・`nb_system_id`・`nb_station_id`・`distance_m`・`same_system` |
+
+**`SystemReference` が持たないものは持たせない。** `is_active` は入れない（`list_station_geo` が読まないのと同じ理由で、活性なポートだけ残すと生存者バイアスになる）。`idx`（台帳の位置）も入れない。**`has_attributes` だけは足す**：台帳にあって属性が無いポートがあり、全 null の属性行をでっち上げると「`lat` が無いポート」と区別が付かなくなる。
+
+**除外規則はここで適用しない。** ドコモの `5753`（【監視】メンテナンスポート）は `capacity_est = 9999` のまま入る。除外は特徴量を作る側の仕事で、**参照は「事業者が出しているもの」をそのまま持つ**（データ辞書 §7）。
 
 **`capacity_est` は「過去 7 日の `max(bikes + docks)`」を日次で作る**（開発プラン §3 の定義に戻す）。7 日ぶんの Parquet を毎回読むのではなく、**その日の最大（`capacity_daily_max`）を各スナップショットに残し、直近 7 版の最大を取る**。読むのは当日の Parquet（48 ファイル・約 4 MB）と、前 6 版の `stations.parquet` だけで済む。7 日揃うまでは揃った日数を `capacity_days` に出す（**足りないことを黙って隠さない**）。
 
@@ -2759,7 +2763,17 @@ reference/date=YYYY-MM-DD/neighbors.parquet   約 106,516 行
 
 **いつ動かすか**：`rebuild_geo`（pg_cron 04:30 JST）の後。**05:00 JST の Vercel Cron で `/ml/reference`**。前日ぶんを書くので、パスの日付は前日になる。
 
-**容量**：zstd で `stations` 約 0.3 MB ＋ `neighbors` 約 1.2 MB ＝ **1 日約 1.5 MB、年 550 MB**。Storage は 100 GB 込み。
+**容量と所要（2026-09-09 に本番で実測）**：`stations` 510 KB ＋ `neighbors` 509 KB ＝ **1 日 1.0 MB、年 370 MB**（Storage は 100 GB 込み）。所要は**手元から 43 秒**で、ほぼ全部が 48 ファイルの逐次取得である（CPU は 10%）。`maxDuration` は 120 秒。本番は Supabase と同じ東京なので、ここより速い見込み。
+
+**持ち回りが効くことを確かめた**（9/06〜9/08 を順に書いた）。
+
+| 版 | `capacity_days_max` | `capacity_est` を持つポート | `missing_hours` |
+|---|---:|---:|---:|
+| 2026-09-06 | 1 | 20,647 | **30**（収集開始が 15:51 JST。15 時間 × 2 系統） |
+| 2026-09-07 | 2 | 20,742 | 0 |
+| 2026-09-08 | 3 | **20,749** | 0 |
+
+**日を重ねるほど推定を持つポートが増える。** 7 日揃うまでは `capacity_days` にその日数が出る。
 
 **版**：`REFERENCE_SET` を持ち、Parquet の**スキーマメタデータ**に `reference_set` と `built_at` を入れる（列にしない。20 万行に同じ値を並べない）。`build_features` は使った `reference_date` を出力サンプルのスキーマメタデータに記録する。
 

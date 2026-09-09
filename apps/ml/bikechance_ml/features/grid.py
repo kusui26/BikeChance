@@ -122,3 +122,23 @@ def _floor_hour(at: datetime) -> datetime:
 def features_path(day: date) -> str:
     """出力のパス。**JST の暦日**（入力の Parquet は UTC）。"""
     return f"features/date={day:%Y-%m-%d}/part.parquet"
+
+
+def reference_path(day: date, name: str) -> str:
+    """参照スナップショットのパス（W3 プラン §14.3）。**JST の暦日**。
+
+    `name` は `stations` か `neighbors`。既存の `gbfs-parquet` バケットに置く
+    （MIME の許可リストに収まるのでバケットを増やさない。§12 の 106）。
+    """
+    return f"reference/date={day:%Y-%m-%d}/{name}.parquet"
+
+
+def day_hours(day: date) -> tuple[datetime, ...]:
+    """その JST 暦日ちょうどを覆う **UTC の正時** 24 個。
+
+    JST の 00:00 は UTC の 15:00 ちょうどなので、丸めずに 24 時間で過不足なく覆える。
+    `parquet_hours` と違って**前後の余白を取らない**：ここが欲しいのは「その日の
+    観測だけ」で、as-of のために前を覗く必要が無いため。
+    """
+    start = day_start(day)
+    return tuple(start + timedelta(hours=offset) for offset in range(24))
