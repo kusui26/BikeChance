@@ -34,6 +34,10 @@ from bikechance_ml.features.reference import (
 #: 参照スナップショットの形の版。**列や意味を変えたら上げる。**
 REFERENCE_SET: Final[str] = "r0"
 
+#: 書き出すファイルの名前。パスは `grid.reference_path` が組み立てる。
+STATIONS_NAME: Final[str] = "stations"
+NEIGHBORS_NAME: Final[str] = "neighbors"
+
 #: `capacity_est` を作る日数（開発プラン §3 の `capacity_est = 過去 7 日の max`）。
 CAPACITY_DAYS: Final[int] = 7
 

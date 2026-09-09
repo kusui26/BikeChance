@@ -21,8 +21,8 @@
 
 import argparse
 import json
-from collections.abc import Sequence
-from datetime import date, datetime
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
@@ -32,8 +32,14 @@ import pyarrow.parquet as pq
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.features import build, neighbors, static
 from bikechance_ml.features.constants import LOOKAHEAD_HOURS, LOOKBACK_HOURS
-from bikechance_ml.features.grid import features_path, parquet_hours
+from bikechance_ml.features.grid import features_path, parquet_hours, reference_path
 from bikechance_ml.features.reference import SystemReference
+from bikechance_ml.features.reference_snapshot import (
+    NEIGHBORS_NAME,
+    STATIONS_NAME,
+    capacity_estimates,
+    to_reference,
+)
 from bikechance_ml.io.supabase import PARQUET_BUCKET, SupabaseIo, open_storage
 from bikechance_ml.jobs.snapshot_table import COMPRESSION, has_current_schema, parquet_path
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
@@ -42,14 +48,49 @@ from bikechance_ml.jobs.snapshot_table import read_table as read_snapshot_table
 #: 対象のシステム。**並び順が台帳の位置を決める**ので、固定する（`analysis/eda_01.py` と同じ）。
 SYSTEM_IDS: Final[tuple[str, ...]] = ("hellocycling", "docomo-cycle")
 
+#: 参照スナップショットの `capacity_est`（`(system_id, station_id)` → 台数）。
+type Estimates = Mapping[tuple[str, str], int]
 
-def read_reference(source: SupabaseIo, system_id: str) -> SystemReference:
-    """1 システムぶんの参照データを読む。"""
-    return SystemReference(
-        system_id=system_id,
-        geo=source.list_station_geo(system_id),
-        attributes=source.list_station_attributes(system_id),
-        neighbors=source.list_neighbors(system_id),
+
+class MissingReferenceError(RuntimeError):
+    """参照スナップショットが無い。**DB の「いまの値」で代用しない。**
+
+    代用すると、同じ日を作り直したときに値が変わる状態に戻る（W3 プラン §13.2）。
+    黙って別のものを読むくらいなら止めるほうがよい。
+    """
+
+
+def read_reference(source: SupabaseIo, day: date) -> tuple[tuple[SystemReference, ...], Estimates]:
+    """**基準時刻の前日**の参照スナップショットを読む（W3 プラン §14.3）。
+
+    学習も推論も同じ規則で「前日の版」を読む。**「学習は前日、推論は最新」にすると、
+    そこが新しい train/serve skew になる。**
+
+    以前は `stations` / `station_attributes` / `station_neighbors` を DB から直に
+    読んでいた。それだと過去の日を作り直すたびに値が変わる（§13.2）。
+    """
+    source_day = day - timedelta(days=1)
+    tables = {}
+    for name in (STATIONS_NAME, NEIGHBORS_NAME):
+        path = reference_path(source_day, name)
+        body = source.download(PARQUET_BUCKET, path)
+        if body is None:
+            raise MissingReferenceError(
+                f"参照スナップショットが無い: {path}"
+                "（`python -m bikechance_ml.jobs.build_reference --date"
+                f" {source_day:%Y-%m-%d} --upload` を先に走らせる）"
+            )
+        tables[name] = pq.read_table(pa.BufferReader(body))
+    found = {
+        one.system_id: one for one in to_reference(tables[STATIONS_NAME], tables[NEIGHBORS_NAME])
+    }
+    missing = tuple(one for one in SYSTEM_IDS if one not in found)
+    if missing:
+        raise MissingReferenceError(f"参照スナップショットにシステムが無い: {missing}")
+    # **`SYSTEM_IDS` の順に並べ直す。** `to_reference` は `system_id` の昇順で返すが、
+    # 台帳の位置（＝出力の行順）はこの並びが決める。順を変えると行順が黙って入れ替わる
+    return tuple(found[system_id] for system_id in SYSTEM_IDS), capacity_estimates(
+        tables[STATIONS_NAME]
     )
 
 
@@ -94,11 +135,12 @@ def _one_hour(
 def to_inputs(
     day: date,
     systems: Sequence[SystemReference],
+    estimates: Estimates,
     holidays: frozenset[date],
     table: pa.Table,
 ) -> build.DayInputs:
     """参照データと Parquet を、組み立ての入力に直す。"""
-    facts = static.to_facts(systems)
+    facts = static.to_facts(systems, estimates)
     links = neighbors.to_links(systems, facts.station_keys())
     return build.DayInputs(
         day=day,
@@ -129,10 +171,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     cache = Path(options.cache) if options.cache else None
 
     with open_storage(read_storage_config()) as source:
-        systems = tuple(read_reference(source, system_id) for system_id in SYSTEM_IDS)
+        systems, estimates = read_reference(source, day)
         holidays = frozenset(source.list_holidays())
         table, missing = load_snapshots(source, day, cache)
-        built = build.build_day(to_inputs(day, systems, holidays, table))
+        built = build.build_day(to_inputs(day, systems, estimates, holidays, table))
         body = to_parquet_bytes(built.table)
         if options.upload:
             source.upload_parquet(features_path(day), body)

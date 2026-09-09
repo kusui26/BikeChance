@@ -81,12 +81,19 @@ def _numbers(rows: list[dict[str, str]], name: str) -> pa.Array:
     return pa.array([int(row[name]) for row in rows], type=pa.int16())
 
 
-def load_reference() -> tuple[tuple[SystemReference, ...], frozenset[date]]:
-    """`reference.json` を参照データに直す。"""
+def load_reference() -> tuple[
+    tuple[SystemReference, ...], dict[tuple[str, str], int], frozenset[date]
+]:
+    """`reference.json` を参照データに直す。**`capacity_est` も一緒に返す。**"""
     document = json.loads(REFERENCE.read_text(encoding="utf-8"))
     systems = tuple(_to_system(one) for one in document["systems"])
     holidays = frozenset(date.fromisoformat(one) for one in document["holidays"])
-    return systems, holidays
+    estimates = {
+        (str(system["system_id"]), str(station["station_id"])): int(str(station["capacity_est"]))
+        for system in document["systems"]
+        for station in system["stations"]
+    }
+    return systems, estimates, holidays
 
 
 def _to_system(document: dict[str, object]) -> SystemReference:
@@ -147,8 +154,8 @@ def _optional_float(value: object) -> float | None:
 
 def build_inputs() -> build.DayInputs:
     """フィクスチャから組み立ての入力を作る。**テストと生成器で同じ道を通す。**"""
-    systems, holidays = load_reference()
-    facts = static.to_facts(systems)
+    systems, estimates, holidays = load_reference()
+    facts = static.to_facts(systems, estimates)
     links = neighbors.to_links(systems, facts.station_keys())
     return build.DayInputs(
         day=DAY,
