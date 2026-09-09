@@ -18,8 +18,8 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
-from typing import Final
+from datetime import date, datetime, timedelta
+from typing import Final, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -49,18 +49,27 @@ from bikechance_ml.features.constants import (
     GRID_MINUTES,
     HORIZONS_MIN,
     LAG_MINUTES,
+    MAX_STALENESS_S,
     MISSING,
     NEAR_RADIUS_M,
+    NOW_LOOKBACK_MINUTES,
     ROLL_MINUTES,
     SAME_TIME_MINUTES,
     STRATUM_TIGHT,
     STRATUM_UNIFORM,
 )
-from bikechance_ml.features.grid import Grid, build_grid
-from bikechance_ml.features.schema import SCHEMA, to_table
+from bikechance_ml.features.grid import (
+    JST_OFFSET_MS,
+    Grid,
+    build_grid,
+    build_point_grid,
+    jst_date,
+)
+from bikechance_ml.features.schema import SCHEMA, SERVING_SCHEMA, to_serving_table, to_table
 
 _MINUTES_PER_DAY: Final[int] = 24 * 60
 _MS_PER_SECOND: Final[int] = 1000
+_MS_PER_MINUTE: Final[int] = 60_000
 _ONE_DAY: Final[timedelta] = timedelta(days=1)
 
 
@@ -77,6 +86,25 @@ class Reference:
     holidays: frozenset[date]
 
 
+class Inputs(Protocol):
+    """組み立てが要る入力。**学習（1 日）と推論（1 点）の共通部分。**
+
+    観測の表はどちらも `jobs/snapshot_table.py` の `SCHEMA`（長形式）で、学習は
+    Parquet から、推論は `status_snapshots` から作る。**形が同じなので、ここから先の
+    規則は 1 つで済む**（W4 プラン §6.3）。
+    """
+
+    @property
+    def day(self) -> date:
+        """基準時刻が属する **JST の暦日**。暦の特徴量と抽出の種がこれで決まる。"""
+
+    @property
+    def reference(self) -> Reference: ...
+
+    @property
+    def table(self) -> pa.Table: ...
+
+
 @dataclass(frozen=True)
 class DayInputs:
     """1 日ぶんの入力。`table` は全システムの Parquet を連結したもの。"""
@@ -84,6 +112,28 @@ class DayInputs:
     day: date
     reference: Reference
     table: pa.Table
+
+
+@dataclass(frozen=True)
+class NowInputs:
+    """1 点ぶんの入力（推論）。
+
+    `at` は **5 分格子の上の基準時刻**（UTC）。`table` は直近の窓と 1 日前の窓を
+    連結した長形式で、**学習が Parquet から読むものと同じ形**である。
+
+    `system_id` は**行を作る対象**。台帳は 2 システムを 1 つにまとめてある（近傍が
+    システムを跨ぐため）ので、`table` には**他系統の観測も入れてよい**：近傍の集計に
+    要るのは他系統の「いまの状態」だけで、その履歴は要らない。行は作らない。
+    """
+
+    at: datetime
+    system_id: str
+    reference: Reference
+    table: pa.Table
+
+    @property
+    def day(self) -> date:
+        return jst_date(self.at)
 
 
 @dataclass(frozen=True)
@@ -130,6 +180,41 @@ class Built:
 
 
 @dataclass(frozen=True)
+class NowStats:
+    """1 点ぶんの内訳（推論）。**`excluded` はポート数**（水平で掛けない）。"""
+
+    at: str
+    feature_set: str
+    #: **この系統の**台帳のポート数。台帳は 2 システムを 1 つにまとめてあるが、
+    #: 内訳は自系統だけを数える（他系統は近傍のためだけに居る）
+    stations: int
+    stations_unreferenced: int
+    #: 除外を通ったポート数。この数 × 10 水平が `rows` になる
+    predictable: int
+    rows: int
+    excluded: dict[str, int]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "at": self.at,
+            "feature_set": self.feature_set,
+            "stations": self.stations,
+            "stations_unreferenced": self.stations_unreferenced,
+            "predictable": self.predictable,
+            "rows": self.rows,
+            "excluded": dict(sorted(self.excluded.items())),
+        }
+
+
+@dataclass(frozen=True)
+class Ready:
+    """推論に渡す表と、その内訳。"""
+
+    table: pa.Table
+    stats: NowStats
+
+
+@dataclass(frozen=True)
 class GridState:
     """拡張グリッド上の状態。行列の形はすべて `(ポート, グリッド点)`。"""
 
@@ -153,17 +238,18 @@ class GridState:
 
 
 def build_day(inputs: DayInputs) -> Built:
-    """1 日ぶんのサンプルを作る。"""
+    """1 日ぶんのサンプルを作る（学習）。"""
     grid = build_grid(inputs.day)
     state = _grid_state(inputs, grid)
     base = _base_exclusion(inputs, state, grid)
     pre = _precompute(inputs, grid, state)
+    sampling = _sampling(inputs, grid, state)
     parts: list[pa.Table] = []
     # 基準時刻の側で落ちた行は**全水平で落ちる**ので、件数を水平の数だけ数える
     counts = {reason: number * len(HORIZONS_MIN) for reason, number in base.counts.items()}
     total = int(base.keep.size) * len(HORIZONS_MIN)
     for index, horizon in enumerate(HORIZONS_MIN):
-        part, dropped = _one_horizon(inputs, grid, state, pre, base.keep, index, horizon)
+        part, dropped = _one_horizon(inputs, grid, state, pre, sampling, base.keep, index, horizon)
         parts.append(part)
         for reason, number in dropped.items():
             counts[reason] = counts.get(reason, 0) + number
@@ -171,12 +257,115 @@ def build_day(inputs: DayInputs) -> Built:
     return Built(table=table, stats=_stats(inputs, table, counts, total))
 
 
+def serving_shifts() -> tuple[int, ...]:
+    """推論の格子が持つべきずらし量（分）。**特徴量を足したらここも直す。**
+
+    足し忘れると `Grid.shifted` が `MissingShiftError` で止まる。**静かに別の時刻の
+    値が入るよりよい**（W4 プラン §6.3）。目標時刻（`+h`）は入れない：推論はラベルを
+    作らないので、`t + h` の観測を引く場面が無い。
+    """
+    lags = {-minutes for minutes in (*LAG_MINUTES, *DELTA_MINUTES)}
+    rolling = {-minutes for minutes in _rolling_offsets()}
+    history = {horizon - SAME_TIME_MINUTES for horizon in HORIZONS_MIN}
+    return tuple(sorted({0, -SAME_TIME_MINUTES, *lags, *rolling, *history}))
+
+
+def serving_windows(at: datetime) -> tuple[tuple[datetime, datetime], ...]:
+    """推論が読む観測の範囲（**半開区間 `[start, end)`、UTC**）。
+
+    **2 つに分かれる。** 連続して読むと 1 日ぶんになるが、実際に要るのは端と端だけである。
+
+      1. **直近**（`NOW_LOOKBACK_MINUTES` = 200 分）… ラグ・移動窓・流量と、
+         `minutes_since_last_change` の上限（180 分）を賄う
+      2. **1 日前**（`t − 1450` 〜 `t − 1255`）… 同時刻履歴。`t + h − 1 日` を
+         10 水平ぶん覆う
+
+    どちらも `MAX_STALENESS_S`（10 分）ぶん手前から始める。格子点の as-of は最大で
+    それだけ古い観測を指すので、手前を切ると**端の点だけ値が変わる**。
+
+    **この関数が窓の正である。** `jobs/infer.py` はこれで読み、ゴールデン
+    （`tests/test_features_parity.py`）はこれで絞って一致を確かめる。
+    """
+    stale = timedelta(seconds=MAX_STALENESS_S)
+    step = timedelta(minutes=GRID_MINUTES)
+    recent = (at - timedelta(minutes=NOW_LOOKBACK_MINUTES), at + step)
+    back_start = at - timedelta(minutes=SAME_TIME_MINUTES) - stale
+    back_end = at - timedelta(minutes=SAME_TIME_MINUTES - max(HORIZONS_MIN)) + step
+    return ((back_start, back_end), recent)
+
+
+def build_now(inputs: NowInputs) -> Ready:
+    """1 点ぶんの特徴量を作る（推論）。**`build_day` と同じ関数を通る。**
+
+    違うのは 3 つだけで、どれも「学習の都合」である。
+      * 格子が 1 点（`build_point_grid`）
+      * **目標時刻の除外をしない**（ラベルが無い）
+      * **抽出をしない**（全件を出す）
+
+    出るのは `SERVING_SCHEMA` の 61 列で、そのうち 57 列が特徴量である。
+    """
+    grid = build_point_grid(inputs.at, serving_shifts())
+    # **ラベルは作らない。** 推論に未来は無い（§9 の契約 5）
+    state = _grid_state(inputs, grid, labels=False)
+    # **自系統だけを母数にする。** 他系統は近傍のためだけに居るので、内訳に混ぜない
+    base = _base_exclusion(inputs, state, grid, _own_system(inputs))
+    pre = _precompute(inputs, grid, state)
+    stations = np.nonzero(base.keep)[0]
+    points = np.zeros(len(stations), dtype=np.int64)
+    parts = [
+        to_serving_table(
+            _feature_columns(inputs, grid, state, pre, Picked(stations, points, index, horizon))
+        )
+        for index, horizon in enumerate(HORIZONS_MIN)
+    ]
+    table = pa.concat_tables(parts) if parts else SERVING_SCHEMA.empty_table()
+    # **決定的な順に並べる**（学習と同じ規律）。読む側は「ポートごとに水平が昇順」を
+    # 前提に `(ポート, 水平)` へ畳み直せる
+    ordered = table.sort_by([("station_id", "ascending"), ("h_min", "ascending")])
+    return Ready(table=ordered, stats=_now_stats(inputs, base, len(stations)))
+
+
+def _own_system(inputs: NowInputs) -> Bools:
+    """行を作る対象か。**他系統は近傍のためだけに居る**（`NowInputs` の注記）。"""
+    facts = inputs.reference.facts
+    owned = np.asarray(
+        [system_id == inputs.system_id for system_id, _ in facts.station_keys()], dtype=np.bool_
+    )
+    return owned[:, None]
+
+
+def _now_stats(inputs: NowInputs, base: exclude.Excluded, kept: int) -> NowStats:
+    owned = sum(
+        1 for system_id, _ in inputs.reference.facts.station_keys() if system_id == inputs.system_id
+    )
+    return NowStats(
+        at=inputs.at.isoformat(),
+        feature_set=FEATURE_SET,
+        stations=owned,
+        stations_unreferenced=asof.unreferenced_stations(
+            inputs.table, inputs.reference.facts.station_keys()
+        ),
+        predictable=kept,
+        rows=kept * len(HORIZONS_MIN),
+        excluded=base.counts,
+    )
+
+
 # ── グリッドへの写像 ──────────────────────────────────────────
-def _grid_state(inputs: DayInputs, grid: Grid) -> GridState:
-    """観測を拡張グリッドへ写す。**特徴量とラベルで別々の as-of を使う。**"""
+def _grid_state(inputs: Inputs, grid: Grid, *, labels: bool = True) -> GridState:
+    """観測を拡張グリッドへ写す。**特徴量とラベルで別々の as-of を使う。**
+
+    `labels=False` はラベル側を作らない（推論。W4 プラン §9 の契約 5）。`as_of_label`
+    はポートごとの走査なので、**20,750 ポートぶんの手間がまるごと省ける**。作らない
+    列は「該当なし」で埋めるので、間違って読んでも観測が無いのと同じ値になる。
+    """
     observations = asof.to_observations(inputs.table, inputs.reference.facts.station_keys())
     feature_row = asof.as_of_feature(observations, grid.times_ms)
-    label_row = asof.as_of_label(observations, grid.times_ms)
+    label_row = (
+        asof.as_of_label(observations, grid.times_ms)
+        if labels
+        else np.full(feature_row.shape, asof.NO_ROW, dtype=feature_row.dtype)
+    )
     flows = flow.compute_flow(observations)
     bikes = asof.gather(observations.bikes, feature_row, MISSING)
     observed = asof.gather(observations.observed_at_ms, feature_row, 0)
@@ -208,7 +397,7 @@ def _valid(feature_row: Int32, bikes: Int16, observed_ms: Int64, times: Int64) -
     return np.asarray((feature_row != asof.NO_ROW) & (bikes != MISSING) & fresh, dtype=np.bool_)
 
 
-def _capacity(inputs: DayInputs, n_grid: int) -> Int32:
+def _capacity(inputs: Inputs, n_grid: int) -> Int32:
     """容量。**動的なシステムは前日までの 7 日の推定値、他は宣言値**（開発プラン §3）。
 
     以前はビルド窓（`LOOKBACK_HOURS` と対象日で約 49 時間）の累積最大だった。
@@ -227,10 +416,13 @@ def _capacity(inputs: DayInputs, n_grid: int) -> Int32:
     )
 
 
-def _base_exclusion(inputs: DayInputs, state: GridState, grid: Grid) -> exclude.Excluded:
+def _base_exclusion(
+    inputs: Inputs, state: GridState, grid: Grid, alive: Bools | None = None
+) -> exclude.Excluded:
     """基準時刻の側の除外。当日の 288 点だけを見る。"""
     day = grid.day_slice()
     return exclude.exclude_at_base(
+        alive=alive,
         feature_row=state.feature_row[:, day],
         observed_at_ms=state.observed_at_ms[:, day],
         grid_ms=np.asarray(grid.day_times_ms(), dtype=np.int64)[None, :],
@@ -243,10 +435,17 @@ def _base_exclusion(inputs: DayInputs, state: GridState, grid: Grid) -> exclude.
 
 # ── グリッド上の派生量（水平に依らないもの）──────────────────
 @dataclass(frozen=True)
-class Precomputed:
-    """当日の 288 点について、水平によらず 1 度だけ作れるもの。"""
+class Sampling:
+    """抽出に要るもの。**学習だけが持つ**（推論は全件を出す）。"""
 
     seeds: UInt64
+    tight: Bools
+
+
+@dataclass(frozen=True)
+class Precomputed:
+    """基準時刻について、水平によらず 1 度だけ作れるもの。**学習と推論で共通。**"""
+
     system_ids: Strings
     station_ids: Strings
     age_days: Float32
@@ -261,20 +460,16 @@ class Precomputed:
     neighbor: dict[str, Int32]
     neighbor_fill_ratio: Float32
     urban_density: Int32
-    tight: Bools
 
 
-def _precompute(inputs: DayInputs, grid: Grid, state: GridState) -> Precomputed:
-    """水平によらない材料をまとめて作る。"""
-    day = grid.day_slice()
+def _precompute(inputs: Inputs, grid: Grid, state: GridState) -> Precomputed:
+    """水平によらない材料をまとめて作る。**学習と推論で同じ関数を通る。**"""
     facts = inputs.reference.facts
     lags, lag_valid = _lag_matrices(state, grid)
-    same_time = grid.steps_per(SAME_TIME_MINUTES)
-    past: Span = slice(day.start - same_time, day.stop - same_time, 1)
+    past = grid.shifted(-SAME_TIME_MINUTES)
     mean, mean_valid = _rolling(state, grid)
     integer, ratio = _neighbor_matrices(inputs, state, grid)
     return Precomputed(
-        seeds=_seeds(inputs),
         system_ids=np.array(facts.system_ids, dtype=np.str_),
         station_ids=np.array(facts.station_ids, dtype=np.str_),
         age_days=static.station_age_days(facts.first_seen_ms, grid.day_times_ms()),
@@ -287,11 +482,19 @@ def _precompute(inputs: DayInputs, grid: Grid, state: GridState) -> Precomputed:
         neighbor=integer,
         neighbor_fill_ratio=ratio,
         urban_density=inputs.reference.links.within(FAR_RADIUS_M, same_system_only=False).counts(),
+    )
+
+
+def _sampling(inputs: DayInputs, grid: Grid, state: GridState) -> Sampling:
+    """抽出の材料。**学習でしか作らない**（20,750 ポートぶんの種を引く手間を省く）。"""
+    day = grid.day_slice()
+    return Sampling(
+        seeds=_seeds(inputs),
         tight=sample.is_tight(state.bikes[:, day], state.docks[:, day]),
     )
 
 
-def _seeds(inputs: DayInputs) -> UInt64:
+def _seeds(inputs: Inputs) -> UInt64:
     """ポート毎の抽出の種。**日付とシステムと ID だけで決まる**（並び順に依らない）。"""
     return np.array(
         [
@@ -323,9 +526,7 @@ def _lag_matrices(state: GridState, grid: Grid) -> tuple[dict[str, Int16], dict[
 
 def _shift_back(state: GridState, grid: Grid, minutes: int) -> tuple[Int16, Bools]:
     """`minutes` 前の格子点の台数と、その有効性。"""
-    steps = grid.steps_per(minutes)
-    day = grid.day_slice()
-    window: Span = slice(day.start - steps, day.stop - steps, 1)
+    window = grid.shifted(-minutes)
     return state.bikes[:, window], state.valid[:, window]
 
 
@@ -367,7 +568,7 @@ def _rolling_extremes(state: GridState, grid: Grid) -> tuple[Int16, Int16, Bools
 
 
 def _neighbor_matrices(
-    inputs: DayInputs, state: GridState, grid: Grid
+    inputs: Inputs, state: GridState, grid: Grid
 ) -> tuple[dict[str, Int32], Float32]:
     """近傍の集約。**近傍 0 は合計 0・平均 NULL**（W3 プラン §9.5）。"""
     day = grid.day_slice()
@@ -421,14 +622,14 @@ def _one_horizon(
     grid: Grid,
     state: GridState,
     pre: Precomputed,
+    sampling: Sampling,
     alive: Bools,
     index: int,
     horizon: int,
 ) -> tuple[pa.Table, dict[str, int]]:
     """1 つの水平について、除外・抽出・組み立てを行う。"""
     day = grid.day_slice()
-    shift = grid.steps_per(horizon)
-    target: Span = slice(day.start + shift, day.stop + shift, 1)
+    target = grid.shifted(horizon)
     dropped = exclude.exclude_at_target(
         alive=alive,
         feature_row=state.feature_row[:, day],
@@ -438,42 +639,56 @@ def _one_horizon(
         bikes=state.label_bikes[:, target],
         docks=state.label_docks[:, target],
     )
-    accepted = dropped.keep & _accept(pre, index, len(grid.day_times_ms()))
+    accepted = dropped.keep & _accept(sampling, index, len(grid.day_times_ms()))
     stations, points = np.nonzero(accepted)
     picked = Picked(stations, points, index, horizon)
-    return _assemble(inputs, grid, state, pre, picked, target), dropped.counts
+    return _assemble(inputs, grid, state, pre, sampling, picked, target), dropped.counts
 
 
-def _accept(pre: Precomputed, index: int, n_grid: int) -> Bools:
+def _accept(sampling: Sampling, index: int, n_grid: int) -> Bools:
     """抽出の判定。**行ごとに 1 回だけ引く**（W3 プラン §9.3）。"""
     counters = (np.arange(n_grid, dtype=np.uint64) * np.uint64(len(HORIZONS_MIN))) + np.uint64(
         index
     )
-    drawn = sample.uniform_array(pre.seeds[:, None], counters[None, :])
-    return np.asarray(drawn < sample.rate_of(pre.tight), dtype=np.bool_)
+    drawn = sample.uniform_array(sampling.seeds[:, None], counters[None, :])
+    return np.asarray(drawn < sample.rate_of(sampling.tight), dtype=np.bool_)
 
 
 # ── 列の組み立て ──────────────────────────────────────────────
-def _assemble(
-    inputs: DayInputs,
-    grid: Grid,
-    state: GridState,
-    pre: Precomputed,
-    picked: Picked,
-    target: Span,
-) -> pa.Table:
-    """抽出された行を `SCHEMA` の列にする。"""
+def _feature_columns(
+    inputs: Inputs, grid: Grid, state: GridState, pre: Precomputed, picked: Picked
+) -> dict[str, pa.Array]:
+    """**学習と推論で共通の 61 列。** ラベルと抽出はここに入れない。
+
+    共有しているのは呼び出しの並びではなく**この関数そのもの**である。片方だけ直せば
+    ゴールデン（`tests/test_features_parity.py`）が落ちる（W4 プラン §4 の W4-04）。
+    """
     day = grid.day_slice()
     columns: dict[str, pa.Array] = {}
-    columns.update(_key_columns(grid, pre, picked))
-    columns.update(_label_columns(state, picked, target))
-    columns.update(_calendar_columns(inputs, picked))
+    columns.update(_identity_columns(grid, pre, picked))
+    columns.update(_calendar_columns(inputs, grid, picked))
     columns.update(_static_columns(inputs, state, pre, picked, day))
     columns.update(_state_columns(inputs, state, grid, picked, day))
     columns.update(_lag_columns(pre, picked))
     columns.update(_flow_columns(state, picked, day))
     columns.update(_history_columns(state, grid, pre, picked))
     columns.update(_neighbor_columns(pre, picked))
+    return columns
+
+
+def _assemble(
+    inputs: Inputs,
+    grid: Grid,
+    state: GridState,
+    pre: Precomputed,
+    sampling: Sampling,
+    picked: Picked,
+    target: Span,
+) -> pa.Table:
+    """抽出された行を `SCHEMA` の列にする（学習）。"""
+    columns = _feature_columns(inputs, grid, state, pre, picked)
+    columns.update(_label_columns(state, picked, target))
+    columns.update(_sampling_columns(sampling, picked))
     return to_table(columns)
 
 
@@ -490,17 +705,24 @@ def _constant(value: object, name: str, count: int) -> pa.Array:
     return pa.array(np.full(count, value), type=SCHEMA.field(name).type)
 
 
-def _key_columns(grid: Grid, pre: Precomputed, picked: Picked) -> dict[str, pa.Array]:
+def _identity_columns(grid: Grid, pre: Precomputed, picked: Picked) -> dict[str, pa.Array]:
+    """どの行かを表す列。**学習と推論で同じ。**"""
     times = np.asarray(grid.day_times_ms(), dtype=np.int64)[picked.points]
-    tight = _take(pre.tight, picked)
     return {
         "system_id": pa.array(pre.system_ids[picked.stations], type=pa.string()),
         "station_id": pa.array(pre.station_ids[picked.stations], type=pa.string()),
         "t": pa.array(times, type=pa.int64()).cast(SCHEMA.field("t").type),
         "h_min": _constant(picked.horizon_min, "h_min", len(picked)),
+        "feature_set": _constant(FEATURE_SET, "feature_set", len(picked)),
+    }
+
+
+def _sampling_columns(sampling: Sampling, picked: Picked) -> dict[str, pa.Array]:
+    """逆抽出確率と層。**学習だけが持つ**（推論は全件を出すので重みが無い）。"""
+    tight = _take(sampling.tight, picked)
+    return {
         "weight": _col(sample.weight_of(tight), "weight"),
         "stratum": _col(np.where(tight, STRATUM_TIGHT, STRATUM_UNIFORM), "stratum"),
-        "feature_set": _constant(FEATURE_SET, "feature_set", len(picked)),
     }
 
 
@@ -514,11 +736,17 @@ def _label_columns(state: GridState, picked: Picked, target: Span) -> dict[str, 
     }
 
 
-def _calendar_columns(inputs: DayInputs, picked: Picked) -> dict[str, pa.Array]:
-    """暦。**基準日の属性はその日ひとつ**なので、行に広げるだけで済む。"""
+def _calendar_columns(inputs: Inputs, grid: Grid, picked: Picked) -> dict[str, pa.Array]:
+    """暦。**基準日の属性はその日ひとつ**なので、行に広げるだけで済む。
+
+    日内分は**格子の添字ではなく時刻そのもの**から出す。学習の格子は JST 00:00 起点で
+    「添字 × 5 分」と一致するが、推論の格子は 1 点だけで添字が常に 0 になる。
+    時刻から出せばどちらでも正しい（W4 プラン §6.3）。
+    """
     holidays = inputs.reference.holidays
     kind: DayType = day_type(inputs.day, holidays)
-    minute = (picked.points * GRID_MINUTES).astype(np.int32)
+    times = np.asarray(grid.day_times_ms(), dtype=np.int64)[picked.points]
+    minute = _jst_minute_of_day(times)
     total = minute + picked.horizon_min
     count = len(picked)
     return {
@@ -542,6 +770,12 @@ def _calendar_columns(inputs: DayInputs, picked: Picked) -> dict[str, pa.Array]:
     }
 
 
+def _jst_minute_of_day(times_ms: Int64) -> Int32:
+    """エポックミリ秒 → JST の日内分（0〜1439）。**JST は固定の +09:00。**"""
+    minutes = (times_ms + JST_OFFSET_MS) // _MS_PER_MINUTE
+    return np.asarray(minutes % _MINUTES_PER_DAY, dtype=np.int32)
+
+
 def _sin(minute: Int32) -> Float32:
     turn = 2 * np.pi * (minute % _MINUTES_PER_DAY) / _MINUTES_PER_DAY
     return np.asarray(np.sin(turn), dtype=np.float32)
@@ -552,7 +786,7 @@ def _cos(minute: Int32) -> Float32:
     return np.asarray(np.cos(turn), dtype=np.float32)
 
 
-def _target_dow_type(inputs: DayInputs, total_minute: Int32) -> Strings:
+def _target_dow_type(inputs: Inputs, total_minute: Int32) -> Strings:
     """目標時刻の曜日種別。**水平は最長 180 分なので、跨ぐのは翌日まで。**"""
     holidays = inputs.reference.holidays
     today = dow_type(day_type(inputs.day, holidays))
@@ -561,7 +795,7 @@ def _target_dow_type(inputs: DayInputs, total_minute: Int32) -> Strings:
 
 
 def _static_columns(
-    inputs: DayInputs, state: GridState, pre: Precomputed, picked: Picked, day: Span
+    inputs: Inputs, state: GridState, pre: Precomputed, picked: Picked, day: Span
 ) -> dict[str, pa.Array]:
     facts = inputs.reference.facts
     capacity = _take(state.capacity[:, day], picked)
@@ -592,7 +826,7 @@ def _code_column(name: str, values: Int32) -> dict[str, pa.Array]:
 
 
 def _state_columns(
-    inputs: DayInputs, state: GridState, grid: Grid, picked: Picked, day: Span
+    inputs: Inputs, state: GridState, grid: Grid, picked: Picked, day: Span
 ) -> dict[str, pa.Array]:
     bikes = _take(state.bikes[:, day], picked).astype(np.int32)
     docks = _take(state.docks[:, day], picked).astype(np.int32)
@@ -658,10 +892,7 @@ def _history_columns(
     引くのは**特徴量の as-of**（`fetched_at` で切ったもの）で、必要より厳しいが
     リークは起こさない。
     """
-    day = grid.day_slice()
-    back = grid.steps_per(SAME_TIME_MINUTES)
-    shift = grid.steps_per(picked.horizon_min)
-    past = slice(day.start + shift - back, day.stop + shift - back)
+    past = grid.shifted(picked.horizon_min - SAME_TIME_MINUTES)
     bikes = _take(pre.same_time_bikes, picked).astype(np.int16)
     absent = ~_take(pre.same_time_valid, picked)
     label_absent = ~_take(state.valid[:, past], picked)

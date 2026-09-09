@@ -58,8 +58,14 @@ def exclude_at_base(
     docks: Int16,
     flags: Int16,
     phantom: Bools,
+    alive: Bools | None = None,
 ) -> Excluded:
-    """基準時刻 `t` の側の除外。行列の形は `(ポート, 基準時刻)`。"""
+    """基準時刻 `t` の側の除外。行列の形は `(ポート, 基準時刻)`。
+
+    `alive` を渡すと、そこから始める。**推論はこれで自系統だけに絞る**（台帳は
+    2 システムを 1 つにまとめてあり、他系統は近傍のためだけに居る。W4 プラン §6.3）。
+    内訳が他系統のぶんで水増しされない。
+    """
     reasons = (
         ("phantom", np.broadcast_to(phantom[:, None], feature_row.shape).astype(np.bool_)),
         ("no_asof_at_t", np.asarray(feature_row == NO_ROW, dtype=np.bool_)),
@@ -67,7 +73,12 @@ def exclude_at_base(
         ("unobserved_at_t", np.asarray((bikes == MISSING) | (docks == MISSING), dtype=np.bool_)),
         ("suspended_at_t", _suspended(flags)),
     )
-    return _layer(reasons, np.ones(feature_row.shape, dtype=bool))
+    start = (
+        np.ones(feature_row.shape, dtype=bool)
+        if alive is None
+        else np.broadcast_to(alive, feature_row.shape)
+    )
+    return _layer(reasons, np.asarray(start, dtype=np.bool_))
 
 
 def exclude_at_target(

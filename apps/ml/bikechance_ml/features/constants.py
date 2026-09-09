@@ -28,7 +28,11 @@ MAX_STALENESS_S: Final[int] = 600
 #:   * `capacity`（動的な容量のシステム）… ビルド窓の累積最大 → **前日までの 7 日の最大**
 #:   * `fill_ratio` / `gap` / `is_over_capacity` … 上に乗っているので一緒に動く
 #:   * 近傍と静的属性 … その日の値ではなく**前日の版**で固定される（再現性が戻る）
-FEATURE_SET: Final[str] = "v1"
+#: v2（2026-09-10）：**`minutes_since_last_change` に上限（180 分）を入れた**
+#: （W4 プラン §4 の W4-10）。この列だけが読んだ窓の長さで値が変わり、25 時間読む学習と
+#: 3 時間読む推論で必ず食い違っていた。**上限を決めて、どちらも同じ値を出せるようにした。**
+#: 値が変わるのはこの 1 列だけだが、**v1 と混ぜて学習しない**。
+FEATURE_SET: Final[str] = "v2"
 
 #: 難所の判定（開発プラン §6.2）。`bikes <= 2` または `docks <= 2`。
 TIGHT_THRESHOLD: Final[int] = 2
@@ -50,6 +54,18 @@ ROLL_MINUTES: Final[int] = 60
 #: 流量の窓（分）。**フィード本来の周期で計算してからグリッドに写す**（W3-11）。
 FLOW_MINUTES: Final[int] = 60
 
+#: `minutes_since_last_change` の上限（分）。**これを超えた値は上限に張り付ける。**
+#:
+#: この特徴量だけは窓の長さで値が変わる（他は 60 分か 1 日で閉じている）。学習は 25 時間
+#: さかのぼれるが、推論は 5 分毎に走るので同じ深さは読めない。**上限を決めておけば、
+#: どちらも同じ値を出せる**（W4 プラン §4 の W4-10）。
+#:
+#: 180 分にしたのは、推論が読む窓（3 時間）に収まる最大だから。実測（2026-09-10）では
+#: 最後の変化から 60 分以内のポートは HELLO で 36%・ドコモで 56% しかなく、60 分で
+#: 切ると**大半が NULL になって情報が消える**。180 分なら「動いていない」ことを
+#: 数として残せる。
+CHANGE_CAP_MINUTES: Final[int] = 180
+
 #: 近傍の帯（メートル）。`station_neighbors` は 500 m まで持つ（W3 プラン §9.5）。
 NEAR_RADIUS_M: Final[int] = 300
 FAR_RADIUS_M: Final[int] = 500
@@ -58,6 +74,11 @@ FAR_RADIUS_M: Final[int] = 500
 #: 賄うために既定で 25 時間さかのぼる。先は最長の水平（180 分）を覆う。
 LOOKBACK_HOURS: Final[int] = 25
 LOOKAHEAD_HOURS: Final[int] = 3
+
+#: 推論が読む直近の窓（分）。`CHANGE_CAP_MINUTES` を満たせる最小に、as-of の古さの
+#: 上限（`MAX_STALENESS_S`）と格子 2 点ぶんの余裕を足したもの。**ここを縮めると
+#: `minutes_since_last_change` が学習と食い違う**（W4 プラン §4 の W4-10）。
+NOW_LOOKBACK_MINUTES: Final[int] = CHANGE_CAP_MINUTES + MAX_STALENESS_S // 60 + GRID_MINUTES * 2
 
 #: 同時刻履歴の間隔（分）。1 日前。7 日前は蓄積が足りないので v0 では作らない。
 SAME_TIME_MINUTES: Final[int] = 24 * 60

@@ -23,27 +23,37 @@ LightGBM は W4 以降（W3-18）。**予測テーブルを埋め始め、5 分�
 import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Final, Protocol
 
 import numpy as np
+import pyarrow as pa
 
 from bikechance_ml.baselines import blend, climatology, conditional
 from bikechance_ml.baselines.artifact import Artifact, from_bytes
 from bikechance_ml.eval.dataset import TARGETS, Samples, Target
-from bikechance_ml.features.arrays import Bools, Float64, Int16
-from bikechance_ml.features.calendar import DOW_TYPES, day_type, dow_type
+from bikechance_ml.features import build, neighbors, static
+from bikechance_ml.features.arrays import Bools, Float64, Int8, Int16
+from bikechance_ml.features.calendar import DOW_TYPES
 from bikechance_ml.features.constants import (
-    FLAG_RENTING,
-    FLAG_RETURNING,
+    GRID_MINUTES,
     HORIZONS_MIN,
     MAX_STALENESS_S,
-    MISSING,
-    PHANTOM_STATIONS,
 )
-from bikechance_ml.features.grid import JST
-from bikechance_ml.features.reference import StationStatusRow
+from bikechance_ml.features.grid import JST, from_epoch_ms, jst_date, to_epoch_ms
+from bikechance_ml.features.reference import SystemReference
+from bikechance_ml.jobs.build_features import (
+    SYSTEM_IDS,
+    Estimates,
+    MissingReferenceError,
+    read_reference_on,
+)
+from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow, station_ids_by_idx
+from bikechance_ml.jobs.snapshot_table import to_table as to_snapshot_table
+
+#: 推論が読む観測の範囲（`build.serving_windows` が返す形）。
+type Windows = Sequence[tuple[datetime, datetime]]
 
 #: 確率を整数で持つときの倍率（0026 の `p_bike_x1000`）。
 PROBABILITY_SCALE: Final[int] = 1000
@@ -56,7 +66,8 @@ UPSERT_BATCH: Final[int] = 4_000
 MODEL_BUCKET: Final[str] = "models"
 MODEL_PREFIX: Final[str] = "baseline"
 
-_MINUTES_PER_DAY: Final[int] = 24 * 60
+MS_PER_S: Final[int] = 1000
+NS_PER_MS: Final[int] = 1_000_000
 
 
 def model_path(model_version: str) -> str:
@@ -68,7 +79,10 @@ class InferPort(Protocol):
     """入出力の口。テストはここだけを置き換える。"""
 
     def read_base_observed_at(self, system_id: str) -> datetime | None: ...
-    def list_station_status(self, system_id: str) -> tuple[StationStatusRow, ...]: ...
+    def list_stations(self, system_id: str) -> tuple[StationRow, ...]: ...
+    def list_snapshots(
+        self, system_id: str, start: datetime, end: datetime
+    ) -> tuple[Snapshot, ...]: ...
     def list_holidays(self) -> tuple[date, ...]: ...
     def download(self, bucket: str, path: str) -> bytes | None: ...
     def begin_inference(
@@ -84,6 +98,106 @@ class InferPort(Protocol):
         detail: Mapping[str, object] | None = None,
     ) -> None: ...
     def upsert_forecasts(self, rows: Sequence[Mapping[str, object]]) -> int: ...
+
+
+def grid_time(now: datetime) -> datetime:
+    """基準時刻を **5 分格子に落とす**（`GRID_MINUTES`）。
+
+    モデルは格子の上でしか学習していない。格子から外れた時刻で特徴量を作ると、ラグも
+    同時刻履歴も引けない（`Grid.shifted` が止める）。落とすのは最大 5 分ぶんで、
+    そのぶん `station_forecasts.generated_at` も過去になる：**水平の起点は
+    `generated_at` なので、`/v1` の側と辻褄が合う**（W4 プラン §12 の 114）。
+    """
+    step = GRID_MINUTES * 60 * MS_PER_S
+    stamp = to_epoch_ms(now)
+    return from_epoch_ms(stamp - stamp % step)
+
+
+def read_observations(port: InferPort, system_id: str, windows: Windows) -> pa.Table:
+    """1 システムぶんの観測を、**学習と同じ長形式**にして返す。
+
+    配列形式のスナップショットを長形式に開くのは `jobs/snapshot_table.py` で、
+    **毎時の Parquet 化と同じ関数**を通る。形が同じだから、この先の規則を学習と
+    共有できる（W4 プラン §6.3）。
+    """
+    station_ids = station_ids_by_idx(port.list_stations(system_id))
+    snapshots = [
+        one for start, end in windows for one in port.list_snapshots(system_id, start, end)
+    ]
+    return to_snapshot_table(system_id, station_ids, snapshots)
+
+
+def read_features(
+    port: InferPort, system_id: str, at: datetime, holidays: frozenset[date]
+) -> tuple[date, build.Ready]:
+    """推論 1 回ぶんの特徴量を作る。**学習と同じ `features/` を通る。**
+
+    読むのは 3 つ。
+      1. **前日の参照スナップショット**（学習と同じ規則。W3 プラン §14.3）
+      2. **自系統の 2 つの窓**（`build.serving_windows`）
+      3. **他系統の直近**（近傍の集計に要るのは「いまの状態」だけ。§6.3）
+
+    返すのは**使った参照スナップショットの日付**と組み立ての結果。日付を返すのは、
+    00:00〜05:00 JST に 1 つ古い版を使うことがあるため（`read_reference_available`）。
+    """
+    reference_day, systems, estimates = read_reference_available(port, jst_date(at))
+    facts = static.to_facts(systems, estimates)
+    links = neighbors.to_links(systems, facts.station_keys())
+    windows = build.serving_windows(at)
+    tables = [read_observations(port, system_id, windows)]
+    tables.extend(
+        read_observations(port, other, (_neighbour_window(at),))
+        for other in SYSTEM_IDS
+        if other != system_id
+    )
+    ready = build.build_now(
+        build.NowInputs(
+            at=at,
+            system_id=system_id,
+            reference=build.Reference(facts=facts, links=links, holidays=holidays),
+            table=pa.concat_tables(tables),
+        )
+    )
+    return reference_day, ready
+
+
+#: 参照スナップショットを何日前までさかのぼって探すか。
+#: **前日の版は 05:00 JST に書かれる**ので、00:00〜05:00 の推論はまだ読めない。
+REFERENCE_FALLBACK_DAYS: Final[int] = 2
+
+
+def read_reference_available(
+    port: InferPort, day: date
+) -> tuple[date, tuple[SystemReference, ...], Estimates]:
+    """読める中でいちばん新しい参照スナップショットを返す（**どの日かも返す**）。
+
+    規則は学習と同じ「**前日の版**」だが、その版が置かれるのは **05:00 JST**
+    （`/ml/reference`）である。つまり **00:00〜05:00 JST の推論は前日の版をまだ読めない**
+    ので、そのあいだは 1 つ古い版を使う（W4 プラン §12 の 118）。
+
+    **黙って古い版を使わない。** 使った日付は `inference_log.detail.reference_date` に
+    残るので、あとから「どの版で出した予測か」が分かる。
+    """
+    for back in range(1, REFERENCE_FALLBACK_DAYS + 1):
+        source_day = day - timedelta(days=back)
+        try:
+            systems, estimates = read_reference_on(port, source_day)
+        except MissingReferenceError:
+            continue
+        return source_day, systems, estimates
+    raise MissingReferenceError(
+        f"参照スナップショットが {REFERENCE_FALLBACK_DAYS} 日ぶん見つからない（{day} 基準）"
+    )
+
+
+def _neighbour_window(at: datetime) -> tuple[datetime, datetime]:
+    """他系統から読む範囲。**基準時刻の as-of が 1 つ取れれば足りる。**
+
+    `MAX_STALENESS_S`（10 分）より古い観測は除外側で落ちるので、それより手前は
+    読んでも使われない。格子 1 点ぶんの余裕を足す。
+    """
+    span = timedelta(seconds=MAX_STALENESS_S) + timedelta(minutes=GRID_MINUTES)
+    return (at - span, at + timedelta(minutes=GRID_MINUTES))
 
 
 @dataclass(frozen=True)
@@ -113,6 +227,12 @@ class InferSummary:
     duration_ms: int
     #: このプロセスが使った CPU 時間。**費用は Active CPU で決まる**（開発プラン §4.5a）
     cpu_ms: int
+    #: 特徴量を作るのに掛かった時間。**推論の所要の大半はここ**（W4 プラン §6.3）
+    features_ms: int = 0
+    #: 除外の内訳（理由 → ポート数）。**なぜ出せなかったかが分かる**
+    excluded: Mapping[str, int] = field(default_factory=dict)
+    #: 使った参照スナップショットの日付。**00:00〜05:00 JST は 1 つ古い版になる**
+    reference_date: str | None = None
     error: str | None = None
 
     @property
@@ -121,65 +241,95 @@ class InferSummary:
 
 
 # ── 予測（純粋）────────────────────────────────────────────────
-def is_predictable(system_id: str, row: StationStatusRow) -> bool:
-    """予測を出してよいポートか。**学習と同じ除外規則**（`features/exclude.py`）。
-
-    最新スナップショットに現れていない、値が `-1`、`t` 時点で運用停止、実在しない
-    ポートは出さない。**出さない**のであって、0 や 0.5 で埋めない。
-    """
-    if (system_id, row.station_id) in PHANTOM_STATIONS:
-        return False
-    if not row.is_present or row.bikes == MISSING or row.docks == MISSING:
-        return False
-    both = FLAG_RENTING | FLAG_RETURNING
-    return row.flags >= 0 and (row.flags & both) == both
+#: 成果物に無いポート。**気候値が引けず B1 だけになる**（W3 プラン §12 の 110）。
+NO_PORT: Final[int] = -1
 
 
-def target_dow_types(at: datetime, holidays: frozenset[date]) -> tuple[int, ...]:
-    """水平ごとの、到着時刻の曜日種別の番号。**日をまたぐのは翌日まで**（最長 180 分）。"""
-    local = at.astimezone(JST)
-    order = tuple(sorted(DOW_TYPES))
-    return tuple(
-        order.index(dow_type(day_type((local + timedelta(minutes=horizon)).date(), holidays)))
-        for horizon in HORIZONS_MIN
-    )
+def to_samples(artifact: Artifact, system_id: str, at: datetime, table: pa.Table) -> Samples:
+    """`build_now` の出力を、ベースラインが読む形にする。**列を引き写すだけ。**
 
+    B0〜B3 が使うのは 6 つ（システム・ポート・日・水平・日内分・目標の曜日種別）と
+    台数だけである。**57 列を作ってから 6 つを引く**のは一見無駄だが、LightGBM v0
+    （PR E）を入れるときに経路を変えずに済む（W4 プラン §6.3）。**除外も暦も
+    学習と同じ関数が決めている**ので、ここに判断は残っていない。
 
-def to_samples(
-    artifact: Artifact,
-    system_id: str,
-    rows: Sequence[StationStatusRow],
-    at: datetime,
-    holidays: frozenset[date],
-) -> Samples:
-    """ポート × 水平の行を、学習と同じ `Samples` の形にする。
-
-    **ラベルは持たない**（`predict` は読まない）。持たせるとゼロが答えに見えてしまうので、
-    長さ 0 の配列を入れておく。
+    **ラベルは持たない**（`predict` は読まない）。長さ 0 の配列を入れておく。
     """
     ports = {name: index for index, name in enumerate(artifact.ports)}
-    n_horizons = len(HORIZONS_MIN)
-    system = artifact.systems.index(system_id)
-    port = np.array(
-        [ports.get(f"{system_id}/{row.station_id}", -1) for row in rows], dtype=np.int32
-    )
-    minute = at.astimezone(JST).hour * 60 + at.astimezone(JST).minute
+    station_ids = table.column("station_id").to_pylist()
+    rows = table.num_rows
     return Samples(
         systems=artifact.systems,
         n_ports=len(artifact.ports),
-        system=np.full(len(rows) * n_horizons, system, dtype=np.int8),
-        port=np.repeat(port, n_horizons),
-        day=np.full(len(rows) * n_horizons, at.astimezone(JST).date().toordinal(), dtype=np.int32),
-        h_min=np.tile(np.array(HORIZONS_MIN, dtype=np.int16), len(rows)),
-        minute_of_day=np.full(len(rows) * n_horizons, minute, dtype=np.int16),
-        dow_type=np.tile(np.array(target_dow_types(at, holidays), dtype=np.int8), len(rows)),
-        weight=np.ones(len(rows) * n_horizons, dtype=np.float32),
+        system=np.full(rows, artifact.systems.index(system_id), dtype=np.int8),
+        port=np.fromiter(
+            (ports.get(f"{system_id}/{one}", NO_PORT) for one in station_ids),
+            dtype=np.int32,
+            count=rows,
+        ),
+        day=np.full(rows, at.astimezone(JST).date().toordinal(), dtype=np.int32),
+        h_min=_int16(table, "h_min"),
+        minute_of_day=_int16(table, "minute_of_day"),
+        dow_type=_dow_type_index(table),
+        weight=np.ones(rows, dtype=np.float32),
         labels={target.label: np.zeros(0, dtype=np.int8) for target in TARGETS},
-        counts={
-            "bikes": np.repeat(np.array([row.bikes for row in rows], dtype=np.int16), n_horizons),
-            "docks": np.repeat(np.array([row.docks for row in rows], dtype=np.int16), n_horizons),
-        },
+        counts={"bikes": _int16(table, "bikes"), "docks": _int16(table, "docks")},
     )
+
+
+def _int16(table: pa.Table, name: str) -> Int16:
+    column = table.column(name).combine_chunks()
+    return np.asarray(column.to_numpy(zero_copy_only=False), dtype=np.int16)
+
+
+def _dow_type_index(table: pa.Table) -> Int8:
+    """目標時刻の曜日種別を、成果物と同じ並びの番号にする。"""
+    order = tuple(sorted(DOW_TYPES))
+    values = table.column("target_dow_type").to_pylist()
+    return np.fromiter((order.index(one) for one in values), dtype=np.int8, count=len(values))
+
+
+class RowCountError(ValueError):
+    """行数が `ポート × 水平` になっていない。**畳み直せないので止める。**"""
+
+
+def predict(
+    artifact: Artifact, system_id: str, at: datetime, table: pa.Table, stale: bool
+) -> tuple[Forecast, ...]:
+    """予測を作る。**出せないポートは `build_now` が既に落としている。**"""
+    n_horizons = len(HORIZONS_MIN)
+    if table.num_rows == 0:
+        return ()
+    if table.num_rows % n_horizons != 0:
+        raise RowCountError(f"行数 {table.num_rows} が水平 {n_horizons} で割り切れない")
+    samples = to_samples(artifact, system_id, at, table)
+    columns = {target.name: _probabilities(artifact, samples, target) for target in TARGETS}
+    bike = to_x1000(columns["bike"][0]).reshape(-1, n_horizons)
+    dock = to_x1000(columns["dock"][0]).reshape(-1, n_horizons)
+    used = (columns["bike"][1] & columns["dock"][1]).reshape(-1, n_horizons)
+    # **並びは `(ポート, 水平)`。** `build_now` が station_id, h_min の昇順に並べている
+    station_ids = table.column("station_id").to_pylist()[::n_horizons]
+    return tuple(
+        Forecast(
+            system_id=system_id,
+            station_id=station_id,
+            p_bike_x1000=tuple(int(one) for one in bike[index]),
+            p_dock_x1000=tuple(int(one) for one in dock[index]),
+            confidence=confidence_of(stale=stale, climatology_horizons=int(used[index].sum())),
+        )
+        for index, station_id in enumerate(station_ids)
+    )
+
+
+def unknown_ports(artifact: Artifact, system_id: str, table: pa.Table) -> int:
+    """成果物に無かったポートの数（W3 プラン §12 の 110）。
+
+    **ポート単位で数える**（行は水平のぶんだけあるので、そのまま数えると 10 倍になる）。
+    """
+    n_horizons = len(HORIZONS_MIN)
+    ports = set(artifact.ports)
+    station_ids = table.column("station_id").to_pylist()[::n_horizons]
+    return sum(1 for one in station_ids if f"{system_id}/{one}" not in ports)
 
 
 def _probabilities(artifact: Artifact, samples: Samples, target: Target) -> tuple[Float64, Bools]:
@@ -197,75 +347,20 @@ def to_x1000(values: Float64) -> Int16:
     return np.clip(np.rint(values * PROBABILITY_SCALE), 0, PROBABILITY_SCALE).astype(np.int16)
 
 
-def unknown_ports(artifact: Artifact, system_id: str, rows: Sequence[StationStatusRow]) -> int:
-    """**成果物に無い、予測対象のポート**の数（§12 の 110）。
-
-    成果物を作ったあとに現れたポートは気候値（B2）が引けず、B1 だけになる。
-    **落ちること自体は正しい**が、落ちていることが見えないと、再学習の間隔が長すぎる
-    のに気づけない。ここで数えて `inference_log.detail` に残す。
-
-    数えるのは**予測対象だけ**である。止まっているポートや幻のポートは、そもそも
-    成果物に無くてよい。判定は `is_predictable` を呼び直す（**同じ関数を使う**ので、
-    `predict` が選ぶ集合とずれようがない）。
-    """
-    known = frozenset(artifact.ports)
-    return sum(
-        1
-        for row in rows
-        if is_predictable(system_id, row) and f"{system_id}/{row.station_id}" not in known
-    )
-
-
 def confidence_of(*, stale: bool, climatology_horizons: int) -> int:
-    """0 参考 / 1 低 / 2 中 / 3 高（0026 の `confidence`）。
+    """確度（0026 の `confidence`）。
 
     | 値 | 意味 |
     |---|---|
     | 1 | フィードが古い（`t − base_observed_at > 600 秒`） |
-    | 2 | 参照表の再校正だけ。**そのポートの履歴が足りていない** |
-    | 3 | **過半の水平で気候値が効いた**（そのポート・その曜日種別・その時刻の実績がある） |
+    | 2 | 気候値が半分以下の水平でしか効いていない |
+    | 3 | 気候値が過半の水平で効いた |
 
-    **「全水平で」にしない。** 気候値のセルは水平ごとに違う 15 分枠を引くので、
-    10 個そろうのは蓄積が十分に長くなってからになる。実測（3 日ぶん）では
-    14,663 ポート中 40 しか揃わず、信号として使えなかった。
-
-    蓄積が伸びるほど 3 が増える。**いま 3 がほとんど出ないのは、そのとおりの状態を
-    表している。**
+    **0 は使わない**（B1 は必ず出るので「参考値」以下にはならない）。
     """
     if stale:
         return 1
     return 3 if climatology_horizons * 2 > len(HORIZONS_MIN) else 2
-
-
-def predict(
-    artifact: Artifact,
-    system_id: str,
-    rows: Sequence[StationStatusRow],
-    at: datetime,
-    base_observed_at: datetime,
-    holidays: frozenset[date],
-) -> tuple[Forecast, ...]:
-    """予測を作る。**出せないポートは行を作らない。**"""
-    usable = [row for row in rows if is_predictable(system_id, row)]
-    if not usable:
-        return ()
-    samples = to_samples(artifact, system_id, usable, at, holidays)
-    stale = (at - base_observed_at).total_seconds() > MAX_STALENESS_S
-    n_horizons = len(HORIZONS_MIN)
-    columns = {target.name: _probabilities(artifact, samples, target) for target in TARGETS}
-    bike = to_x1000(columns["bike"][0]).reshape(len(usable), n_horizons)
-    dock = to_x1000(columns["dock"][0]).reshape(len(usable), n_horizons)
-    used = (columns["bike"][1] & columns["dock"][1]).reshape(len(usable), n_horizons)
-    return tuple(
-        Forecast(
-            system_id=system_id,
-            station_id=row.station_id,
-            p_bike_x1000=tuple(int(one) for one in bike[index]),
-            p_dock_x1000=tuple(int(one) for one in dock[index]),
-            confidence=confidence_of(stale=stale, climatology_horizons=int(used[index].sum())),
-        )
-        for index, row in enumerate(usable)
-    )
 
 
 def to_payload(
@@ -356,21 +451,30 @@ def _produce(
 ) -> InferSummary:
     artifact = load_artifact(port, model_version)
     holidays = frozenset(port.list_holidays())
-    rows = port.list_station_status(system_id)
-    forecasts = predict(artifact, system_id, rows, now, base, holidays)
-    payload = to_payload(forecasts, now, base, artifact.model_version)
+    # **基準時刻は 5 分格子に落とす。** 水平の起点は `generated_at` なので、
+    # 書き込む `generated_at` も同じ時刻にする（W4 プラン §12 の 114）
+    at = grid_time(now)
+    features_started = time.monotonic_ns()
+    reference_day, ready = read_features(port, system_id, at, holidays)
+    features_ms = int((time.monotonic_ns() - features_started) // NS_PER_MS)
+    stale = (at - base).total_seconds() > MAX_STALENESS_S
+    forecasts = predict(artifact, system_id, at, ready.table, stale)
+    payload = to_payload(forecasts, at, base, artifact.model_version)
     written = sum(port.upsert_forecasts(chunk) for chunk in batches(payload, UPSERT_BATCH))
     return InferSummary(
         system_id=system_id,
         status="ok",
         base_observed_at=base,
         model_version=artifact.model_version,
-        n_stations=len(rows),
-        n_skipped=len(rows) - len(forecasts),
-        n_unknown_ports=unknown_ports(artifact, system_id, rows),
+        n_stations=ready.stats.stations,
+        n_skipped=sum(ready.stats.excluded.values()),
+        n_unknown_ports=unknown_ports(artifact, system_id, ready.table),
         n_rows=written,
         duration_ms=_elapsed_ms(started),
         cpu_ms=_cpu_ms(cpu_started),
+        features_ms=features_ms,
+        excluded=dict(sorted(ready.stats.excluded.items())),
+        reference_date=reference_day.isoformat(),
     )
 
 
@@ -461,7 +565,12 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         "unknown_ports": summary.n_unknown_ports,
         "rows": summary.n_rows,
         "duration_ms": summary.duration_ms,
+        # **所要の大半は特徴量づくり**（W4 プラン §6.3 の完了条件）。分けて出さないと、
+        # 遅くなったときに読み込みなのか組み立てなのかが分からない
+        "features_ms": summary.features_ms,
         "cpu_ms": summary.cpu_ms,
+        "excluded": dict(summary.excluded),
+        "reference_date": summary.reference_date,
         "error": summary.error,
     }
 
@@ -480,4 +589,10 @@ def to_record(summary: InferSummary) -> dict[str, object]:
         # **`cpu_ms` は列にしない。** 開発プラン §5.3 の DDL には在るが、実装では
         # `detail` に入れる（列を足さずに済み、0030 でその口を作った）
         "cpu_ms": summary.cpu_ms,
+        # 推論の所要の大半は特徴量づくり。**分けて見えないと、遅くなったときに
+        # どこが遅いか分からない**（W4 プラン §6.3 の完了条件）
+        "features_ms": summary.features_ms,
+        "excluded": dict(summary.excluded),
+        # **どの版の参照データで出した予測か。** 00:00〜05:00 JST は 1 つ古い版になる
+        "reference_date": summary.reference_date,
     }
