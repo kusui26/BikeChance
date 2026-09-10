@@ -16,6 +16,11 @@
         --local .cache/features --report ../../docs/260910_eda_03_lightgbm_v0.md \\
         --card ../../docs/model_cards/lgbm-v0-20260907.md --upload --register
 
+**当てはめた木は numpy の形に平たくしてから配る**（PR E′）。配信のランタイムに
+OpenMP が無く `import lightgbm` が落ちるため（§12 の 126）。**平たくした森が
+`Booster.predict` と同じ値を出すことを、成果物を書く前に照合する**
+（`refuse_if_different`）。1 つでも違えば書かない。
+
 **早期終了は使わない。** 開発プラン §7.2 は「検証セットで 100 ラウンド」と書いているが、
 それは 学習 → パージ → 検証 → テスト の 4 分割が取れる前提である。いまは完全な暦日が
 3 日しか無く、検証を早期終了に使うと**その集合で B3 と比べる意味が消える**（モデル選択に
@@ -25,6 +30,7 @@
 import argparse
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Final
@@ -42,7 +48,7 @@ from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.io.supabase import SupabaseIo, open_storage
 from bikechance_ml.jobs.evaluate_baselines import days_between, load_days
 from bikechance_ml.models import artifact as lightgbm_artifact
-from bikechance_ml.models import matrix
+from bikechance_ml.models import forest, matrix
 from bikechance_ml.models.registry import LIGHTGBM_KIND, MODEL_BUCKET
 
 #: 版の付け方。**最後の学習日**を入れる（いつまでのデータで作ったかが名前で分かる）。
@@ -71,6 +77,23 @@ PARAMS: Final[Mapping[str, object]] = {
 }
 
 
+#: 平たくした森と `Booster.predict` が「同じ」とみなせる幅（確率の絶対差）。
+#:
+#: **倍精度の足し算の順が違うぶん**（300 本の葉の値を numpy は対で、LightGBM は順に
+#: 足す）は 1e-13 くらい。**枝を 1 つ間違えたときの差**は 1e-1 くらい。その間に取る。
+MAX_DISAGREEMENT: Final[float] = 1e-9
+
+#: 照合に足す「実データが踏まない枝」の行数（全欠損・全 0・未知のカテゴリを各この数）。
+STRESS_ROWS: Final[int] = 2_000
+
+#: 未知のカテゴリとして渡す値。**語彙のどれよりも大きい**（ビット集合の外に落ちる）。
+UNSEEN_CATEGORY: Final[float] = 9.0e4
+
+
+class ForestMismatchError(RuntimeError):
+    """平たくした森が `Booster.predict` と違う値を出した。**成果物を書かない。**"""
+
+
 def model_version_for(days: Sequence[date]) -> str:
     return f"{VERSION_PREFIX}-{days[-1]:%Y%m%d}"
 
@@ -97,27 +120,104 @@ def train_one(table: pa.Table, samples: Samples, fit_mask: Bools, target: Target
     return lgb.train(params, dataset, num_boost_round=NUM_BOOST_ROUND)
 
 
-def predict_on(
-    boosters: Mapping[str, lgb.Booster], table: pa.Table, mask: Bools
-) -> dict[str, Float64]:
-    """検証期間の行に予測を付ける。**行の並びは `samples.take(mask)` と同じ。**"""
-    built = matrix.build(table.filter(pa.array(mask)))
-    return {name: lightgbm_artifact.predict(one, built) for name, one in boosters.items()}
+# ── 平たくして照合する ────────────────────────────────────────
+@dataclass(frozen=True)
+class Checked:
+    """照合の結果。**モデルカードと `model_versions.metrics` に残す。**"""
+
+    n_rows: int
+    max_gap: float
+
+
+def flatten_and_verify(
+    booster: lgb.Booster, name: str, values: Float64
+) -> tuple[forest.Forest, Checked]:
+    """木を平たくし、**`Booster.predict` と同じ値が出ることを確かめてから**返す。"""
+    built = forest.flatten(booster.dump_model())
+    return built, refuse_if_different(booster, built, name, values)
+
+
+def refuse_if_different(
+    booster: lgb.Booster, built: forest.Forest, name: str, values: Float64
+) -> Checked:
+    """**1 行でも違えば止める。** 「同じはず」を宣言で済ませない（W4-19）。
+
+    ここを通らなかった森は成果物にならないので、**配信側と学習側がずれた状態の
+    成果物は生まれ得ない**。差は必ず残す（0 でも記録する）。
+    """
+    theirs = np.asarray(booster.predict(values), dtype=np.float64)
+    ours = forest.probability(built, values)
+    gap = float(np.abs(theirs - ours).max())
+    print(f"{name}: {len(values):,} 行で照合、最大の差 {gap:.3e}", file=sys.stderr)
+    if gap > MAX_DISAGREEMENT:
+        raise ForestMismatchError(
+            f"{name}: 平たくした森が Booster.predict と最大 {gap:.3e} 違います"
+            f"（許容 {MAX_DISAGREEMENT:.0e}）。成果物は書きません"
+        )
+    return Checked(n_rows=len(values), max_gap=gap)
+
+
+def verification_rows(values: Float64) -> Float64:
+    """照合に使う行。**実データに、実データが踏まない枝を足す。**
+
+    検証日の行だけでは「未知のカテゴリ」「全部欠損」「ちょうど 0」に当たる枝を
+    一度も通らないことがある。**配信で最初に踏むのがその枝**では困るので、
+    ここで作って足す。
+    """
+    sample = values[:STRESS_ROWS]
+    return np.vstack([values, _all_missing(sample), _all_zero(sample), _unseen(sample)])
+
+
+def _all_missing(sample: Float64) -> Float64:
+    """全列が欠損。**`default_left` の枝**をすべて通す。"""
+    return np.full_like(sample, np.nan)
+
+
+def _all_zero(sample: Float64) -> Float64:
+    """全列が 0。**`missing_type = Zero` の枝**を通す。"""
+    return np.zeros_like(sample)
+
+
+def _unseen(sample: Float64) -> Float64:
+    """カテゴリ列だけ知らない値に差し替える。**ビット集合の外**へ落とす。"""
+    changed = sample.copy()
+    changed[:, list(matrix.categorical_indices())] = UNSEEN_CATEGORY
+    return changed
+
+
+def predict_on(forests: Mapping[str, forest.Forest], built: matrix.Matrix) -> dict[str, Float64]:
+    """検証期間の行に予測を付ける。**行の並びは `samples.take(mask)` と同じ。**
+
+    **配る側と同じ経路**（`models/forest.py`）で出す。`Booster.predict` の値ではない
+    ので、表に載る数字は**実際に配信で出る数字**である。
+    """
+    return {name: lightgbm_artifact.predict(one, built) for name, one in forests.items()}
 
 
 def fit_and_score(
     table: pa.Table, samples: Samples, split: DaySplit
-) -> tuple[Mapping[str, lgb.Booster], harness.Outcome]:
-    """当てはめて、**B3 と同じ検証行の上で**測る。"""
+) -> tuple[Mapping[str, forest.Forest], harness.Outcome, Mapping[str, Checked]]:
+    """当てはめて平たくして、**B3 と同じ検証行の上で**測る。"""
     fit_mask = mask_of(samples, split.fit)
-    eval_mask = mask_of(samples, split.evaluate)
-    boosters = {target.name: train_one(table, samples, fit_mask, target) for target in TARGETS}
-    extra = {MODEL_NAME: predict_on(boosters, table, eval_mask)}
-    return boosters, harness.run(samples, split, extra)
+    built = matrix.build(table.filter(pa.array(mask_of(samples, split.evaluate))))
+    rows = verification_rows(built.values)
+    made = {
+        target.name: flatten_and_verify(
+            train_one(table, samples, fit_mask, target), target.name, rows
+        )
+        for target in TARGETS
+    }
+    forests = {name: one for name, (one, _) in made.items()}
+    outcome = harness.run(samples, split, {MODEL_NAME: predict_on(forests, built)})
+    return forests, outcome, {name: check for name, (_, check) in made.items()}
 
 
-def to_metrics(outcome: harness.Outcome) -> dict[str, object]:
-    """`model_versions.metrics` に入れる要約。**全体の重み付き Brier と B3 との差。**"""
+def to_metrics(outcome: harness.Outcome, checks: Mapping[str, Checked]) -> dict[str, object]:
+    """`model_versions.metrics` に入れる要約。**全体の重み付き Brier と B3 との差。**
+
+    **照合の結果も残す**（W4-19）。配信は木を numpy で歩くので、「その森が
+    `Booster.predict` と同じ値を出すことを何行で確かめたか」は**登録簿に残すべき事実**である。
+    """
     rows = {
         f"{one.slice.system}/{one.slice.target}": {
             "n": one.n,
@@ -133,15 +233,26 @@ def to_metrics(outcome: harness.Outcome) -> dict[str, object]:
         "feature_set": FEATURE_SET,
         "num_boost_round": NUM_BOOST_ROUND,
         "brier_weighted": rows,
+        "forest_check": _to_check_rows(checks),
         "caveat": "学習日が少ない。配線の確認であって精度の評価ではない（W4-07）",
     }
 
 
+def _to_check_rows(checks: Mapping[str, Checked]) -> dict[str, object]:
+    """照合の結果を JSON にする。**許容も一緒に残す**（後から読む人が判断できるように）。"""
+    return {
+        "tolerance": MAX_DISAGREEMENT,
+        "targets": {
+            name: {"n_rows": one.n_rows, "max_gap": one.max_gap} for name, one in checks.items()
+        },
+    }
+
+
 def build_artifact(
-    boosters: Mapping[str, lgb.Booster], days: Sequence[date]
+    forests: Mapping[str, forest.Forest], days: Sequence[date]
 ) -> lightgbm_artifact.LightGbmArtifact:
     return lightgbm_artifact.build(
-        boosters=boosters,
+        forests=forests,
         model_version=model_version_for(days),
         feature_set=FEATURE_SET,
         created_at=datetime.now(UTC).isoformat(),
@@ -154,6 +265,7 @@ def build_artifact(
 def to_registration(
     artifact: lightgbm_artifact.LightGbmArtifact,
     outcome: harness.Outcome,
+    checks: Mapping[str, Checked],
     card_path: str | None,
 ) -> dict[str, object]:
     """`register_model_version` に渡す形。**`candidate` としてしか登録できない。**"""
@@ -164,9 +276,9 @@ def to_registration(
         "feature_set": artifact.feature_set,
         "artifact_path": lightgbm_artifact.artifact_path(artifact.model_version),
         "train_days": list(artifact.train_days),
-        "metrics": to_metrics(outcome),
+        "metrics": to_metrics(outcome, checks),
         "card_path": card_path,
-        "note": "W4 の PR E。配線の確認（W4-07）。精度は問わない",
+        "note": "W4 の PR E′。配線の確認（W4-07）。精度は問わない",
     }
 
 
@@ -205,8 +317,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         samples = to_samples(table)
         split = split_days(found, options.eval_days, options.purge_days)
         print(f"{split.describe()} / 全 {len(samples):,} 行", file=sys.stderr)
-        boosters, outcome = fit_and_score(table, samples, split)
-        artifact = build_artifact(boosters, split.fit)
+        forests, outcome, checks = fit_and_score(table, samples, split)
+        artifact = build_artifact(forests, split.fit)
         body = lightgbm_artifact.to_bytes(artifact)
         if options.upload:
             source.upload(
@@ -216,7 +328,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 lightgbm_artifact.CONTENT_TYPE,
             )
         if options.register:
-            source.register_model_version(to_registration(artifact, outcome, options.card))
+            source.register_model_version(to_registration(artifact, outcome, checks, options.card))
 
     if options.out:
         Path(options.out).write_bytes(body)
@@ -225,7 +337,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         report.render_markdown(outcome, _title(artifact), _NOTE, "fit_lightgbm"),
         "評価",
     )
-    _write(options.card, render_card(artifact, outcome), "モデルカード")
+    _write(options.card, render_card(artifact, outcome, checks), "モデルカード")
     print(f"{artifact.describe()} / {len(body):,} バイト")
     return 0
 
@@ -284,9 +396,39 @@ def _judgement_lines(outcome: harness.Outcome) -> list[str]:
     ]
 
 
-def render_card(artifact: lightgbm_artifact.LightGbmArtifact, outcome: harness.Outcome) -> str:
+def _verification_lines(checks: Mapping[str, Checked]) -> list[str]:
+    """**配信の実装が学習と同じ値を出すことの確認**（W4-19）。カードに必ず載せる。
+
+    配信は `lightgbm` を使わず木を numpy で歩くので（`models/forest.py`）、
+    **「同じはず」ではなく「何行で確かめて、差がいくつだったか」**を残す。
+    ここを通らなかった森は成果物にならない。
+    """
+    lines = [
+        "## 配信の実装との一致（W4-19）",
+        "",
+        "**配信は `lightgbm` を読み込まない**（Vercel の Python ランタイムに OpenMP が無いため。"
+        "W4 プラン §12 の 126）。木を numpy で歩くので、**当てはめた直後に "
+        "`Booster.predict` と突き合わせている**。検証日の全行に、実データが踏まない枝"
+        f"（全欠損・全 0・未知のカテゴリを各 {STRESS_ROWS:,} 行）を足した集合で測った。",
+        "",
+        "| ターゲット | 照合した行 | 最大の差 | 許容 |",
+        "|---|---:|---:|---:|",
+    ]
+    lines.extend(
+        f"| {name} | {one.n_rows:,} | {one.max_gap:.3e} | {MAX_DISAGREEMENT:.0e} |"
+        for name, one in checks.items()
+    )
+    lines.extend(["", "**超えていれば成果物を書かない。** このカードがある＝通っている。", ""])
+    return lines
+
+
+def render_card(
+    artifact: lightgbm_artifact.LightGbmArtifact,
+    outcome: harness.Outcome,
+    checks: Mapping[str, Checked],
+) -> str:
     """モデルカード（開発プラン §7.3）。**登録の前提**なので、ここで必ず作る。"""
-    metrics = to_metrics(outcome)
+    metrics = to_metrics(outcome, checks)
     lines = [
         f"# モデルカード：{artifact.model_version}",
         "",
@@ -300,8 +442,11 @@ def render_card(artifact: lightgbm_artifact.LightGbmArtifact, outcome: harness.O
         f"| 件数 | 学習 {outcome.n_fit:,} 行 / 検証 {outcome.n_eval:,} 行 |",
         f"| 列 | {len(artifact.columns)}（カテゴリ {len(artifact.categorical)}） |",
         f"| 木の本数 | {NUM_BOOST_ROUND}（**早期終了なし**） |",
+        f"| 成果物 | 木の構造そのもの（書式の版 {artifact.format_version}）。"
+        f"節 {', '.join(f'{name} {one.n_nodes:,}' for name, one in artifact.forests.items())} |",
         f"| 作成 | {artifact.created_at} |",
         "",
+        *_verification_lines(checks),
         "## 指標（全体、重み付き Brier）",
         "",
         "| system / ターゲット | n | B3 | LightGBM | 差 |",
