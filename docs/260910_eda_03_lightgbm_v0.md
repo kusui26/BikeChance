@@ -1,6 +1,6 @@
 # LightGBM v0（lgbm-v0-20260907）と B0〜B3
 
-- **生成**：2026-09-10 21:04 JST（`bikechance_ml.jobs.fit_lightgbm`、`feature_set = v3`）
+- **生成**：2026-09-10 22:53 JST（`bikechance_ml.jobs.fit_lightgbm`、`feature_set = v3`）
 - **分割**：学習 2026-09-07（1 日）/ パージ 2026-09-08（1 日）/ 検証 2026-09-09（1 日）
 - **件数**：学習 2,053,383 行 / 検証 2,064,413 行
 
