@@ -128,8 +128,8 @@ select is(
   true, 'postgres は BYPASSRLS（security definer の中から全行が見える）'
 );
 
--- 0020 で 9 本、0021・0022・0025・0029 が 1 本ずつ足して 13 本
-select is((select count(*)::int from public.monitored_jobs), 14, '監視対象は 14 ジョブ');
+-- 0020 で 9 本、0021・0022・0025・0029・0036・0037 が 1 本ずつ足して 15 本
+select is((select count(*)::int from public.monitored_jobs), 15, '監視対象は 15 ジョブ');
 
 -- **参照スナップショットは Vercel Cron だが、見張りには入れる**（0036。§12 の 116）。
 -- 学習も推論も「前日の版」を読むので、止まると翌日に静かに壊れる

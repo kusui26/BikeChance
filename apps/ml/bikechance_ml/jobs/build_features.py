@@ -30,7 +30,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bikechance_ml.config import read_storage_config
-from bikechance_ml.features import build, neighbors, static
+from bikechance_ml.features import build, neighbors, static, weather
 from bikechance_ml.features.constants import LOOKAHEAD_HOURS, LOOKBACK_HOURS
 from bikechance_ml.features.grid import features_path, parquet_hours, reference_path
 from bikechance_ml.features.reference import SystemReference
@@ -152,6 +152,7 @@ def to_inputs(
     estimates: Estimates,
     holidays: frozenset[date],
     table: pa.Table,
+    forecast: weather.Weather,
 ) -> build.DayInputs:
     """参照データと Parquet を、組み立ての入力に直す。"""
     facts = static.to_facts(systems, estimates)
@@ -160,7 +161,18 @@ def to_inputs(
         day=day,
         reference=build.Reference(facts=facts, links=links, holidays=holidays),
         table=table,
+        weather=forecast,
     )
+
+
+def read_weather(source: SupabaseIo, day: date) -> weather.Weather:
+    """その日の基準時刻で使える予報を読む（W4 プラン §6.4）。
+
+    **2026-09-07 15:17 UTC より前の日は 1 件も返らない。** 天気アーカイブが
+    そこから始まっているので、それより前のサンプルは天気の 4 列が NULL になる（§5.4）。
+    """
+    start, end = weather.training_window(day)
+    return weather.to_weather(source.list_weather(start, end))
 
 
 def to_parquet_bytes(table: pa.Table) -> bytes:
@@ -188,7 +200,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         systems, estimates = read_reference(source, day)
         holidays = frozenset(source.list_holidays())
         table, missing = load_snapshots(source, day, cache)
-        built = build.build_day(to_inputs(day, systems, estimates, holidays, table))
+        forecast = read_weather(source, day)
+        built = build.build_day(to_inputs(day, systems, estimates, holidays, table, forecast))
         body = to_parquet_bytes(built.table)
         if options.upload:
             source.upload_parquet(features_path(day), body)

@@ -52,6 +52,10 @@
       "schedule": "17 * * * *"
     },
     {
+      "path": "/ml/weather",
+      "schedule": "25 * * * *"
+    },
+    {
       "path": "/ml/compact",
       "schedule": "7 * * * *"
     },

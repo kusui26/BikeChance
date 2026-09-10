@@ -1,4 +1,4 @@
-"""学習と推論が**同じ 57 列**を出すこと（W4 プラン §4 の W4-04、§6.3）。
+"""学習と推論が**同じ 61 列**を出すこと（W4 プラン §4 の W4-04、§6.3）。
 
 **口約束にしない。** CLAUDE.md §2 の 4 は「特徴量は単一実装を学習と推論で共用する」と
 書いているが、W3 の段 8 の推論は実際には別経路だった（W3 プラン §13.4）。**一致を
@@ -19,7 +19,7 @@ from typing import Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from bikechance_ml.features import build, neighbors, static
+from bikechance_ml.features import build, neighbors, static, weather
 from bikechance_ml.features.constants import CHANGE_CAP_MINUTES
 from bikechance_ml.features.grid import JST
 from bikechance_ml.features.reference import (
@@ -31,7 +31,7 @@ from bikechance_ml.features.schema import SERVING_DROPPED, SERVING_SCHEMA, featu
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from tests import features_fixture as fixture
 
-#: 突き合わせる列。**57 列すべて**（`h_min` を含む）。
+#: 突き合わせる列。**61 列すべて**（`h_min` を含む）。
 COMPARED = feature_columns()
 
 #: 行を突き合わせる鍵。
@@ -72,6 +72,19 @@ def _windowed(table: pa.Table, at: datetime) -> pa.Table:
     return table.filter(keep)
 
 
+def _windowed_weather(at: datetime) -> weather.Weather:
+    """**推論が実際に読む範囲**の予報だけ（`weather.serving_window`）。
+
+    観測と同じ理由でここを絞る。学習は 1 日ぶんの発行を持っているが、推論は 3 時間ぶんしか
+    読まない。**絞っても同じ値が出る**ことを確かめないと、窓の長さがそのまま skew になる
+    （`minutes_since_last_change` で 1 度やった。W4 プラン §4 の W4-10）。
+    """
+    start, end = weather.serving_window(at)
+    return weather.to_weather(
+        tuple(one for one in fixture.load_weather_rows() if start <= one.available_at < end)
+    )
+
+
 def _compare(
     day_rows: dict[tuple[object, ...], dict[str, object]], ready: pa.Table, at: datetime
 ) -> int:
@@ -91,12 +104,28 @@ def _compare(
 
 
 def _now_inputs(
-    day_inputs: build.DayInputs, at: datetime, table: pa.Table, system_id: str = "hellocycling"
+    day_inputs: build.DayInputs,
+    at: datetime,
+    table: pa.Table,
+    forecast: weather.Weather | None = None,
+    system_id: str = "hellocycling",
 ) -> build.NowInputs:
-    return build.NowInputs(at=at, system_id=system_id, reference=day_inputs.reference, table=table)
+    """**予報を渡さなければ学習と同じものを使う**（窓の効果を見たいときだけ渡す）。"""
+    return build.NowInputs(
+        at=at,
+        system_id=system_id,
+        reference=day_inputs.reference,
+        table=table,
+        weather=day_inputs.weather if forecast is None else forecast,
+    )
 
 
-def _serve_all(day_inputs: build.DayInputs, at: datetime, table: pa.Table) -> pa.Table:
+def _serve_all(
+    day_inputs: build.DayInputs,
+    at: datetime,
+    table: pa.Table,
+    forecast: weather.Weather | None = None,
+) -> pa.Table:
     """本番と同じく**システムごとに 1 回ずつ**回し、結果を束ねる。
 
     `/ml/infer/{system}` は 1 系統ずつ走るので、`build_now` も 1 系統ぶんしか行を
@@ -105,7 +134,7 @@ def _serve_all(day_inputs: build.DayInputs, at: datetime, table: pa.Table) -> pa
     """
     systems = sorted({system_id for system_id, _ in day_inputs.reference.facts.station_keys()})
     parts = [
-        build.build_now(_now_inputs(day_inputs, at, table, system_id)).table
+        build.build_now(_now_inputs(day_inputs, at, table, forecast, system_id)).table
         for system_id in systems
     ]
     return pa.concat_tables(parts)
@@ -119,13 +148,16 @@ def _run(windowed: bool) -> tuple[int, int]:
     matched = 0
     for at in times:
         table = _windowed(day_inputs.table, at) if windowed else day_inputs.table
-        matched += _compare(_rows_by_key(built.table, at), _serve_all(day_inputs, at, table), at)
+        forecast = _windowed_weather(at) if windowed else day_inputs.weather
+        matched += _compare(
+            _rows_by_key(built.table, at), _serve_all(day_inputs, at, table, forecast), at
+        )
     return len(times), matched
 
 
 # ── 一致 ──────────────────────────────────────────────────────
 def test_build_now_matches_build_day() -> None:
-    """**同じ観測から、同じ 57 列が出る。**"""
+    """**同じ観測から、同じ 61 列が出る。**"""
     times, matched = _run(windowed=False)
     assert times > 0, "突き合わせる基準時刻が無い（フィクスチャを疑う）"
     assert matched > 0, "突き合わせた行が無い"
@@ -189,9 +221,9 @@ def test_serving_output_has_no_labels_or_weights() -> None:
 
 
 def test_every_feature_column_is_served() -> None:
-    """57 列が 1 つも欠けずに出る。"""
+    """61 列が 1 つも欠けずに出る。"""
     assert set(COMPARED) <= set(SERVING_SCHEMA.names)
-    assert len(COMPARED) == 57
+    assert len(COMPARED) == 61
 
 
 def test_rows_are_stations_times_horizons() -> None:
@@ -202,7 +234,7 @@ def test_rows_are_stations_times_horizons() -> None:
     assert set(ready.table.column("system_id").to_pylist()) == {"hellocycling"}
     assert ready.table.num_rows == ready.stats.rows
     assert ready.stats.rows == ready.stats.predictable * 10
-    assert ready.stats.feature_set == "v2"
+    assert ready.stats.feature_set == "v3"
 
 
 def test_the_grid_refuses_a_shift_it_does_not_have() -> None:
@@ -300,6 +332,9 @@ def _synthetic_inputs() -> build.DayInputs:
             holidays=frozenset(),
         ),
         table=table,
+        # **天気は入れない。** ここで見たいのは `minutes_since_last_change` の上限で、
+        # 天気の列は両側とも NULL のまま一致する
+        weather=weather.empty(),
     )
 
 

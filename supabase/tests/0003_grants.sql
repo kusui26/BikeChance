@@ -170,7 +170,9 @@ create function pg_temp.rest_called() returns text[] language sql immutable as $
     -- 祝日の取り込みスクリプト
     'replace_jp_holidays',
     -- 推論（apps/ml の /ml/infer）
-    'begin_inference', 'finish_inference', 'upsert_forecasts'
+    'begin_inference', 'finish_inference', 'upsert_forecasts',
+    -- 天気の取り込み（apps/ml の /ml/weather）
+    'upsert_weather_hourly'
   ];
 $$;
 

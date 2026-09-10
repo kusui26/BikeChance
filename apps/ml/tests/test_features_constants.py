@@ -21,7 +21,11 @@ from bikechance_ml.features.constants import (
     SAME_TIME_MINUTES,
     TIGHT_RATE,
     UNIFORM_RATE,
+    WEATHER_GRID_LAT_STEP,
+    WEATHER_GRID_LON_STEP,
+    WEATHER_LEAD_HOURS,
 )
+from bikechance_ml.features.weather import required_lead_hours
 
 CONSTANTS_TS: Final[Path] = (
     Path(__file__).resolve().parents[3] / "packages" / "shared" / "src" / "constants.ts"
@@ -61,3 +65,28 @@ def test_tight_rate_is_higher_than_uniform() -> None:
     """難所を厚く取る（開発プラン §6.2）。逆になっていたら重みの意味が反転する。"""
     assert TIGHT_RATE > UNIFORM_RATE > 0
     assert TIGHT_RATE < 1
+
+
+def typescript_number(name: str) -> float:
+    """`constants.ts` の数値定数を 1 つ読む。"""
+    text = CONSTANTS_TS.read_text(encoding="utf-8")
+    found = re.search(rf"export const {name} = ([0-9.]+)", text)
+    assert found is not None, f"{name} が constants.ts に見つからない"
+    return float(found.group(1))
+
+
+def test_weather_grid_matches_typescript() -> None:
+    """**予報を取る格子と、特徴量が引く格子は同じでなければならない。**
+
+    取得側（`weather_grid_cells(0.05, 0.0625)`）は TypeScript の定数を渡して呼ばれる。
+    ここがずれると、取ってある格子と引きにいく格子が食い違い、天気の列が黙って
+    NULL になる（W4 プラン §6.4）。
+    """
+    assert typescript_number("WEATHER_GRID_LAT_STEP") == WEATHER_GRID_LAT_STEP
+    assert typescript_number("WEATHER_GRID_LON_STEP") == WEATHER_GRID_LON_STEP
+
+
+def test_the_weather_lead_hours_cover_the_longest_horizon() -> None:
+    """**最長の水平（180 分） + 発行の古さ**を覆えているか（`required_lead_hours`）。"""
+    assert required_lead_hours(missed_issues=0) <= WEATHER_LEAD_HOURS
+    assert max(HORIZONS_MIN) < WEATHER_LEAD_HOURS * 60

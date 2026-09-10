@@ -10,9 +10,11 @@
 
 import csv
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from typing import Final
 
 import pyarrow as pa
+import pytest
 
 from bikechance_ml.features import build
 from bikechance_ml.features.constants import (
@@ -25,6 +27,7 @@ from bikechance_ml.features.constants import (
     UNIFORM_RATE,
 )
 from bikechance_ml.features.schema import SCHEMA, MissingColumnError, feature_columns, to_table
+from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.build_features import to_parquet_bytes
 from tests import features_fixture as fixture
 from tests.gen_golden import to_csv
@@ -277,6 +280,7 @@ def test_a_day_without_observations_produces_an_empty_table() -> None:
         day=inputs.day,
         reference=inputs.reference,
         table=inputs.table.schema.empty_table(),
+        weather=inputs.weather,
     )
     built = build.build_day(empty)
     assert built.table.num_rows == 0
@@ -295,3 +299,88 @@ def test_table_is_a_single_file_for_both_systems() -> None:
     systems = set(TABLE.column("system_id").to_pylist())
     assert systems == {"hellocycling", "docomo-cycle"}
     assert isinstance(TABLE, pa.Table)
+
+
+# ── 天気（W4 プラン §6.4）─────────────────────────────────────
+def test_the_weather_columns_are_filled() -> None:
+    """**完了条件**：天気アーカイブのある日は、4 列が NULL でない（§6.4）。"""
+    for name in ("precip_mm_now", "precip_mm_target", "temp_c", "wind_kmh"):
+        values = TABLE.column(name).to_pylist()
+        assert all(one is not None for one in values), f"{name} に NULL がある"
+
+
+#: ポートが居る気象格子（`weather.json` の `_comment`）。囮の格子は +100 してある。
+_PORT_CELL: Final[tuple[int, int]] = (714, 2236)
+
+
+def _port_issues() -> list[WeatherRow]:
+    """ポートの格子ぶんの発行を、`available_at` の昇順で。"""
+    rows = [
+        one
+        for one in fixture.load_weather_rows()
+        if (one.cell_lat_idx, one.cell_lon_idx) == _PORT_CELL
+    ]
+    return sorted(rows, key=lambda one: one.available_at)
+
+
+def _ceil_hour(at: datetime) -> datetime:
+    top = at.replace(minute=0, second=0, microsecond=0)
+    return top if top == at else top + timedelta(hours=1)
+
+
+def _hours_between(start: datetime, end: datetime) -> int:
+    return int((end - start).total_seconds()) // 3600
+
+
+def test_the_weather_comes_from_the_issue_that_was_available() -> None:
+    """**素朴な再計算で検算する**（リークの検査 `test_no_leak_*` と同じやり方）。
+
+    「`available_at <= t` の最新の発行の、`t` を含む時間帯」を素朴に選び直して、
+    出力の `precip_mm_now` と突き合わせる。`build.py` の添字の算術とは別経路である。
+    """
+    issues = _port_issues()
+    for row in ROWS:
+        at = row["t"].replace(tzinfo=UTC)
+        usable = [one for one in issues if one.available_at <= at]
+        assert usable, f"{at} に使える発行が無い（フィクスチャを疑う）"
+        latest = usable[-1]
+        lead = _hours_between(latest.issued_hour, _ceil_hour(at))
+        expected = latest.values["precip_mm"][lead]
+        assert row["precip_mm_now"] == pytest.approx(expected), f"{at} の行が合わない"
+
+
+def _fraction_of(issue: WeatherRow) -> float:
+    """その発行の値の小数部（＝発行時刻の目印）。"""
+    first = issue.values["precip_mm"][0]
+    assert first is not None, "フィクスチャの先頭が NULL（目印が取れない）"
+    return round(first % 1, 1)
+
+
+def test_no_row_uses_a_forecast_from_the_future() -> None:
+    """**`available_at` より後の予報を 1 件も使っていない**（§6.4 の完了条件）。
+
+    フィクスチャは `precip_mm[k] = 発行の時（JST）/ 10 + k` なので、**値の小数部が
+    発行時刻を表す**（7 → .7、9 → .9、11 → .1、13 → .3）。出力の値だけから発行を
+    復元して、それが `t` までに入手できていたことを確かめる。
+    """
+    by_fraction = {_fraction_of(one): one for one in _port_issues()}
+    assert len(by_fraction) == len(_port_issues()), "小数部が重なっている（フィクスチャを疑う）"
+    for row in ROWS:
+        at = row["t"].replace(tzinfo=UTC)
+        issue = by_fraction[round(float(row["precip_mm_now"]) % 1, 1)]
+        assert issue.available_at <= at, f"{at} が未入手の {issue.available_at} を使っている"
+
+
+def test_a_port_outside_the_archived_cells_is_counted() -> None:
+    """**当たらないポートは数える**（黙って NULL にしない）。実在しない 5753 の格子は
+    フィクスチャに入れていないので 1 件になる。"""
+    assert BUILT.stats.stations_without_weather == 1
+    assert BUILT.stats.weather_issues == 4
+
+
+def test_the_target_weather_moves_with_the_horizon() -> None:
+    """**水平で変わるのは `precip_mm_target` だけ。** 同じ基準時刻で値が動く。"""
+    by_time: dict[datetime, set[float]] = defaultdict(set)
+    for row in ROWS:
+        by_time[row["t"]].add(float(row["precip_mm_target"]))
+    assert any(len(values) > 1 for values in by_time.values()), "水平で動いていない"

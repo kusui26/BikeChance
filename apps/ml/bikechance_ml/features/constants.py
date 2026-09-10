@@ -32,7 +32,11 @@ MAX_STALENESS_S: Final[int] = 600
 #: （W4 プラン §4 の W4-10）。この列だけが読んだ窓の長さで値が変わり、25 時間読む学習と
 #: 3 時間読む推論で必ず食い違っていた。**上限を決めて、どちらも同じ値を出せるようにした。**
 #: 値が変わるのはこの 1 列だけだが、**v1 と混ぜて学習しない**。
-FEATURE_SET: Final[str] = "v2"
+#: v3（2026-09-10）：**天気の 4 列を足した**（W4 プラン §6.4、PR D）。`precip_mm_now` /
+#: `precip_mm_target` / `temp_c` / `wind_kmh`。**天気アーカイブは 2026-09-07 15:17 UTC から**
+#: なので、それより前のサンプルは 4 列とも NULL になる（§5.4）。**v2 と混ぜて学習しない。**
+#: （W4 プラン §6.4 は「v2 に上げる」と書いていたが、v2 は PR C が使ってしまった）
+FEATURE_SET: Final[str] = "v3"
 
 #: 難所の判定（開発プラン §6.2）。`bikes <= 2` または `docks <= 2`。
 TIGHT_THRESHOLD: Final[int] = 2
@@ -90,6 +94,25 @@ MISSING: Final[int] = -1
 FLAG_INSTALLED: Final[int] = 1
 FLAG_RENTING: Final[int] = 2
 FLAG_RETURNING: Final[int] = 4
+
+#: 気象格子の刻み（度）。**`packages/shared/src/constants.ts` と同じ値**でなければ、
+#: 予報を取った格子と特徴量が引く格子がずれる（`tests/test_features_constants.py` が照合）。
+#:
+#: 格子の鍵は**整数の添字**にする：`round(lat / 0.05)` と `round(lon / 0.0625)`。
+#: 度のまま突き合わせてはいけない。Open-Meteo の応答の座標は float32 で、
+#: 26.2 が `26.199999` として返る（実測 2026-09-10。595 格子のうち 8 件）。
+WEATHER_GRID_LAT_STEP: Final[float] = 0.05
+WEATHER_GRID_LON_STEP: Final[float] = 0.0625
+
+#: `weather_hourly` の 1 行が持つ時間数（発行時刻から先へ何時間ぶんか）。
+#:
+#: 必要なのは **6**（発行 `E` の予報は `t ∈ [E+18分, E+1時間18分)` のあいだ使われ、
+#: そのとき引くのは `E` から `E+5` の時間帯）。**8 にしてあるのは、取得が 2 回続けて
+#: 落ちても穴が開かないようにするため**（1 回落ちれば 7、2 回で 8 が要る）。
+#:
+#: 大きくすると容量が増える（1 時間ぶん = 595 格子 × 24 発行 × 約 11 バイト = 約 0.4 MB/日）。
+#: アーカイブには 34〜71 時間ぶん入っているので、増やすだけなら取り直しで足りる。
+WEATHER_LEAD_HOURS: Final[int] = 8
 
 #: 実在しないポート（EDA #1。事業者の監視用で `docks = 9997` / 座標が海の上）。
 PHANTOM_STATIONS: Final[frozenset[tuple[str, str]]] = frozenset({("docomo-cycle", "5753")})

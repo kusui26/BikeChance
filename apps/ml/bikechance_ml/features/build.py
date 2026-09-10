@@ -25,7 +25,16 @@ import numpy as np
 import numpy.typing as npt
 import pyarrow as pa
 
-from bikechance_ml.features import asof, exclude, flow, labels, neighbors, sample, static
+from bikechance_ml.features import (
+    asof,
+    exclude,
+    flow,
+    labels,
+    neighbors,
+    sample,
+    static,
+    weather,
+)
 from bikechance_ml.features.arrays import (
     Bools,
     Float32,
@@ -104,6 +113,14 @@ class Inputs(Protocol):
     @property
     def table(self) -> pa.Table: ...
 
+    @property
+    def weather(self) -> weather.Weather:
+        """その基準時刻で**入手できていた**予報（W4 プラン §6.4）。
+
+        **無い日がある。** 天気アーカイブは 2026-09-07 15:17 UTC からで、それより前の
+        サンプルは天気の 4 列が NULL になる（§5.4）。`weather.empty()` を渡す。
+        """
+
 
 @dataclass(frozen=True)
 class DayInputs:
@@ -112,6 +129,8 @@ class DayInputs:
     day: date
     reference: Reference
     table: pa.Table
+    #: **既定を持たせない。** 天気が無い日は `weather.empty()` を明示して渡す
+    weather: weather.Weather
 
 
 @dataclass(frozen=True)
@@ -130,6 +149,7 @@ class NowInputs:
     system_id: str
     reference: Reference
     table: pa.Table
+    weather: weather.Weather
 
     @property
     def day(self) -> date:
@@ -155,6 +175,10 @@ class DayStats:
     rows: int
     weight_sum: float
     excluded: dict[str, int]
+    #: 使えた予報の発行数。**0 なら天気の 4 列は全部 NULL**（アーカイブ開始前）
+    weather_issues: int
+    #: 気象格子に当たらなかったポート数。**当たらない = その列が恒久的に NULL**
+    stations_without_weather: int
 
     def as_dict(self) -> dict[str, object]:
         """JSON に出す形。"""
@@ -168,6 +192,8 @@ class DayStats:
             "rows": self.rows,
             "weight_sum": self.weight_sum,
             "excluded": dict(sorted(self.excluded.items())),
+            "weather_issues": self.weather_issues,
+            "stations_without_weather": self.stations_without_weather,
         }
 
 
@@ -193,6 +219,10 @@ class NowStats:
     predictable: int
     rows: int
     excluded: dict[str, int]
+    #: 使えた予報の発行数。**0 なら天気の 4 列は全部 NULL**
+    weather_issues: int
+    #: 気象格子に当たらなかったポート数（自系統ぶんではなく台帳ぜんぶ）
+    stations_without_weather: int
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -203,6 +233,8 @@ class NowStats:
             "predictable": self.predictable,
             "rows": self.rows,
             "excluded": dict(sorted(self.excluded.items())),
+            "weather_issues": self.weather_issues,
+            "stations_without_weather": self.stations_without_weather,
         }
 
 
@@ -254,7 +286,10 @@ def build_day(inputs: DayInputs) -> Built:
         for reason, number in dropped.items():
             counts[reason] = counts.get(reason, 0) + number
     table = _concat(parts)
-    return Built(table=table, stats=_stats(inputs, table, counts, total))
+    return Built(
+        table=table,
+        stats=_stats(inputs, table, counts, total, _without_weather(pre.weather_cell)),
+    )
 
 
 def serving_shifts() -> tuple[int, ...]:
@@ -302,7 +337,7 @@ def build_now(inputs: NowInputs) -> Ready:
       * **目標時刻の除外をしない**（ラベルが無い）
       * **抽出をしない**（全件を出す）
 
-    出るのは `SERVING_SCHEMA` の 61 列で、そのうち 57 列が特徴量である。
+    出るのは `SERVING_SCHEMA` の 65 列で、そのうち 61 列が特徴量である。
     """
     grid = build_point_grid(inputs.at, serving_shifts())
     # **ラベルは作らない。** 推論に未来は無い（§9 の契約 5）
@@ -322,7 +357,10 @@ def build_now(inputs: NowInputs) -> Ready:
     # **決定的な順に並べる**（学習と同じ規律）。読む側は「ポートごとに水平が昇順」を
     # 前提に `(ポート, 水平)` へ畳み直せる
     ordered = table.sort_by([("station_id", "ascending"), ("h_min", "ascending")])
-    return Ready(table=ordered, stats=_now_stats(inputs, base, len(stations)))
+    return Ready(
+        table=ordered,
+        stats=_now_stats(inputs, base, len(stations), _without_weather(pre.weather_cell)),
+    )
 
 
 def _own_system(inputs: NowInputs) -> Bools:
@@ -334,7 +372,9 @@ def _own_system(inputs: NowInputs) -> Bools:
     return owned[:, None]
 
 
-def _now_stats(inputs: NowInputs, base: exclude.Excluded, kept: int) -> NowStats:
+def _now_stats(
+    inputs: NowInputs, base: exclude.Excluded, kept: int, without_weather: int
+) -> NowStats:
     owned = sum(
         1 for system_id, _ in inputs.reference.facts.station_keys() if system_id == inputs.system_id
     )
@@ -348,7 +388,18 @@ def _now_stats(inputs: NowInputs, base: exclude.Excluded, kept: int) -> NowStats
         predictable=kept,
         rows=kept * len(HORIZONS_MIN),
         excluded=base.counts,
+        weather_issues=inputs.weather.n_issues,
+        stations_without_weather=without_weather,
     )
+
+
+def _without_weather(weather_cell: Int32) -> int:
+    """気象格子に当たらなかったポート数。**0 でないなら、その列は恒久的に NULL。**
+
+    実測（2026-09-10）で 4 件（20,754 ポートの 0.019%）。Open-Meteo が要求した座標を
+    自分の格子に丸め直した 2 格子があり、そこに居るポートだけが当たらない（§12 の 119）。
+    """
+    return int(np.sum(weather_cell < 0))
 
 
 # ── グリッドへの写像 ──────────────────────────────────────────
@@ -460,6 +511,10 @@ class Precomputed:
     neighbor: dict[str, Int32]
     neighbor_fill_ratio: Float32
     urban_density: Int32
+    #: ポートごとの気象格子の添字（無ければ -1）
+    weather_cell: Int32
+    #: 基準時刻ごとに使ってよい予報の発行の添字（無ければ -1）
+    weather_issue: Int32
 
 
 def _precompute(inputs: Inputs, grid: Grid, state: GridState) -> Precomputed:
@@ -482,6 +537,9 @@ def _precompute(inputs: Inputs, grid: Grid, state: GridState) -> Precomputed:
         neighbor=integer,
         neighbor_fill_ratio=ratio,
         urban_density=inputs.reference.links.within(FAR_RADIUS_M, same_system_only=False).counts(),
+        weather_cell=inputs.weather.cell_at(facts.lat, facts.lon),
+        # **基準時刻ごとに 1 度だけ決める。** 引くのは `available_at <= t` の最新
+        weather_issue=inputs.weather.issue_at(np.asarray(grid.day_times_ms(), dtype=np.int64)),
     )
 
 
@@ -658,7 +716,7 @@ def _accept(sampling: Sampling, index: int, n_grid: int) -> Bools:
 def _feature_columns(
     inputs: Inputs, grid: Grid, state: GridState, pre: Precomputed, picked: Picked
 ) -> dict[str, pa.Array]:
-    """**学習と推論で共通の 61 列。** ラベルと抽出はここに入れない。
+    """**学習と推論で共通の 65 列。** ラベルと抽出はここに入れない。
 
     共有しているのは呼び出しの並びではなく**この関数そのもの**である。片方だけ直せば
     ゴールデン（`tests/test_features_parity.py`）が落ちる（W4 プラン §4 の W4-04）。
@@ -673,6 +731,7 @@ def _feature_columns(
     columns.update(_flow_columns(state, picked, day))
     columns.update(_history_columns(state, grid, pre, picked))
     columns.update(_neighbor_columns(pre, picked))
+    columns.update(_weather_columns(inputs, grid, pre, picked))
     return columns
 
 
@@ -917,6 +976,33 @@ def _neighbor_columns(pre: Precomputed, picked: Picked) -> dict[str, pa.Array]:
     return columns
 
 
+def _weather_columns(
+    inputs: Inputs, grid: Grid, pre: Precomputed, picked: Picked
+) -> dict[str, pa.Array]:
+    """天気（W4 プラン §6.4）。**`t` までに入手できた予報だけを引く。**
+
+    引く時間帯が 2 通りある。降水量は「直前 1 時間の合計」なので `t`（と `t + h`）を
+    **含む**時間帯、気温と風速は瞬時値なので `t` に**最も近い**毎正時
+    （`features/weather.py`）。
+
+    **水平で変わるのは `precip_mm_target` だけ。** 残りは基準時刻で決まるが、
+    列は行ごとに作るので、ここでは区別しない。
+    """
+    forecast = inputs.weather
+    times = np.asarray(grid.day_times_ms(), dtype=np.int64)[picked.points]
+    issue = pre.weather_issue[picked.points]
+    cell = pre.weather_cell[picked.stations]
+    now_hour = weather.containing_hour_ms(times)
+    target_hour = weather.containing_hour_ms(times + picked.horizon_min * _MS_PER_MINUTE)
+    instant_hour = weather.nearest_hour_ms(times)
+    return {
+        **_float_column("precip_mm_now", forecast.value("precip_mm", issue, cell, now_hour)),
+        **_float_column("precip_mm_target", forecast.value("precip_mm", issue, cell, target_hour)),
+        **_float_column("temp_c", forecast.value("temp_c", issue, cell, instant_hour)),
+        **_float_column("wind_kmh", forecast.value("wind_kmh", issue, cell, instant_hour)),
+    }
+
+
 # ── まとめ ────────────────────────────────────────────────────
 def _concat(parts: Sequence[pa.Table]) -> pa.Table:
     """水平ごとの表をつなぎ、**決定的な順**に並べる。
@@ -930,7 +1016,13 @@ def _concat(parts: Sequence[pa.Table]) -> pa.Table:
     return joined.sort_by([("station_id", "ascending"), ("t", "ascending"), ("h_min", "ascending")])
 
 
-def _stats(inputs: DayInputs, table: pa.Table, counts: dict[str, int], total: int) -> DayStats:
+def _stats(
+    inputs: DayInputs,
+    table: pa.Table,
+    counts: dict[str, int],
+    total: int,
+    without_weather: int,
+) -> DayStats:
     """その日の内訳をまとめる。"""
     weights = np.asarray(table.column("weight").to_numpy(zero_copy_only=False), dtype=np.float64)
     return DayStats(
@@ -945,4 +1037,6 @@ def _stats(inputs: DayInputs, table: pa.Table, counts: dict[str, int], total: in
         rows=int(table.num_rows),
         weight_sum=float(weights.sum()),
         excluded=counts,
+        weather_issues=inputs.weather.n_issues,
+        stations_without_weather=without_weather,
     )

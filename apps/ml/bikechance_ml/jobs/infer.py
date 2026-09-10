@@ -33,7 +33,7 @@ import pyarrow as pa
 from bikechance_ml.baselines import blend, climatology, conditional
 from bikechance_ml.baselines.artifact import Artifact, from_bytes
 from bikechance_ml.eval.dataset import TARGETS, Samples, Target
-from bikechance_ml.features import build, neighbors, static
+from bikechance_ml.features import build, neighbors, static, weather
 from bikechance_ml.features.arrays import Bools, Float64, Int8, Int16
 from bikechance_ml.features.calendar import DOW_TYPES
 from bikechance_ml.features.constants import (
@@ -43,6 +43,7 @@ from bikechance_ml.features.constants import (
 )
 from bikechance_ml.features.grid import JST, from_epoch_ms, jst_date, to_epoch_ms
 from bikechance_ml.features.reference import SystemReference
+from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.build_features import (
     SYSTEM_IDS,
     Estimates,
@@ -84,6 +85,7 @@ class InferPort(Protocol):
         self, system_id: str, start: datetime, end: datetime
     ) -> tuple[Snapshot, ...]: ...
     def list_holidays(self) -> tuple[date, ...]: ...
+    def list_weather(self, start: datetime, end: datetime) -> tuple[WeatherRow, ...]: ...
     def download(self, bucket: str, path: str) -> bytes | None: ...
     def begin_inference(
         self, system_id: str, base_observed_at: datetime, model_version: str
@@ -132,10 +134,11 @@ def read_features(
 ) -> tuple[date, build.Ready]:
     """推論 1 回ぶんの特徴量を作る。**学習と同じ `features/` を通る。**
 
-    読むのは 3 つ。
+    読むのは 4 つ。
       1. **前日の参照スナップショット**（学習と同じ規則。W3 プラン §14.3）
       2. **自系統の 2 つの窓**（`build.serving_windows`）
       3. **他系統の直近**（近傍の集計に要るのは「いまの状態」だけ。§6.3）
+      4. **`at` までに入手できた予報**（`weather.serving_window`。W4 プラン §6.4）
 
     返すのは**使った参照スナップショットの日付**と組み立ての結果。日付を返すのは、
     00:00〜05:00 JST に 1 つ古い版を使うことがあるため（`read_reference_available`）。
@@ -156,6 +159,7 @@ def read_features(
             system_id=system_id,
             reference=build.Reference(facts=facts, links=links, holidays=holidays),
             table=pa.concat_tables(tables),
+            weather=weather.to_weather(port.list_weather(*weather.serving_window(at))),
         )
     )
     return reference_day, ready
@@ -233,6 +237,8 @@ class InferSummary:
     excluded: Mapping[str, int] = field(default_factory=dict)
     #: 使った参照スナップショットの日付。**00:00〜05:00 JST は 1 つ古い版になる**
     reference_date: str | None = None
+    #: 使えた予報の発行数。**0 なら天気の 4 列は全部 NULL**（W4 プラン §6.4）
+    weather_issues: int = 0
     error: str | None = None
 
     @property
@@ -249,7 +255,7 @@ def to_samples(artifact: Artifact, system_id: str, at: datetime, table: pa.Table
     """`build_now` の出力を、ベースラインが読む形にする。**列を引き写すだけ。**
 
     B0〜B3 が使うのは 6 つ（システム・ポート・日・水平・日内分・目標の曜日種別）と
-    台数だけである。**57 列を作ってから 6 つを引く**のは一見無駄だが、LightGBM v0
+    台数だけである。**61 列を作ってから 6 つを引く**のは一見無駄だが、LightGBM v0
     （PR E）を入れるときに経路を変えずに済む（W4 プラン §6.3）。**除外も暦も
     学習と同じ関数が決めている**ので、ここに判断は残っていない。
 
@@ -475,6 +481,7 @@ def _produce(
         features_ms=features_ms,
         excluded=dict(sorted(ready.stats.excluded.items())),
         reference_date=reference_day.isoformat(),
+        weather_issues=ready.stats.weather_issues,
     )
 
 
@@ -571,6 +578,7 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         "cpu_ms": summary.cpu_ms,
         "excluded": dict(summary.excluded),
         "reference_date": summary.reference_date,
+        "weather_issues": summary.weather_issues,
         "error": summary.error,
     }
 
@@ -595,4 +603,6 @@ def to_record(summary: InferSummary) -> dict[str, object]:
         "excluded": dict(summary.excluded),
         # **どの版の参照データで出した予測か。** 00:00〜05:00 JST は 1 つ古い版になる
         "reference_date": summary.reference_date,
+        # **天気が乗っているか。** 0 なら取り込みが止まっている（`load_weather`）
+        "weather_issues": summary.weather_issues,
     }

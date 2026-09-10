@@ -7,7 +7,6 @@ v0 に**入れていない**もの（W3 プラン §8）：
 
   * 履歴プロファイル（`prof_*`）── 過去 28 日の集計。9 月の時点で日数が足りない（W4〜W5）
   * 再配置（`minutes_since_rebalance` ほか）── 検知規則は W4
-  * 天気（`precip_*` ほか）── どのモデルを使うかの判断が W4
   * `bikes_same_time_7d` ── 7 日前がまだ無い
   * `is_limited_port` ── 過去 30 日の観測が要る
   * `parking_type` / `parking_hoop` ── 実測で分散ゼロ（データ辞書 §11）
@@ -126,6 +125,17 @@ _NEIGHBORS: Final[list[pa.Field]] = [
     pa.field("nb_docks_sum_300m_same", pa.int32(), nullable=False),
 ]
 
+_WEATHER: Final[list[pa.Field]] = [
+    # **`t` を含む 1 時間帯の降水量**（直前 1 時間の合計。`features/weather.py`）
+    pa.field("precip_mm_now", pa.float32(), nullable=True),
+    # **目標時刻（`t + h`）を含む 1 時間帯の降水量。** 水平ごとに値が変わる唯一の天気列
+    pa.field("precip_mm_target", pa.float32(), nullable=True),
+    # `t` に最も近い毎正時の瞬時値
+    pa.field("temp_c", pa.float32(), nullable=True),
+    # 同上。**単位は km/h**（Open-Meteo の `wind_speed_10m` がそう返す）
+    pa.field("wind_kmh", pa.float32(), nullable=True),
+]
+
 SCHEMA: Final[pa.Schema] = pa.schema(
     [
         *_KEYS,
@@ -138,6 +148,7 @@ SCHEMA: Final[pa.Schema] = pa.schema(
         *_FLOW,
         *_HISTORY,
         *_NEIGHBORS,
+        *_WEATHER,
     ]
 )
 
