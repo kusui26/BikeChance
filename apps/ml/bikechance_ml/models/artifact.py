@@ -1,12 +1,13 @@
-"""LightGBM の成果物（W4 プラン §6.5、開発プラン §8.2）。
+"""LightGBM の成果物（W4 プラン §6.5・§6.5a、開発プラン §8.2）。
 
 **`baselines/artifact.py` と同じ入れ物の役割。** 当てはめた結果を 1 つの gzip JSON に
 固め、`models` バケットに置く。推論はこれを読み、**学習と同じ `models/matrix.py` を
 通して**予測する（CLAUDE.md §2 の原則 4）。
 
-**`lightgbm` をここで import する。** このモジュールを読み込むのは LightGBM の版を
-配るときだけで、ベースラインを配っている間は読み込まれない（`models/registry.py` が
-`kind` で分岐する）。依存が条件付きなので、import も条件付きになる。
+**`lightgbm` を import しない**（PR E′）。配信のランタイムに OpenMP（`libgomp.so.1`）が
+無く、`import lightgbm` が `OSError` で落ちるため（§12 の 126）。**木の構造そのもの**を
+成果物に持ち、`models/forest.py` が numpy で歩く。当てはめた直後に `Booster.predict` と
+突き合わせてあるので（`jobs/fit_lightgbm.py`）、**違う値を出す成果物は置かれない**。
 
 成果物に**列の並びと語彙を焼き付ける**。読むときに `models/matrix.py` の現行と
 突き合わせ、違えば止める。列が 1 つずれれば木は別の特徴量で分岐するが、**例外は出ず
@@ -20,11 +21,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-import lightgbm as lgb
 import numpy as np
 import pyarrow as pa
 
 from bikechance_ml.features.arrays import Float64
+from bikechance_ml.models import forest as tree
 from bikechance_ml.models.matrix import (
     CATEGORICAL_COLUMNS,
     MODEL_COLUMNS,
@@ -35,7 +36,10 @@ from bikechance_ml.models.matrix import build as build_matrix
 from bikechance_ml.models.predictor import Prediction
 
 #: 成果物の書式の版。**読み方を変えたら上げる。**
-FORMAT_VERSION: Final[int] = 1
+#:
+#: v1（PR E）：`Booster.model_to_string()` を文字列で持ち、配信側で `lightgbm` に読ませた。
+#: v2（PR E′）：**木の構造を平たい配列で持つ**。配信側は `lightgbm` を読み込まない。
+FORMAT_VERSION: Final[int] = 2
 
 #: `model_versions.kind` に入る値。
 KIND: Final[str] = "lightgbm"
@@ -63,12 +67,13 @@ class LightGbmArtifact:
     categorical: tuple[str, ...]
     vocabularies: Mapping[str, tuple[str, ...]]
     params: Mapping[str, object]
-    #: ターゲット名 → `Booster.model_to_string()`
-    boosters: Mapping[str, str]
+    #: ターゲット名 → 平たくした森
+    forests: Mapping[str, tree.Forest]
 
     def describe(self) -> str:
-        trees = {name: text.count("\nTree=") for name, text in self.boosters.items()}
-        return f"{self.model_version}（学習 {len(self.train_days)} 日、木 {trees}）"
+        trees = {name: len(one) for name, one in self.forests.items()}
+        nodes = {name: one.n_nodes for name, one in self.forests.items()}
+        return f"{self.model_version}（学習 {len(self.train_days)} 日、木 {trees}、節 {nodes}）"
 
 
 def artifact_path(model_version: str) -> str:
@@ -90,7 +95,7 @@ def to_bytes(artifact: LightGbmArtifact) -> bytes:
         "categorical": list(artifact.categorical),
         "vocabularies": {name: list(values) for name, values in artifact.vocabularies.items()},
         "params": dict(artifact.params),
-        "boosters": dict(artifact.boosters),
+        "forests": {name: tree.to_json(one) for name, one in artifact.forests.items()},
     }
     return gzip.compress(json.dumps(document, ensure_ascii=False, sort_keys=True).encode(), mtime=0)
 
@@ -115,7 +120,7 @@ def from_bytes(body: bytes) -> LightGbmArtifact:
             for name, values in document["vocabularies"].items()
         },
         params=dict(document["params"]),
-        boosters={str(name): str(text) for name, text in document["boosters"].items()},
+        forests={name: tree.from_json(one) for name, one in document["forests"].items()},
     )
     _refuse_mismatch(artifact)
     return artifact
@@ -140,18 +145,13 @@ def _refuse_mismatch(artifact: LightGbmArtifact) -> None:
         raise ArtifactMismatchError("カテゴリの語彙が違います（番号が別の意味になります）")
 
 
-def load_boosters(artifact: LightGbmArtifact) -> Mapping[str, lgb.Booster]:
-    """文字列から `Booster` を作る。**読み込みは版ごとに 1 度だけ**（呼ぶ側が持ち回る）。"""
-    return {name: lgb.Booster(model_str=text) for name, text in artifact.boosters.items()}
-
-
-def predict(booster: lgb.Booster, matrix: Matrix) -> Float64:
+def predict(built: tree.Forest, matrix: Matrix) -> Float64:
     """1 ターゲットぶんの確率。**学習と同じ列の並びで渡す。**"""
-    return np.asarray(booster.predict(matrix.values), dtype=np.float64)
+    return tree.probability(built, matrix.values)
 
 
 def build(
-    boosters: Mapping[str, lgb.Booster],
+    forests: Mapping[str, tree.Forest],
     model_version: str,
     feature_set: str,
     created_at: str,
@@ -159,7 +159,7 @@ def build(
     horizons_min: Sequence[int],
     params: Mapping[str, object],
 ) -> LightGbmArtifact:
-    """当てはめた `Booster` を成果物にする。**列の並びと語彙を焼き付ける。**"""
+    """平たくした森を成果物にする。**列の並びと語彙を焼き付ける。**"""
     return LightGbmArtifact(
         format_version=FORMAT_VERSION,
         model_version=model_version,
@@ -171,7 +171,7 @@ def build(
         categorical=CATEGORICAL_COLUMNS,
         vocabularies={name: tuple(values) for name, values in VOCABULARIES.items()},
         params=dict(params),
-        boosters={name: one.model_to_string() for name, one in boosters.items()},
+        forests=dict(forests),
     )
 
 
@@ -179,14 +179,13 @@ def build(
 class LightGbmPredictor:
     """LightGBM の版。**学習と同じ `models/matrix.py` を通して予測する。**
 
-    **`feature_set` が一致しなければ配れない。** LightGBM は 61 列すべてを読むので、
+    **`feature_set` が一致しなければ配れない。** LightGBM は 62 列すべてを読むので、
     版が違えば「同じ名前で意味の違う列」を見る（v1 は容量まわり、v2 は
     `minutes_since_last_change`、v3 は天気が変わった）。ベースラインと違って
     ここは厳密に照合する（`models/registry.py`）。
     """
 
     artifact: LightGbmArtifact
-    boosters: Mapping[str, "lgb.Booster"]
 
     @property
     def model_version(self) -> str:
@@ -212,8 +211,8 @@ class LightGbmPredictor:
         built = build_matrix(table)
         rows = len(built)
         return Prediction(
-            probability={name: predict(booster, built) for name, booster in self.boosters.items()},
-            informed={name: np.ones(rows, dtype=np.bool_) for name in self.boosters},
+            probability={name: predict(one, built) for name, one in self.artifact.forests.items()},
+            informed={name: np.ones(rows, dtype=np.bool_) for name in self.artifact.forests},
         )
 
     def unknown_ports(self, system_id: str, table: pa.Table) -> int:  # noqa: ARG002
@@ -222,5 +221,5 @@ class LightGbmPredictor:
 
 
 def to_predictor(artifact: LightGbmArtifact) -> LightGbmPredictor:
-    """成果物から配信用の口を作る。**`Booster` の組み立てはここで 1 度だけ。**"""
-    return LightGbmPredictor(artifact=artifact, boosters=load_boosters(artifact))
+    """成果物から配信用の口を作る。"""
+    return LightGbmPredictor(artifact=artifact)

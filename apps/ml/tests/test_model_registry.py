@@ -4,10 +4,10 @@
   * 「いま配る版」の正は **DB**（`model_versions`）で、環境変数ではない（W4-08）
   * **`kind` で読み方が分かれる**のはここ 1 か所だけ
   * **特徴量の版の照合は、特徴量の表を読むモデルにだけ掛ける**（この非対称が肝）
+
+配信の経路が `lightgbm` を読み込まないことは `tests/test_serving_imports.py` が見る。
 """
 
-import subprocess
-import sys
 from dataclasses import dataclass, field, replace
 
 import pytest
@@ -192,23 +192,3 @@ def test_a_new_version_replaces_the_cache() -> None:
     port.bodies[other.artifact_path] = baseline_to_bytes(renamed)
     registry.load(port, other)
     assert port.fetches == 2
-
-
-# ── 依存が条件付きであること ──────────────────────────────────
-def test_serving_does_not_import_lightgbm() -> None:
-    """**ベースラインを配っているあいだは lightgbm も scipy も読み込まない。**
-
-    `models/registry.py` が `kind` の枝の中で import している、という約束を機械で守る。
-    トップレベルに動かすと、`/ml/infer`・`/ml/compact`・`/ml/reference`・`/ml/weather` の
-    **すべてが 0.19 秒と 110 MB ぶんの読み込みを毎回**払うことになる。
-
-    **別のプロセスで確かめる。** この検査ファイル自身が `models/artifact` を import して
-    いるので、同じプロセスでは `sys.modules` に残っている。
-    """
-    code = (
-        "import sys, bikechance_ml.api as api; api.build_app();"
-        " print('lightgbm' in sys.modules,"
-        " any(one.startswith('scipy') for one in sys.modules))"
-    )
-    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
-    assert done.stdout.strip() == "False False", done.stdout

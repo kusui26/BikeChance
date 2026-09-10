@@ -7,9 +7,9 @@
 **種類で分岐するのはここだけ。** `jobs/infer.py` は `Predictor` を 1 つ受け取るだけで、
 ベースラインか LightGBM かを知らない。
 
-**`lightgbm` の import はこの中の枝でだけ行う。** ベースラインを配っているあいだ
-（W4 の既定）は LightGBM も scipy も読み込まれない（0.19 秒と 110 MB ぶんの
-読み込みが要らない）。CLAUDE.md §3 の「条件付き依存のみ動的 import」に当たる。
+**配信側は `lightgbm` を読み込まない**（PR E′）。LightGBM の成果物は木の構造そのものを
+持ち、`models/forest.py` が numpy で歩く。当てはめる側（`jobs/fit_lightgbm.py`）だけが
+`lightgbm` に依存する（§12 の 126）。
 """
 
 from dataclasses import dataclass
@@ -17,6 +17,7 @@ from typing import Final, Protocol
 
 from bikechance_ml.baselines.artifact import from_bytes as baseline_from_bytes
 from bikechance_ml.features.constants import FEATURE_SET
+from bikechance_ml.models import artifact as lightgbm
 from bikechance_ml.models.predictor import BaselinePredictor, Predictor
 
 #: 成果物の置き場所（0027 のバケット）。**`gbfs-parquet` には相乗りさせない**：
@@ -117,10 +118,6 @@ def _read(registered: Registered, body: bytes) -> Predictor:
     if registered.kind == BASELINE_KIND:
         return BaselinePredictor(artifact=baseline_from_bytes(body))
     if registered.kind == LIGHTGBM_KIND:
-        # **条件付きの import。** ベースラインを配っているあいだは lightgbm も
-        # scipy も読み込まない（`models/artifact.py` の冒頭）
-        from bikechance_ml.models import artifact as lightgbm
-
         return lightgbm.to_predictor(lightgbm.from_bytes(body))
     raise UnknownModelError(f"知らない kind です: {registered.kind}")
 
@@ -142,7 +139,7 @@ def _refuse_a_lying_row(registered: Registered, model_feature_set: str) -> None:
 def _refuse_another_feature_set(model_feature_set: str, model_version: str) -> None:
     """**LightGBM は特徴量の版が一致しなければ配らない**（CLAUDE.md §2 の原則 4）。
 
-    61 列すべてを読むので、版が違えば「同じ名前で意味の違う列」を見る（v1 は容量まわり、
+    62 列すべてを読むので、版が違えば「同じ名前で意味の違う列」を見る（v1 は容量まわり、
     v2 は `minutes_since_last_change`、v3 は天気）。**例外は出ず、確率だけが静かに変わる。**
 
     ベースラインには掛けない。あちらが読むのは 6 列（システム・ポート・日・水平・
