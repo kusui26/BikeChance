@@ -277,9 +277,28 @@ def to_registration(
         "artifact_path": lightgbm_artifact.artifact_path(artifact.model_version),
         "train_days": list(artifact.train_days),
         "metrics": to_metrics(outcome, checks),
-        "card_path": card_path,
+        "card_path": card_reference(card_path),
         "note": "W4 の PR E′。配線の確認（W4-07）。精度は問わない",
     }
+
+
+def card_reference(card_path: str | None) -> str | None:
+    """登録簿に残すモデルカードの場所。**リポジトリからの相対に直す。**
+
+    `--card` はシェルから見た**書き出し先**なので、`apps/ml` で走らせると
+    `../../docs/model_cards/…` になる。それをそのまま登録簿に入れると、
+    **読む人が「どこ起点の相対か」を復元できない**（2026-09-10 に 1 度そうなった）。
+
+    `.git` のある場所を上へ辿って、そこからの相対にする。見つからなければ
+    渡された文字列をそのまま残す（**勝手に別の場所を指さない**）。
+    """
+    if card_path is None:
+        return None
+    resolved = Path(card_path).resolve()
+    for parent in resolved.parents:
+        if (parent / ".git").exists():
+            return str(resolved.relative_to(parent))
+    return card_path
 
 
 # ── 実行 ──────────────────────────────────────────────────────
