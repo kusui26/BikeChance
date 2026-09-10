@@ -13,8 +13,8 @@
 副作用は持たない。Parquet を読むのも Markdown を書くのも `jobs/` の仕事。
 """
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Final
 
 import numpy as np
@@ -27,7 +27,10 @@ from bikechance_ml.features.arrays import Bools, Float64
 from bikechance_ml.features.constants import HORIZONS_MIN
 
 #: 表に並べる順。**B0 が基準**（BSS はここからの改善で見る）。
-MODELS: Final[tuple[str, ...]] = ("B0", "B1", "B2", "B3")
+BASELINE_MODELS: Final[tuple[str, ...]] = ("B0", "B1", "B2", "B3")
+
+#: 後方互換の別名。**新しいコードは `Outcome.models` を読む**（外から足せるので）。
+MODELS: Final[tuple[str, ...]] = BASELINE_MODELS
 
 #: バケツ別の表を出す水平。全部出すと読めないので、短いのと 1 時間を代表にする。
 BUCKET_HORIZONS: Final[tuple[int, ...]] = (5, 60)
@@ -69,23 +72,60 @@ class Outcome:
     overall: tuple[SliceScores, ...]
     by_horizon: tuple[SliceScores, ...]
     by_bucket: tuple[SliceScores, ...]
+    #: 表に並べるモデルの順。**外から足したぶんも入る**（B0〜B3 と LightGBM）
+    models: tuple[str, ...] = BASELINE_MODELS
 
 
-def run(samples: Samples, split: DaySplit) -> Outcome:
-    """分割にしたがって当てはめ、測る。"""
+#: 外から渡す予測。`extra["LGBM"]["bike"]` が**検証期間の行に対応する確率**。
+type ExtraModels = Mapping[str, Mapping[str, Float64]]
+
+
+class MisalignedPredictionError(ValueError):
+    """外から渡された予測の行数が検証期間と合わない。**別の行で測らない。**"""
+
+
+def run(samples: Samples, split: DaySplit, extra: ExtraModels | None = None) -> Outcome:
+    """分割にしたがって当てはめ、測る。
+
+    `extra` は**外で当てはめたモデル**の予測（LightGBM など）。**同じ `evaluate` マスクの
+    上で測る**ために、行数が一致しなければ例外にする（§4.4 の 30b）。行の並びは
+    `samples.take(eval_mask)` と同じでなければならない——呼ぶ側が `mask_of` で作る。
+    """
     fit_mask = mask_of(samples, split.fit)
     eval_mask = mask_of(samples, split.evaluate)
     evaluated = samples.take(eval_mask)
     fits = tuple(_fit_target(samples, fit_mask, eval_mask, target) for target in TARGETS)
+    named = _with_extra(fits, extra, len(evaluated))
     return Outcome(
         split=split,
         n_fit=int(fit_mask.sum()),
         n_eval=int(eval_mask.sum()),
-        fits=fits,
-        overall=_score_all(evaluated, fits, _overall_slices(evaluated)),
-        by_horizon=_score_all(evaluated, fits, _horizon_slices(evaluated)),
-        by_bucket=_score_all(evaluated, fits, _bucket_slices(evaluated)),
+        fits=named,
+        overall=_score_all(evaluated, named, _overall_slices(evaluated)),
+        by_horizon=_score_all(evaluated, named, _horizon_slices(evaluated)),
+        by_bucket=_score_all(evaluated, named, _bucket_slices(evaluated)),
+        models=(*BASELINE_MODELS, *sorted(extra or {})),
     )
+
+
+def _with_extra(
+    fits: Sequence[TargetFit], extra: ExtraModels | None, n_eval: int
+) -> tuple[TargetFit, ...]:
+    """外から渡された予測を、ターゲットごとの当てはめ結果に混ぜる。"""
+    if not extra:
+        return tuple(fits)
+    merged: list[TargetFit] = []
+    for fitted in fits:
+        probability = dict(fitted.probability)
+        for name in sorted(extra):
+            values = extra[name].get(fitted.target.name)
+            if values is None or len(values) != n_eval:
+                raise MisalignedPredictionError(
+                    f"{name}/{fitted.target.name} の行数が検証期間（{n_eval}）と違います"
+                )
+            probability[name] = values
+        merged.append(replace(fitted, probability=probability))
+    return tuple(merged)
 
 
 def _fit_target(samples: Samples, fit_mask: Bools, eval_mask: Bools, target: Target) -> TargetFit:

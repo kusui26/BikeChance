@@ -11,10 +11,11 @@
   * **B3 が B1 に負けていないか**（負けていれば混合の当てはめを疑う）
 """
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Final
 
-from bikechance_ml.eval.harness import MODELS, Outcome, SliceScores
+from bikechance_ml.eval.harness import Outcome, SliceScores
 from bikechance_ml.eval.metrics import skill
 from bikechance_ml.features.constants import FEATURE_SET
 from bikechance_ml.features.grid import JST
@@ -30,13 +31,19 @@ GAP_BAR_SCALE: Final[float] = 100.0
 GAP_BAR_WIDTH: Final[int] = 12
 
 
-def render_markdown(outcome: Outcome, title: str, note: str) -> str:
-    """1 回の評価を Markdown にする。"""
+def render_markdown(
+    outcome: Outcome, title: str, note: str, generator: str = "evaluate_baselines"
+) -> str:
+    """1 回の評価を Markdown にする。
+
+    `generator` は**この表を作ったジョブ**。読む人が「どのコマンドで作り直せるか」を
+    たどれるようにするためで、決め打ちにすると別のジョブが作った表が嘘をつく。
+    """
     lines = [
         f"# {title}",
         "",
         f"- **生成**：{datetime.now(UTC).astimezone(JST):%Y-%m-%d %H:%M} JST"
-        f"（`bikechance_ml.jobs.evaluate_baselines`、`feature_set = {FEATURE_SET}`）",
+        f"（`bikechance_ml.jobs.{generator}`、`feature_set = {FEATURE_SET}`）",
         f"- **分割**：{outcome.split.describe()}",
         f"- **件数**：学習 {outcome.n_fit:,} 行 / 検証 {outcome.n_eval:,} 行",
         "",
@@ -122,14 +129,24 @@ def _overall_block(outcome: Outcome) -> list[str]:
         "**総合値は自明な行に支配される**（3 台以上ある行が過半）。見当をつけるための表で、"
         "合否は §4 のバケツ別で決める（W3-16）。",
         "",
-        "| system | ターゲット | n | 陽性率 | B0 | B1 | B2 | B3 | B3 の BSS |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
-        *[_overall_row(one) for one in outcome.overall],
+        _header("| system | ターゲット | n | 陽性率", outcome.models, "| B3 の BSS |"),
+        _rule(2, 2 + len(outcome.models) + 1),
+        *[_overall_row(one, outcome.models) for one in outcome.overall],
     ]
 
 
-def _overall_row(one: SliceScores) -> str:
-    cells = [f"{one.weighted[name].brier:.5f}" for name in MODELS]
+def _header(prefix: str, models: Sequence[str], suffix: str) -> str:
+    """表の見出し。**モデルの列は `outcome.models` から作る**（外から足せるので）。"""
+    return f"{prefix} | " + " | ".join(models) + " " + suffix
+
+
+def _rule(labels: int, numbers: int) -> str:
+    """区切り行。**名前の列は左寄せ、数の列は右寄せ**（既存の表と同じ見え方にする）。"""
+    return "|" + "|".join(["---"] * labels + ["---:"] * numbers) + "|"
+
+
+def _overall_row(one: SliceScores, models: Sequence[str]) -> str:
+    cells = [f"{one.weighted[name].brier:.5f}" for name in models]
     bss = skill(one.weighted["B3"].brier, one.weighted["B0"].brier)
     return _row(
         one.slice.system,
@@ -145,44 +162,63 @@ def _horizon_block(outcome: Outcome) -> list[str]:
     return [
         "## 3. 水平別（重み付き Brier）",
         "",
-        "| system | ターゲット | h（分） | n | B0 | B1 | B2 | B3 | B1 の改善 | B3 の改善 |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
-        *[_horizon_row(one) for one in outcome.by_horizon],
+        _header(
+            "| system | ターゲット | h（分） | n",
+            outcome.models,
+            "| B1 の改善 | B3 の改善 |",
+        ),
+        _rule(2, 2 + len(outcome.models) + 2),
+        *[_horizon_row(one, outcome.models) for one in outcome.by_horizon],
     ]
 
 
-def _horizon_row(one: SliceScores) -> str:
+def _horizon_row(one: SliceScores, models: Sequence[str]) -> str:
     base = one.weighted["B0"].brier
     return _row(
         one.slice.system,
         one.slice.target,
         one.slice.horizon_label(),
         f"{one.n:,}",
-        *[f"{one.weighted[name].brier:.5f}" for name in MODELS],
+        *[f"{one.weighted[name].brier:.5f}" for name in models],
         _percent(skill(one.weighted["B1"].brier, base)),
         _percent(skill(one.weighted["B3"].brier, base)),
     )
 
 
 def _bucket_block(outcome: Outcome) -> list[str]:
+    """**合否はここで決める**（W3-16）。だから外から足したモデルも必ず並べる。
+
+    比べる相手は 2 つある。`B0`（持続）からの改善は「そもそも学習する価値があるか」、
+    **`B3` からの改善は「ベースラインを超えたか」**で、採用基準は後者である
+    （開発プラン §7.1）。
+    """
+    compared = [one for one in outcome.models if one not in ("B2",)]
+    extra = [one for one in outcome.models if one not in BASELINE_COLUMNS]
     lines = [
         "## 4. 台数バケツ別（重み付き Brier）",
         "",
         "**合否はここで決める。** `Brier < 0.001` の行は相対改善が数値ノイズになるので"
         "「判定対象外」と書く（W3-16、§4.4 の 30a）。",
         "",
-        "| system | ターゲット | h | バケツ | n | 陽性率 | B0 | B1 | B3 | B3 の改善 |",
-        "|---|---|---:|---|---:|---:|---:|---:|---:|---:|",
+        _header(
+            "| system | ターゲット | h | バケツ | n | 陽性率",
+            compared,
+            "| B3 の改善" + "".join(f" | {name} の対 B3" for name in extra) + " |",
+        ),
+        _rule(4, 2 + len(compared) + 1 + len(extra)),
     ]
-    lines.extend(_bucket_row(one) for one in outcome.by_bucket)
+    lines.extend(_bucket_row(one, compared, extra) for one in outcome.by_bucket)
     return lines
 
 
-def _bucket_row(one: SliceScores) -> str:
+#: ベースラインの列（`_bucket_block` が「外から足したもの」を見分けるのに使う）。
+BASELINE_COLUMNS: Final[tuple[str, ...]] = ("B0", "B1", "B2", "B3")
+
+
+def _bucket_row(one: SliceScores, compared: Sequence[str], extra: Sequence[str]) -> str:
     base = one.weighted["B0"].brier
-    improvement = (
-        "判定対象外" if base < JUDGEABLE_BRIER else _percent(skill(one.weighted["B3"].brier, base))
-    )
+    judgeable = base >= JUDGEABLE_BRIER
+    reference = one.weighted["B3"].brier
     return _row(
         one.slice.system,
         one.slice.target,
@@ -190,10 +226,12 @@ def _bucket_row(one: SliceScores) -> str:
         one.slice.bucket_label(),
         f"{one.n:,}",
         f"{one.positives:.4f}",
-        f"{base:.5f}",
-        f"{one.weighted['B1'].brier:.5f}",
-        f"{one.weighted['B3'].brier:.5f}",
-        improvement,
+        *[f"{one.weighted[name].brier:.5f}" for name in compared],
+        "判定対象外" if not judgeable else _percent(skill(reference, base)),
+        *[
+            "判定対象外" if not judgeable else _percent(skill(one.weighted[name].brier, reference))
+            for name in extra
+        ],
     )
 
 
@@ -204,15 +242,15 @@ def _calibration_block(outcome: Outcome) -> list[str]:
         "**「70% と言った日の 7 割で降る」からのずれ。** 合格基準は ECE < 0.03"
         "（開発プラン §7.1）。B0 は 0 か 1 しか出さないので、ECE は「外した割合」に等しい。",
         "",
-        "| system | ターゲット | h | B0 | B1 | B2 | B3 |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        _header("| system | ターゲット | h", outcome.models, "|"),
+        _rule(2, 1 + len(outcome.models)),
     ]
     lines.extend(
         _row(
             one.slice.system,
             one.slice.target,
             one.slice.horizon_label(),
-            *[f"{one.weighted[name].ece:.5f}" for name in MODELS],
+            *[f"{one.weighted[name].ece:.5f}" for name in outcome.models],
         )
         for one in outcome.by_horizon
     )

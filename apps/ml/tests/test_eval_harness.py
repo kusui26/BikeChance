@@ -7,11 +7,12 @@
 
 from datetime import date, datetime
 
+import numpy as np
 import pytest
 
 from bikechance_ml.eval import harness, report
 from bikechance_ml.eval.dataset import to_samples
-from bikechance_ml.eval.split import split_days
+from bikechance_ml.eval.split import mask_of, split_days
 from bikechance_ml.features.grid import JST
 from tests import eval_fixture as fixture
 
@@ -123,3 +124,50 @@ def test_split_failure_is_loud() -> None:
     """1 日しか無いのに測ろうとしたら止まる。"""
     with pytest.raises(ValueError, match="足りません"):
         split_days([date(2026, 9, 7)], evaluate_days=1, purge_days=1)
+
+
+# ── 外から足したモデル（W4 プラン §6.5）─────────────────────
+def _extra(outcome_rows: list[dict[str, object]], value: float) -> harness.Outcome:
+    """**同じ検証行**の上に、外で当てはめたモデルの予測を並べる。"""
+    samples = to_samples(fixture.to_table(outcome_rows))
+    split = split_days(fixture.DAYS, evaluate_days=1, purge_days=1)
+    n_eval = int(mask_of(samples, split.evaluate).sum())
+    return harness.run(
+        samples,
+        split,
+        {"LGBM": {name: np.full(n_eval, value) for name in ("bike", "dock")}},
+    )
+
+
+def test_an_extra_model_joins_every_table() -> None:
+    """**合否はバケツ別で決める**（W3-16）ので、外から足したモデルもそこに並ぶ。"""
+    outcome = _extra(scenario(), 0.5)
+    assert outcome.models == ("B0", "B1", "B2", "B3", "LGBM")
+    text = report.render_markdown(outcome, "検査", "")
+    for heading in ("## 2.", "## 3.", "## 4.", "## 5."):
+        block = text.split(heading)[1].split("\n##")[0]
+        assert "LGBM" in block, f"{heading} に LGBM が出ていない"
+
+
+def test_the_tables_stay_rectangular() -> None:
+    """**列の数が行と揃っている。** 見出しだけ増やして本文がずれる事故を止める。"""
+    text = report.render_markdown(_extra(scenario(), 0.5), "検査", "")
+    for block in text.split("\n\n"):
+        rows = [one for one in block.splitlines() if one.startswith("|")]
+        if len(rows) < 3:
+            continue
+        widths = {one.count("|") for one in rows}
+        assert len(widths) == 1, f"列の数が揃っていない: {rows[0]}"
+
+
+def test_a_misaligned_extra_model_stops() -> None:
+    """**別の行で測らない**（§4.4 の 30b）。行数が違えば例外にする。"""
+    samples = to_samples(fixture.to_table(scenario()))
+    split = split_days(fixture.DAYS, evaluate_days=1, purge_days=1)
+    with pytest.raises(harness.MisalignedPredictionError):
+        harness.run(samples, split, {"LGBM": {"bike": np.zeros(3), "dock": np.zeros(3)}})
+
+
+def test_without_extras_the_tables_are_unchanged() -> None:
+    """**足さなければ今までどおり。** 既存の報告の形を壊さない。"""
+    assert build(scenario()).models == ("B0", "B1", "B2", "B3")

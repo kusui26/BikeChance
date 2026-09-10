@@ -30,18 +30,14 @@ from typing import Final, Protocol
 import numpy as np
 import pyarrow as pa
 
-from bikechance_ml.baselines import blend, climatology, conditional
-from bikechance_ml.baselines.artifact import Artifact, from_bytes
-from bikechance_ml.eval.dataset import TARGETS, Samples, Target
 from bikechance_ml.features import build, neighbors, static, weather
-from bikechance_ml.features.arrays import Bools, Float64, Int8, Int16
-from bikechance_ml.features.calendar import DOW_TYPES
+from bikechance_ml.features.arrays import Bools, Float64, Int16
 from bikechance_ml.features.constants import (
     GRID_MINUTES,
     HORIZONS_MIN,
     MAX_STALENESS_S,
 )
-from bikechance_ml.features.grid import JST, from_epoch_ms, jst_date, to_epoch_ms
+from bikechance_ml.features.grid import from_epoch_ms, jst_date, to_epoch_ms
 from bikechance_ml.features.reference import SystemReference
 from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.build_features import (
@@ -52,6 +48,8 @@ from bikechance_ml.jobs.build_features import (
 )
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow, station_ids_by_idx
 from bikechance_ml.jobs.snapshot_table import to_table as to_snapshot_table
+from bikechance_ml.models import registry
+from bikechance_ml.models.predictor import Prediction, Predictor, station_ids_of
 
 #: 推論が読む観測の範囲（`build.serving_windows` が返す形）。
 type Windows = Sequence[tuple[datetime, datetime]]
@@ -62,18 +60,8 @@ PROBABILITY_SCALE: Final[int] = 1000
 #: 1 回の往復で送る予測の数。20,745 行を 6 往復に刻む。
 UPSERT_BATCH: Final[int] = 4_000
 
-#: 成果物の置き場所（0027 のバケット）。**`gbfs-parquet` には相乗りさせない**：
-#: あちらは Parquet の MIME しか許さず、寿命も作り直し方も違う（W3 プラン §12 の 106）。
-MODEL_BUCKET: Final[str] = "models"
-MODEL_PREFIX: Final[str] = "baseline"
-
 MS_PER_S: Final[int] = 1000
 NS_PER_MS: Final[int] = 1_000_000
-
-
-def model_path(model_version: str) -> str:
-    """成果物のパス。**版がそのままファイル名**になる。"""
-    return f"{MODEL_PREFIX}/{model_version}.json.gz"
 
 
 class InferPort(Protocol):
@@ -86,6 +74,8 @@ class InferPort(Protocol):
     ) -> tuple[Snapshot, ...]: ...
     def list_holidays(self) -> tuple[date, ...]: ...
     def list_weather(self, start: datetime, end: datetime) -> tuple[WeatherRow, ...]: ...
+    def active_model(self) -> registry.Registered | None: ...
+    def find_model(self, model_version: str) -> registry.Registered | None: ...
     def download(self, bucket: str, path: str) -> bytes | None: ...
     def begin_inference(
         self, system_id: str, base_observed_at: datetime, model_version: str
@@ -239,113 +229,60 @@ class InferSummary:
     reference_date: str | None = None
     #: 使えた予報の発行数。**0 なら天気の 4 列は全部 NULL**（W4 プラン §6.4）
     weather_issues: int = 0
+    #: 配った版の種類（`baseline` / `lightgbm`）。**何を配ったかが後から読める**
+    model_kind: str = ""
+    #: その版を**当てはめたときの**特徴量の版。配信側は `FEATURE_SET`（W4 プラン §6.5）
+    model_feature_set: str = ""
+    #: 試し打ちで作れた予測の数（書いていないので `n_rows` は 0 になる）
+    n_predicted: int = 0
+    #: 試し打ちの見本 1 件
+    sample: Mapping[str, object] = field(default_factory=dict)
     error: str | None = None
 
     @property
     def ok(self) -> bool:
-        return self.status in ("ok", "skipped")
+        return self.status in ("ok", "skipped", "dry_run")
 
 
 # ── 予測（純粋）────────────────────────────────────────────────
-#: 成果物に無いポート。**気候値が引けず B1 だけになる**（W3 プラン §12 の 110）。
-NO_PORT: Final[int] = -1
-
-
-def to_samples(artifact: Artifact, system_id: str, at: datetime, table: pa.Table) -> Samples:
-    """`build_now` の出力を、ベースラインが読む形にする。**列を引き写すだけ。**
-
-    B0〜B3 が使うのは 6 つ（システム・ポート・日・水平・日内分・目標の曜日種別）と
-    台数だけである。**61 列を作ってから 6 つを引く**のは一見無駄だが、LightGBM v0
-    （PR E）を入れるときに経路を変えずに済む（W4 プラン §6.3）。**除外も暦も
-    学習と同じ関数が決めている**ので、ここに判断は残っていない。
-
-    **ラベルは持たない**（`predict` は読まない）。長さ 0 の配列を入れておく。
-    """
-    ports = {name: index for index, name in enumerate(artifact.ports)}
-    station_ids = table.column("station_id").to_pylist()
-    rows = table.num_rows
-    return Samples(
-        systems=artifact.systems,
-        n_ports=len(artifact.ports),
-        system=np.full(rows, artifact.systems.index(system_id), dtype=np.int8),
-        port=np.fromiter(
-            (ports.get(f"{system_id}/{one}", NO_PORT) for one in station_ids),
-            dtype=np.int32,
-            count=rows,
-        ),
-        day=np.full(rows, at.astimezone(JST).date().toordinal(), dtype=np.int32),
-        h_min=_int16(table, "h_min"),
-        minute_of_day=_int16(table, "minute_of_day"),
-        dow_type=_dow_type_index(table),
-        weight=np.ones(rows, dtype=np.float32),
-        labels={target.label: np.zeros(0, dtype=np.int8) for target in TARGETS},
-        counts={"bikes": _int16(table, "bikes"), "docks": _int16(table, "docks")},
-    )
-
-
-def _int16(table: pa.Table, name: str) -> Int16:
-    column = table.column(name).combine_chunks()
-    return np.asarray(column.to_numpy(zero_copy_only=False), dtype=np.int16)
-
-
-def _dow_type_index(table: pa.Table) -> Int8:
-    """目標時刻の曜日種別を、成果物と同じ並びの番号にする。"""
-    order = tuple(sorted(DOW_TYPES))
-    values = table.column("target_dow_type").to_pylist()
-    return np.fromiter((order.index(one) for one in values), dtype=np.int8, count=len(values))
-
-
 class RowCountError(ValueError):
     """行数が `ポート × 水平` になっていない。**畳み直せないので止める。**"""
 
 
 def predict(
-    artifact: Artifact, system_id: str, at: datetime, table: pa.Table, stale: bool
+    predictor: Predictor, system_id: str, at: datetime, table: pa.Table, stale: bool
 ) -> tuple[Forecast, ...]:
-    """予測を作る。**出せないポートは `build_now` が既に落としている。**"""
+    """予測を作る。**出せないポートは `build_now` が既に落としている。**
+
+    **モデルの種類を知らない。** `Predictor` が行ごとの確率と「本来の情報で出せたか」を
+    返し、ここは `(ポート, 水平)` に畳み直して確度を付けるだけである。
+    """
     n_horizons = len(HORIZONS_MIN)
     if table.num_rows == 0:
         return ()
     if table.num_rows % n_horizons != 0:
         raise RowCountError(f"行数 {table.num_rows} が水平 {n_horizons} で割り切れない")
-    samples = to_samples(artifact, system_id, at, table)
-    columns = {target.name: _probabilities(artifact, samples, target) for target in TARGETS}
-    bike = to_x1000(columns["bike"][0]).reshape(-1, n_horizons)
-    dock = to_x1000(columns["dock"][0]).reshape(-1, n_horizons)
-    used = (columns["bike"][1] & columns["dock"][1]).reshape(-1, n_horizons)
+    outcome = predictor.predict(system_id, at, table)
+    bike = to_x1000(outcome.probability["bike"]).reshape(-1, n_horizons)
+    dock = to_x1000(outcome.probability["dock"]).reshape(-1, n_horizons)
+    informed = _both_informed(outcome, n_horizons)
     # **並びは `(ポート, 水平)`。** `build_now` が station_id, h_min の昇順に並べている
-    station_ids = table.column("station_id").to_pylist()[::n_horizons]
     return tuple(
         Forecast(
             system_id=system_id,
             station_id=station_id,
             p_bike_x1000=tuple(int(one) for one in bike[index]),
             p_dock_x1000=tuple(int(one) for one in dock[index]),
-            confidence=confidence_of(stale=stale, climatology_horizons=int(used[index].sum())),
+            confidence=confidence_of(stale=stale, informed_horizons=int(informed[index].sum())),
         )
-        for index, station_id in enumerate(station_ids)
+        for index, station_id in enumerate(station_ids_of(table))
     )
 
 
-def unknown_ports(artifact: Artifact, system_id: str, table: pa.Table) -> int:
-    """成果物に無かったポートの数（W3 プラン §12 の 110）。
-
-    **ポート単位で数える**（行は水平のぶんだけあるので、そのまま数えると 10 倍になる）。
-    """
-    n_horizons = len(HORIZONS_MIN)
-    ports = set(artifact.ports)
-    station_ids = table.column("station_id").to_pylist()[::n_horizons]
-    return sum(1 for one in station_ids if f"{system_id}/{one}" not in ports)
-
-
-def _probabilities(artifact: Artifact, samples: Samples, target: Target) -> tuple[Float64, Bools]:
-    """B3 の確率と、気候値が使えたかどうか。**学習と同じ関数を呼ぶ。**"""
-    model = artifact.targets[target.name]
-    b1, _ = conditional.predict(model.b1, samples, target)
-    b2 = climatology.predict(model.b2, samples, b1)
-    used = np.asarray(b2.probability != b1, dtype=np.bool_)
-    b3 = blend.predict(model.b3, blend.design(b1, b2.probability, samples.h_min))
-    return b3, used
+def _both_informed(outcome: Prediction, n_horizons: int) -> Bools:
+    """両方のターゲットで本来の情報が使えた水平。**厳しいほうに寄せる。**"""
+    both = outcome.informed["bike"] & outcome.informed["dock"]
+    return np.asarray(both.reshape(-1, n_horizons), dtype=np.bool_)
 
 
 def to_x1000(values: Float64) -> Int16:
@@ -353,20 +290,25 @@ def to_x1000(values: Float64) -> Int16:
     return np.clip(np.rint(values * PROBABILITY_SCALE), 0, PROBABILITY_SCALE).astype(np.int16)
 
 
-def confidence_of(*, stale: bool, climatology_horizons: int) -> int:
+def confidence_of(*, stale: bool, informed_horizons: int) -> int:
     """確度（0026 の `confidence`）。
 
     | 値 | 意味 |
     |---|---|
     | 1 | フィードが古い（`t − base_observed_at > 600 秒`） |
-    | 2 | 気候値が半分以下の水平でしか効いていない |
-    | 3 | 気候値が過半の水平で効いた |
+    | 2 | モデルが本来の情報で出せた水平が半分以下 |
+    | 3 | 過半の水平で本来の情報が使えた |
+
+    「本来の情報」はモデルによって違う。**B3 では気候値が引けたか**、LightGBM では
+    常に真（欠損は木が扱うので、引けなかったに当たる状態が無い）。**確度の意味づけは
+    W5 の校正で見直す**：いまは「配信の鮮度」と「ベースラインの当てはまり」の 2 つを
+    1 つの数に押し込んでいる。
 
     **0 は使わない**（B1 は必ず出るので「参考値」以下にはならない）。
     """
     if stale:
         return 1
-    return 3 if climatology_horizons * 2 > len(HORIZONS_MIN) else 2
+    return 3 if informed_horizons * 2 > len(HORIZONS_MIN) else 2
 
 
 def to_payload(
@@ -406,23 +348,42 @@ def _log(message: str) -> None:
 
 
 def run_inference(
-    port: InferPort, system_id: str, model_version: str, now: datetime
+    port: InferPort, system_id: str, now: datetime, model_version: str | None = None
 ) -> InferSummary:
-    """1 システムぶんの推論。**掴めなければ何もしない。**"""
+    """1 システムぶんの推論。**掴めなければ何もしない。**
+
+    配る版は **`model_versions` の `active`** を引く（W4-08）。`model_version` を渡すと
+    その版を名指しで使う——候補を手で試すときだけの口で、Cron は渡さない。
+
+    **`active` でない版は「試し打ち」になる**（`status != 'active'`）。掴まず、
+    `station_forecasts` にも `inference_log` にも書かない。理由は 2 つある。
+
+      * `station_forecasts` は **1 ポート 1 行**で、書けば次の 5 分周期まで**利用者に
+        候補の確率が出る**。配信を切り替えるのは `promote_model_version()` の仕事で、
+        人が確認して行う（CLAUDE.md §6）。手で叩いた 1 回がそれを迂回してはいけない
+      * `inference_log` は `(system_id, base_observed_at)` で掴む。試し打ちが掴むと、
+        **その観測に対する本物の推論が「二重」として飛ばされる**
+
+    **版を引くのは掴む前。** `inference_log` に「どの版で掴んだか」を残すため、そして
+    登録簿が読めない状態で行だけ作らないためである。
+    """
     started = datetime.now(UTC)
     cpu_started = time.process_time_ns()
+    chosen = registry.active(port) if model_version is None else registry.named(port, model_version)
+    if chosen.status != "active":
+        return _dry_run(port, system_id, chosen, now, started, cpu_started)
     base = port.read_base_observed_at(system_id)
     if base is None:
         return _skipped(
-            system_id, model_version, None, started, cpu_started, "観測がまだありません"
+            system_id, chosen.model_version, None, started, cpu_started, "観測がまだありません"
         )
 
-    run_id = port.begin_inference(system_id, base, model_version)
+    run_id = port.begin_inference(system_id, base, chosen.model_version)
     if run_id is None:
-        return _skipped(system_id, model_version, base, started, cpu_started, None)
+        return _skipped(system_id, chosen.model_version, base, started, cpu_started, None)
 
     try:
-        summary = _produce(port, system_id, model_version, now, base, started, cpu_started)
+        summary = _produce(port, system_id, chosen, now, base, started, cpu_started)
     except Exception as cause:
         elapsed = _elapsed_ms(started)
         port.finish_inference(run_id, "failed", 0, elapsed, type(cause).__name__)
@@ -431,7 +392,7 @@ def run_inference(
             system_id=system_id,
             status="failed",
             base_observed_at=base,
-            model_version=model_version,
+            model_version=chosen.model_version,
             n_stations=0,
             n_skipped=0,
             n_unknown_ports=0,
@@ -446,16 +407,75 @@ def run_inference(
     return summary
 
 
+def _dry_run(
+    port: InferPort,
+    system_id: str,
+    chosen: registry.Registered,
+    now: datetime,
+    started: datetime,
+    cpu_started: int,
+) -> InferSummary:
+    """**候補の試し打ち。** 予測まで作り、どこにも書かずに要約だけ返す。
+
+    確かめられるのは「特徴量 → モデル → 確率」までで、`upsert_forecasts` は通らない。
+    そこは `active` の版が 5 分毎に通している経路と**同じ 1 本**である
+    （`to_payload` → `batches` → `upsert_forecasts`）。
+    """
+    predictor = registry.load(port, chosen)
+    holidays = frozenset(port.list_holidays())
+    at = grid_time(now)
+    features_started = time.monotonic_ns()
+    reference_day, ready = read_features(port, system_id, at, holidays)
+    features_ms = int((time.monotonic_ns() - features_started) // NS_PER_MS)
+    base = port.read_base_observed_at(system_id)
+    stale = base is None or (at - base).total_seconds() > MAX_STALENESS_S
+    forecasts = predict(predictor, system_id, at, ready.table, stale)
+    return InferSummary(
+        system_id=system_id,
+        status="dry_run",
+        base_observed_at=base,
+        model_version=predictor.model_version,
+        n_stations=ready.stats.stations,
+        n_skipped=sum(ready.stats.excluded.values()),
+        n_unknown_ports=predictor.unknown_ports(system_id, ready.table),
+        # **書いていないので 0。** 出せた数は `predictable` に出る
+        n_rows=0,
+        duration_ms=_elapsed_ms(started),
+        cpu_ms=_cpu_ms(cpu_started),
+        features_ms=features_ms,
+        excluded=dict(sorted(ready.stats.excluded.items())),
+        reference_date=reference_day.isoformat(),
+        weather_issues=ready.stats.weather_issues,
+        model_kind=predictor.kind,
+        model_feature_set=predictor.feature_set,
+        n_predicted=len(forecasts),
+        sample=_sample_of(forecasts),
+    )
+
+
+def _sample_of(forecasts: Sequence[Forecast]) -> dict[str, object]:
+    """試し打ちの応答に載せる 1 件。**確率が本当に出ているか**を目で見るため。"""
+    if not forecasts:
+        return {}
+    one = forecasts[0]
+    return {
+        "station_id": one.station_id,
+        "p_bike_x1000": list(one.p_bike_x1000),
+        "p_dock_x1000": list(one.p_dock_x1000),
+        "confidence": one.confidence,
+    }
+
+
 def _produce(
     port: InferPort,
     system_id: str,
-    model_version: str,
+    chosen: registry.Registered,
     now: datetime,
     base: datetime,
     started: datetime,
     cpu_started: int,
 ) -> InferSummary:
-    artifact = load_artifact(port, model_version)
+    predictor = registry.load(port, chosen)
     holidays = frozenset(port.list_holidays())
     # **基準時刻は 5 分格子に落とす。** 水平の起点は `generated_at` なので、
     # 書き込む `generated_at` も同じ時刻にする（W4 プラン §12 の 114）
@@ -464,17 +484,17 @@ def _produce(
     reference_day, ready = read_features(port, system_id, at, holidays)
     features_ms = int((time.monotonic_ns() - features_started) // NS_PER_MS)
     stale = (at - base).total_seconds() > MAX_STALENESS_S
-    forecasts = predict(artifact, system_id, at, ready.table, stale)
-    payload = to_payload(forecasts, at, base, artifact.model_version)
+    forecasts = predict(predictor, system_id, at, ready.table, stale)
+    payload = to_payload(forecasts, at, base, predictor.model_version)
     written = sum(port.upsert_forecasts(chunk) for chunk in batches(payload, UPSERT_BATCH))
     return InferSummary(
         system_id=system_id,
         status="ok",
         base_observed_at=base,
-        model_version=artifact.model_version,
+        model_version=predictor.model_version,
         n_stations=ready.stats.stations,
         n_skipped=sum(ready.stats.excluded.values()),
-        n_unknown_ports=unknown_ports(artifact, system_id, ready.table),
+        n_unknown_ports=predictor.unknown_ports(system_id, ready.table),
         n_rows=written,
         duration_ms=_elapsed_ms(started),
         cpu_ms=_cpu_ms(cpu_started),
@@ -482,38 +502,9 @@ def _produce(
         excluded=dict(sorted(ready.stats.excluded.items())),
         reference_date=reference_day.isoformat(),
         weather_issues=ready.stats.weather_issues,
+        model_kind=predictor.kind,
+        model_feature_set=predictor.feature_set,
     )
-
-
-class MissingArtifactError(RuntimeError):
-    """成果物が Storage に無い。**代わりの値をでっち上げない。**"""
-
-
-#: 読み込んだ成果物。**版が変わるまで取り直さない**（開発プラン §8.2）。
-#: 成果物は 3.2 MB あり、5 分毎に取り直すと 1 日 900 MB の転送になる。
-#: Fluid compute の温まったインスタンスではこれが効く。冷えれば消えるだけで、
-#: 正しさには影響しない（同じ版からは同じ値が読める）。
-_CACHE: dict[str, Artifact] = {}
-
-
-def load_artifact(port: InferPort, model_version: str) -> Artifact:
-    """成果物を読む。**無ければ止める**（`fit_baseline` で作る）。"""
-    cached = _CACHE.get(model_version)
-    if cached is not None:
-        return cached
-    body = port.download(MODEL_BUCKET, model_path(model_version))
-    if body is None:
-        raise MissingArtifactError(f"成果物がありません: {model_version}")
-    artifact = from_bytes(body)
-    # 版が変わったら古いものは要らない。1 つだけ持つ
-    _CACHE.clear()
-    _CACHE[model_version] = artifact
-    return artifact
-
-
-def forget_artifacts() -> None:
-    """キャッシュを捨てる。**テストが版をまたぐときに使う。**"""
-    _CACHE.clear()
 
 
 def _skipped(
@@ -579,6 +570,14 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         "excluded": dict(summary.excluded),
         "reference_date": summary.reference_date,
         "weather_issues": summary.weather_issues,
+        "model_kind": summary.model_kind,
+        "model_feature_set": summary.model_feature_set,
+        # **試し打ちのときだけ載せる。** 通常の推論では 0 と空になる
+        **(
+            {"predicted": summary.n_predicted, "sample": dict(summary.sample)}
+            if summary.status == "dry_run"
+            else {}
+        ),
         "error": summary.error,
     }
 
@@ -605,4 +604,7 @@ def to_record(summary: InferSummary) -> dict[str, object]:
         "reference_date": summary.reference_date,
         # **天気が乗っているか。** 0 なら取り込みが止まっている（`load_weather`）
         "weather_issues": summary.weather_issues,
+        # **何を配ったか。** 版は列に在るが、種類と特徴量の版は在らない
+        "model_kind": summary.model_kind,
+        "model_feature_set": summary.model_feature_set,
     }

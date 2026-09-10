@@ -64,7 +64,9 @@ data/
 *.parquet
 *.json.gz
 !fixtures/**/*.json.gz
-models/
+# **`/` を付けてリポジトリ直下だけに効かせる。** 付けないと
+# `apps/ml/bikechance_ml/models/`（LightGBM のコード）まで無視される（W4 プラン §12 の 125）
+/models/
 *.txt.model
 *.pkl
 
