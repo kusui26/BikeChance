@@ -35,10 +35,10 @@ select has_table('public'::name, 'app_config'::name, 'app_config がある');
 
 -- W1 で作らないと決めたもの（W1-10）。空テーブルを先に作らない
 -- **`station_forecasts` は W3 の段 8 で作った**（実際に書き始める段まで待った。0026）。
--- `model_versions` はまだ：登録するモデルが無い
+-- **`model_versions` は W4 の PR E で作った**（配るものが 2 つ以上になる時点。0038）。
 select has_table('public'::name, 'station_forecasts'::name, '予測テーブルは段 8 で作った');
 select has_table('public'::name, 'inference_log'::name, '推論の記録も段 8 で作った');
-select hasnt_table('public'::name, 'model_versions'::name, 'モデル登録は W4 まで作らない');
+select has_table('public'::name, 'model_versions'::name, 'モデル登録は PR E で作った');
 
 -- ────────────────────────────────────────────────────────────────
 -- 主キーと一意制約

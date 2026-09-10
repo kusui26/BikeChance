@@ -191,6 +191,11 @@ def _int16(table: pa.Table, name: str) -> Int16:
     )
 
 
-def concat(tables: Sequence[pa.Table]) -> pa.Table:
-    """日ごとのファイルを 1 つにする。**列は `NEEDED_COLUMNS` に絞る。**"""
-    return pa.concat_tables([table.select(list(NEEDED_COLUMNS)) for table in tables])
+def concat(tables: Sequence[pa.Table], columns: Sequence[str] | None = NEEDED_COLUMNS) -> pa.Table:
+    """日ごとのファイルを 1 つにする。**既定では `NEEDED_COLUMNS` に絞る。**
+
+    `columns` を `None` にすると全列を残す（LightGBM は 62 列を使う）。
+    """
+    if columns is None:
+        return pa.concat_tables(list(tables))
+    return pa.concat_tables([table.select(list(columns)) for table in tables])

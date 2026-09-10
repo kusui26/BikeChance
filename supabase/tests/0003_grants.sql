@@ -172,7 +172,9 @@ create function pg_temp.rest_called() returns text[] language sql immutable as $
     -- 推論（apps/ml の /ml/infer）
     'begin_inference', 'finish_inference', 'upsert_forecasts',
     -- 天気の取り込み（apps/ml の /ml/weather）
-    'upsert_weather_hourly'
+    'upsert_weather_hourly',
+    -- モデルの登録（apps/ml の学習ジョブ）
+    'register_model_version'
   ];
 $$;
 
@@ -190,7 +192,9 @@ create function pg_temp.cron_only() returns text[] language sql immutable as $$
     -- Supabase が作る（こちらの管理外）
     'rls_auto_enable',
     -- このテスト自身が既定権限を測るために作る
-    'privilege_probe_fn'
+    'privilege_probe_fn',
+    -- **誰からも呼べない**（所有者が psql から呼ぶ。CLAUDE.md §6）
+    'promote_model_version'
   ];
 $$;
 

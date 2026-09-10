@@ -19,24 +19,19 @@ import pyarrow as pa
 import pytest
 from fastapi.testclient import TestClient
 
-from bikechance_ml.api import MODEL_VERSION_ENV, build_app
-from bikechance_ml.baselines.artifact import Artifact, to_bytes
+from bikechance_ml.api import build_app
+from bikechance_ml.baselines.artifact import Artifact, artifact_path, to_bytes
 from bikechance_ml.eval.dataset import to_samples
 from bikechance_ml.features.constants import HORIZONS_MIN, MAX_STALENESS_S
 from bikechance_ml.features.grid import JST
 from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.fit_baseline import build_artifact
 from bikechance_ml.jobs.infer import (
-    MODEL_BUCKET,
     Forecast,
     InferSummary,
-    MissingArtifactError,
     batches,
     confidence_of,
-    forget_artifacts,
     grid_time,
-    load_artifact,
-    model_path,
     predict,
     read_features,
     run_inference,
@@ -44,9 +39,18 @@ from bikechance_ml.jobs.infer import (
     to_payload,
     to_record,
     to_x1000,
-    unknown_ports,
 )
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
+from bikechance_ml.models import registry
+from bikechance_ml.models.predictor import BaselinePredictor
+from bikechance_ml.models.registry import (
+    MODEL_BUCKET,
+    FeatureSetMismatchError,
+    MissingArtifactError,
+    Registered,
+    UnknownModelError,
+    forget,
+)
 from tests import eval_fixture as fixture
 from tests import infer_fixture as serving
 
@@ -58,9 +62,9 @@ def _clean_cache() -> Iterator[None]:
     本番では版が変われば入れ替わるので問題にならないが、検査は同じ版名で
     中身の違う口を使うので、持ち越すと前の検査の答えが出る。
     """
-    forget_artifacts()
+    forget()
     yield
-    forget_artifacts()
+    forget()
 
 
 OPEN, SUSPENDED, MISSING = 7, 1, -1
@@ -106,7 +110,7 @@ def forecasts(
 ) -> tuple[Forecast, ...]:
     port = ready_port(rows)
     stale = (AT - base).total_seconds() > MAX_STALENESS_S
-    return predict(ARTIFACT, system_id, AT, features(port, system_id), stale)
+    return predict(BaselinePredictor(ARTIFACT), system_id, AT, features(port, system_id), stale)
 
 
 def test_one_row_per_port_with_all_horizons() -> None:
@@ -162,12 +166,12 @@ def test_stale_feed_lowers_the_confidence() -> None:
 
 
 def test_confidence_rules() -> None:
-    """**過半の水平で気候値が効いたら 3**（全水平だと蓄積が伸びるまで出ない）。"""
+    """**過半の水平で本来の情報が使えたら 3**（B3 では気候値が効いた水平）。"""
     half = len(HORIZONS_MIN) // 2
-    assert confidence_of(stale=True, climatology_horizons=len(HORIZONS_MIN)) == 1
-    assert confidence_of(stale=False, climatology_horizons=0) == 2
-    assert confidence_of(stale=False, climatology_horizons=half) == 2
-    assert confidence_of(stale=False, climatology_horizons=half + 1) == 3
+    assert confidence_of(stale=True, informed_horizons=len(HORIZONS_MIN)) == 1
+    assert confidence_of(stale=False, informed_horizons=0) == 2
+    assert confidence_of(stale=False, informed_horizons=half) == 2
+    assert confidence_of(stale=False, informed_horizons=half + 1) == 3
 
 
 def test_probability_rounding_stays_in_range() -> None:
@@ -199,7 +203,7 @@ def test_batches_split_without_losing_rows() -> None:
 def test_model_path_uses_the_version() -> None:
     """**バケットは `models`**（`gbfs-parquet` は Parquet の MIME しか許さない）。"""
     assert MODEL_BUCKET == "models"
-    assert model_path("baseline-b3-v0-20260909") == "baseline/baseline-b3-v0-20260909.json.gz"
+    assert artifact_path("baseline-b3-v0-20260909") == "baseline/baseline-b3-v0-20260909.json.gz"
 
 
 # ── 実行 ──────────────────────────────────────────────────────
@@ -221,6 +225,20 @@ class FakePort:
     downloads: list[str] = field(default_factory=list)
     body: bytes | None = None
     next_id: int = 1
+    #: `model_versions` の `active` の行。**推論はここから版を引く**
+    registered: Registered | None = field(
+        default_factory=lambda: Registered(
+            model_version=ARTIFACT.model_version,
+            kind="baseline",
+            feature_set=ARTIFACT.feature_set,
+            artifact_path=artifact_path(ARTIFACT.model_version),
+            status="active",
+        )
+    )
+    #: 候補（`?model=` で名指しするときだけ引かれる）
+    candidate: Registered | None = None
+    #: LightGBM の成果物（`lightgbm/` のパスに置かれたことにする）
+    lightgbm_body: bytes | None = None
 
     def read_base_observed_at(self, system_id: str) -> datetime | None:
         return self.base
@@ -238,6 +256,19 @@ class FakePort:
     def list_holidays(self) -> tuple[date, ...]:
         return ()
 
+    def active_model(self) -> Registered | None:
+        """**登録簿がいまの版を返す**（W4-08。環境変数からの移行）。"""
+        return self.registered
+
+    def find_model(self, model_version: str) -> Registered | None:
+        if self.registered is not None and self.registered.model_version == model_version:
+            return self.registered
+        return (
+            self.candidate
+            if (self.candidate is not None and self.candidate.model_version == model_version)
+            else None
+        )
+
     def list_weather(self, start: datetime, end: datetime) -> tuple[WeatherRow, ...]:
         """**頼まれた窓だけ**返す（どの窓を読みに来たかは `weather_reads` に残る）。"""
         self.weather_reads.append((start, end))
@@ -245,7 +276,7 @@ class FakePort:
 
     def download(self, bucket: str, path: str) -> bytes | None:
         if bucket == MODEL_BUCKET:
-            return self.body
+            return self.lightgbm_body if path.startswith("lightgbm/") else self.body
         # **頼まれた日の版**を返す（どの日を読みに来たかは `downloads` に残る）
         self.downloads.append(path)
         return serving.reference_files(serving.day_of(path), self.rows).get(path)
@@ -282,7 +313,7 @@ def ready_port(rows: Sequence[tuple[str, int, int, int]] = STATIONS) -> FakePort
 
 def test_a_full_cycle_writes_one_row_per_port() -> None:
     port = ready_port()
-    summary = run_inference(port, "hellocycling", ARTIFACT.model_version, NOW)
+    summary = run_inference(port, "hellocycling", NOW)
     assert summary.status == "ok"
     assert summary.n_rows == len(STATIONS)
     assert len(port.written) == len(STATIONS)
@@ -292,8 +323,8 @@ def test_a_full_cycle_writes_one_row_per_port() -> None:
 def test_the_same_observation_is_not_inferred_twice() -> None:
     """**Vercel Cron の二重起動は無害**（`inference_log` の一意制約で掴む）。"""
     port = ready_port()
-    run_inference(port, "hellocycling", ARTIFACT.model_version, NOW)
-    again = run_inference(port, "hellocycling", ARTIFACT.model_version, NOW)
+    run_inference(port, "hellocycling", NOW)
+    again = run_inference(port, "hellocycling", NOW)
     assert again.status == "skipped"
     assert again.n_rows == 0
     assert len(port.written) == len(STATIONS)
@@ -301,31 +332,43 @@ def test_the_same_observation_is_not_inferred_twice() -> None:
 
 def test_a_new_observation_is_inferred() -> None:
     port = ready_port()
-    run_inference(port, "hellocycling", ARTIFACT.model_version, NOW)
+    run_inference(port, "hellocycling", NOW)
     port.base = BASE + timedelta(minutes=5)
-    later = run_inference(port, "hellocycling", ARTIFACT.model_version, NOW)
+    later = run_inference(port, "hellocycling", NOW)
     assert later.status == "ok"
 
 
 def test_no_observation_yet_is_skipped_without_claiming() -> None:
     port = FakePort(base=None, body=to_bytes(ARTIFACT))
-    summary = run_inference(port, "hellocycling", ARTIFACT.model_version, NOW)
+    summary = run_inference(port, "hellocycling", NOW)
     assert summary.status == "skipped"
     assert port.claims == []
 
 
 def test_a_missing_artifact_is_recorded_as_failed() -> None:
-    """**代わりの値をでっち上げない。** 失敗として記録する。"""
+    """**代わりの値をでっち上げない。** 失敗として記録する。
+
+    登録簿には在るが Storage に無い、という食い違い。掴んだあとで落ちるので、
+    `inference_log` に `failed` が残る。
+    """
     port = FakePort(body=None)
-    summary = run_inference(port, "hellocycling", "nope", NOW)
+    summary = run_inference(port, "hellocycling", NOW)
     assert summary.status == "failed"
     assert summary.error == MissingArtifactError.__name__
     assert port.finished == [(2, "failed", 0)]
 
 
+def test_an_unknown_version_is_refused_before_claiming() -> None:
+    """**登録簿に無い版は掴む前に止める**（`inference_log` に行を作らない）。"""
+    port = ready_port()
+    with pytest.raises(UnknownModelError):
+        run_inference(port, "hellocycling", NOW, "知らない版")
+    assert port.claims == []
+
+
 def test_detail_is_json_safe() -> None:
     port = ready_port()
-    detail = to_detail(run_inference(port, "hellocycling", ARTIFACT.model_version, NOW))
+    detail = to_detail(run_inference(port, "hellocycling", NOW))
     assert detail["ok"] is True
     assert detail["system"] == "hellocycling"
     assert isinstance(detail["base_observed_at"], str)
@@ -333,7 +376,7 @@ def test_detail_is_json_safe() -> None:
 
 def test_detail_carries_only_the_exception_name() -> None:
     """**例外の文言は要求 URL を抱えていることがある**（CLAUDE.md §5）。"""
-    detail = to_detail(run_inference(FakePort(body=None), "hellocycling", "nope", NOW))
+    detail = to_detail(run_inference(FakePort(body=None), "hellocycling", NOW))
     assert detail["error"] == "MissingArtifactError"
     assert "http" not in str(detail).lower()
 
@@ -376,23 +419,24 @@ def test_unknown_ports_counts_only_what_is_predicted() -> None:
         ("yyy", 2, 7, SUSPENDED),  # 止まっている ← 行が作られないので数えない
     )
     table = features(ready_port(rows))
-    assert unknown_ports(ARTIFACT, "hellocycling", table) == 1
+    assert BaselinePredictor(ARTIFACT).unknown_ports("hellocycling", table) == 1
 
 
 def test_the_phantom_station_is_not_counted_as_drift() -> None:
     """幻のポート（ドコモ `5753`）は成果物に無くて当たり前である。"""
     table = features(ready_port((("5753", 2, 7, OPEN),)), "docomo-cycle")
-    assert unknown_ports(ARTIFACT, "docomo-cycle", table) == 0
+    assert BaselinePredictor(ARTIFACT).unknown_ports("docomo-cycle", table) == 0
 
 
 def test_no_drift_when_every_port_is_in_the_artifact() -> None:
-    assert unknown_ports(ARTIFACT, "hellocycling", features(ready_port())) == 0
+    predictor = BaselinePredictor(ARTIFACT)
+    assert predictor.unknown_ports("hellocycling", features(ready_port())) == 0
 
 
 def test_the_count_reaches_the_response_and_the_record() -> None:
     """**応答にも記録にも出す。** 数えても出さなければ気づけない。"""
     port = ready_port()
-    summary = run_inference(port, "hellocycling", "m1", NOW)
+    summary = run_inference(port, "hellocycling", NOW)
     assert summary.n_unknown_ports == 0
     assert to_detail(summary)["unknown_ports"] == 0
     assert len(port.details) == 1
@@ -418,6 +462,8 @@ def test_the_record_does_not_repeat_the_columns() -> None:
         "excluded",
         "reference_date",
         "weather_issues",
+        "model_kind",
+        "model_feature_set",
     }
     assert to_record(_summary(cpu_ms=42))["cpu_ms"] == 42
 
@@ -441,7 +487,7 @@ def _summary(*, cpu_ms: int) -> InferSummary:
 def test_features_ms_is_reported() -> None:
     """**推論の所要の大半は特徴量づくり**（W4 プラン §6.3 の完了条件）。"""
     port = ready_port()
-    summary = run_inference(port, "hellocycling", "m1", NOW)
+    summary = run_inference(port, "hellocycling", NOW)
     assert summary.features_ms > 0
     assert to_detail(summary)["features_ms"] == summary.features_ms
     recorded = port.details[0]
@@ -460,7 +506,7 @@ def test_cpu_time_is_measured_and_reported() -> None:
     分けて記録する。
     """
     port = ready_port()
-    summary = run_inference(port, "hellocycling", "m1", NOW)
+    summary = run_inference(port, "hellocycling", NOW)
     assert summary.cpu_ms >= 0
     assert to_detail(summary)["cpu_ms"] == summary.cpu_ms
     recorded = port.details[0]
@@ -471,7 +517,7 @@ def test_cpu_time_is_reported_even_when_nothing_was_inferred() -> None:
     """掴めなかった回も測る。**二重起動の抑止にも CPU は使っている。**"""
     port = ready_port()
     port.base = None
-    summary = run_inference(port, "hellocycling", "m1", NOW)
+    summary = run_inference(port, "hellocycling", NOW)
     assert summary.status == "skipped"
     assert summary.cpu_ms >= 0
 
@@ -557,7 +603,6 @@ def lend(port: FakePort) -> Iterator[FakePort]:
 
 def client_for(port: FakePort, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("CRON_SECRET", "s3cret")
-    monkeypatch.setenv(MODEL_VERSION_ENV, ARTIFACT.model_version)
     return TestClient(build_app(make_infer_port=lambda: lend(port)))
 
 
@@ -581,14 +626,39 @@ def test_route_rejects_an_unknown_system(monkeypatch: pytest.MonkeyPatch) -> Non
     assert port.claims == []
 
 
-def test_route_needs_a_model_version(monkeypatch: pytest.MonkeyPatch) -> None:
-    """**配る版を環境変数で指定する。** 未設定なら黙って古い版を配らない。"""
+def test_route_needs_an_active_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**配る版は登録簿が決める**（W4-08）。登録が無ければ 500 で、黙って配らない。"""
     port = ready_port()
-    client = client_for(port, monkeypatch)
-    monkeypatch.delenv(MODEL_VERSION_ENV)
-    response = client.get("/ml/infer/hellocycling", headers=AUTH)
+    port.registered = None
+    response = client_for(port, monkeypatch).get("/ml/infer/hellocycling", headers=AUTH)
     assert response.status_code == 500
     assert response.json()["title"] == "misconfigured"
+    assert port.claims == []
+
+
+def test_route_can_try_a_candidate_without_writing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**候補は試し打ちになる。** どこにも書かず、確率だけ返す（W4-07）。"""
+    port = ready_port()
+    port.candidate = Registered(
+        model_version="lgbm-v0-test",
+        kind="baseline",  # 中身はベースラインの成果物を使い回す（配線だけ見る）
+        feature_set=ARTIFACT.feature_set,
+        artifact_path=artifact_path(ARTIFACT.model_version),
+        status="candidate",
+    )
+    response = client_for(port, monkeypatch).get(
+        "/ml/infer/hellocycling?model=lgbm-v0-test", headers=AUTH
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "dry_run"
+    assert body["rows"] == 0
+    assert body["predicted"] == len(STATIONS)
+    assert len(body["sample"]["p_bike_x1000"]) == len(HORIZONS_MIN)
+    # **掴んでいない・書いていない**（本物の推論を邪魔しない）
+    assert port.claims == []
+    assert port.written == []
+    assert port.finished == []
 
 
 def test_route_runs_and_returns_the_summary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -631,16 +701,26 @@ def test_route_reports_a_missing_artifact_as_500(monkeypatch: pytest.MonkeyPatch
 def test_artifact_is_fetched_once_per_version() -> None:
     """**3.2 MB を 5 分毎に取り直さない**（開発プラン §8.2）。"""
     port = CountingPort(body=to_bytes(ARTIFACT))
-    load_artifact(port, ARTIFACT.model_version)
-    load_artifact(port, ARTIFACT.model_version)
+    registry.load(port, _registered(ARTIFACT.model_version))
+    registry.load(port, _registered(ARTIFACT.model_version))
     assert port.fetches == 1
 
 
 def test_a_new_version_replaces_the_cache() -> None:
     port = CountingPort(body=to_bytes(ARTIFACT))
-    load_artifact(port, ARTIFACT.model_version)
-    load_artifact(port, "another-version")
+    registry.load(port, _registered(ARTIFACT.model_version))
+    registry.load(port, _registered("another-version"))
     assert port.fetches == 2
+
+
+def _registered(model_version: str) -> Registered:
+    return Registered(
+        model_version=model_version,
+        kind="baseline",
+        feature_set=ARTIFACT.feature_set,
+        artifact_path=artifact_path(model_version),
+        status="active",
+    )
 
 
 @dataclass
@@ -652,3 +732,60 @@ class CountingPort(FakePort):
     def download(self, bucket: str, path: str) -> bytes | None:
         self.fetches += 1
         return self.body
+
+
+# ── LightGBM の版で通す（W4 プラン §6.5 の完了条件）─────────
+def test_a_lightgbm_candidate_produces_probabilities() -> None:
+    """**特徴量 → 行列 → 木 → 確率**が 1 本で通る。
+
+    完了条件の「候補の版で確率が出る」をここで固定する。成果物は
+    `tests/test_model_artifact.py` が作った小さな森で、**中身は乱数**なので値に意味は
+    無い——見るのは**経路が通ること**と、**確率が 0〜1000 に収まること**である。
+    """
+    from bikechance_ml.models import artifact as lightgbm_artifact
+    from tests.test_model_artifact import ARTIFACT as LGBM
+
+    port = ready_port()
+    port.candidate = Registered(
+        model_version=LGBM.model_version,
+        kind="lightgbm",
+        feature_set=LGBM.feature_set,
+        artifact_path=lightgbm_artifact.artifact_path(LGBM.model_version),
+        status="candidate",
+    )
+    port.lightgbm_body = lightgbm_artifact.to_bytes(LGBM)
+
+    summary = run_inference(port, "hellocycling", NOW, LGBM.model_version)
+    assert summary.status == "dry_run"
+    assert summary.model_kind == "lightgbm"
+    assert summary.n_predicted == len(STATIONS)
+    # **全ポート共通のモデルなので「知らないポート」が無い**（B2 と違う）
+    assert summary.n_unknown_ports == 0
+    probabilities = summary.sample["p_bike_x1000"]
+    assert isinstance(probabilities, list)
+    assert len(probabilities) == len(HORIZONS_MIN)
+    assert all(0 <= one <= 1000 for one in probabilities)
+    # **どこにも書いていない**
+    assert port.claims == []
+    assert port.written == []
+
+
+def test_a_lightgbm_model_refuses_another_feature_set() -> None:
+    """**61 列すべてを読むので、版が違えば配らない**（W4-17）。"""
+    from dataclasses import replace as _replace
+
+    from bikechance_ml.models import artifact as lightgbm_artifact
+    from tests.test_model_artifact import ARTIFACT as LGBM
+
+    stale = _replace(LGBM, feature_set="v1")
+    port = ready_port()
+    port.candidate = Registered(
+        model_version=stale.model_version,
+        kind="lightgbm",
+        feature_set="v1",
+        artifact_path=lightgbm_artifact.artifact_path(stale.model_version),
+        status="candidate",
+    )
+    port.lightgbm_body = lightgbm_artifact.to_bytes(stale)
+    with pytest.raises(FeatureSetMismatchError):
+        run_inference(port, "hellocycling", NOW, stale.model_version)

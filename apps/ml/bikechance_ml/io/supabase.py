@@ -40,6 +40,7 @@ from bikechance_ml.json_shape import (
     as_str,
     field,
 )
+from bikechance_ml.models.registry import Registered
 from bikechance_ml.redact import redact
 
 #: Parquet を置くバケット。0017 で作る。値の出どころはマイグレーションと
@@ -392,6 +393,35 @@ class SupabaseIo:
         )
         return as_int(response.json(), "upsert_forecasts")
 
+    # ── モデルの登録簿（W4 プラン §6.5）──────────────────────
+    def active_model(self) -> Registered | None:
+        """いま配る版。**登録が無ければ None**（呼ぶ側が止める）。"""
+        return self._one_model({"status": "eq.active"})
+
+    def find_model(self, model_version: str) -> Registered | None:
+        """版を名指しで引く（候補を手で試すとき）。"""
+        return self._one_model({"model_version": f"eq.{model_version}"})
+
+    def _one_model(self, where: Mapping[str, str]) -> Registered | None:
+        rows = self._rows(
+            "/rest/v1/model_versions",
+            {
+                "select": "model_version,kind,status,feature_set,artifact_path",
+                **where,
+                "limit": "1",
+            },
+            "model_versions",
+        )
+        return None if not rows else _to_registered(rows[0])
+
+    def register_model_version(self, row: Mapping[str, object]) -> str:
+        """候補を登録する。**`active` にはできない**（0038 の RPC が弾く）。"""
+        response = self._request(
+            "POST", "/rest/v1/rpc/register_model_version", "rest", json={"p_row": dict(row)}
+        )
+        fields = as_dict(response.json(), "register_model_version")
+        return as_str(field(fields, "model_version", "register"), "model_version")
+
     # ── 天気（W4 プラン §6.4）────────────────────────────────
     def list_weather_pending(self, since: datetime, limit: int) -> tuple[PendingIssue, ...]:
         """まだ取り込んでいない発行を、古い順に。**下限を必ず渡す。**
@@ -494,6 +524,17 @@ class SupabaseIo:
             "rest",
             json={"p_id": run_id, "p_status": status, "p_detail": dict(detail)},
         )
+
+
+def _to_registered(row: object) -> Registered:
+    fields = as_dict(row, "model_versions")
+    return Registered(
+        model_version=as_str(field(fields, "model_version", "model"), "model_version"),
+        kind=as_str(field(fields, "kind", "model"), "kind"),
+        feature_set=as_str(field(fields, "feature_set", "model"), "feature_set"),
+        artifact_path=as_str(field(fields, "artifact_path", "model"), "artifact_path"),
+        status=as_str(field(fields, "status", "model"), "status"),
+    )
 
 
 def _to_pending_issue(row: object) -> PendingIssue:

@@ -26,13 +26,19 @@ import numpy as np
 import pyarrow as pa
 
 from bikechance_ml.baselines import blend, climatology, conditional
-from bikechance_ml.baselines.artifact import FORMAT_VERSION, Artifact, TargetModel, to_bytes
+from bikechance_ml.baselines.artifact import (
+    FORMAT_VERSION,
+    Artifact,
+    TargetModel,
+    artifact_path,
+    to_bytes,
+)
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval.dataset import TARGETS, Samples, Target, to_samples
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.io.supabase import open_storage
 from bikechance_ml.jobs.evaluate_baselines import days_between, load_days
-from bikechance_ml.jobs.infer import MODEL_BUCKET, model_path
+from bikechance_ml.models.registry import MODEL_BUCKET
 
 #: 成果物の Content-Type。gzip した JSON。
 CONTENT_TYPE: Final[str] = "application/gzip"
@@ -97,12 +103,13 @@ def run(argv: Sequence[str] | None = None) -> int:
         artifact = build_artifact(samples, ports, found)
         body = to_bytes(artifact)
         if options.upload:
-            source.upload(MODEL_BUCKET, model_path(artifact.model_version), body, CONTENT_TYPE)
+            source.upload(MODEL_BUCKET, artifact_path(artifact.model_version), body, CONTENT_TYPE)
 
     if options.out:
         Path(options.out).write_bytes(body)
     print(
-        f"{artifact.describe()} / {len(body):,} バイト / パス {model_path(artifact.model_version)}"
+        f"{artifact.describe()} / {len(body):,} バイト / "
+        f"パス {artifact_path(artifact.model_version)}"
     )
     print(f"ポート {len(ports):,} / 学習 {len(samples):,} 行", file=sys.stderr)
     return 0

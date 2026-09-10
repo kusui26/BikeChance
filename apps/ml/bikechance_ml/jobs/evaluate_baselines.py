@@ -32,7 +32,7 @@ import pyarrow.parquet as pq
 
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import harness, report
-from bikechance_ml.eval.dataset import concat, to_samples
+from bikechance_ml.eval.dataset import NEEDED_COLUMNS, concat, to_samples
 from bikechance_ml.eval.split import split_days
 from bikechance_ml.features.grid import features_path
 from bikechance_ml.io.supabase import PARQUET_BUCKET, SupabaseIo, open_storage
@@ -48,9 +48,16 @@ def days_between(start: date, end: date) -> tuple[date, ...]:
 
 
 def load_days(
-    source: SupabaseIo | None, days: Sequence[date], local: Path | None
+    source: SupabaseIo | None,
+    days: Sequence[date],
+    local: Path | None,
+    columns: Sequence[str] | None = NEEDED_COLUMNS,
 ) -> tuple[pa.Table, tuple[date, ...]]:
-    """日ごとのサンプルを読む。**無い日は飛ばし、読めた日を返す。**"""
+    """日ごとのサンプルを読む。**無い日は飛ばし、読めた日を返す。**
+
+    `columns` を `None` にすると**全列**を返す。ベースラインが読むのは 11 列だけだが、
+    LightGBM は 62 列を使う（`jobs/fit_lightgbm.py`）。
+    """
     tables: list[pa.Table] = []
     found: list[date] = []
     for day in days:
@@ -61,7 +68,7 @@ def load_days(
         found.append(day)
     if not tables:
         raise NoSamplesError("学習サンプルが 1 日ぶんも見つかりません")
-    return concat(tables), tuple(found)
+    return concat(tables, columns), tuple(found)
 
 
 def _one_day(source: SupabaseIo | None, day: date, local: Path | None) -> bytes | None:

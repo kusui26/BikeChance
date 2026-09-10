@@ -16,6 +16,7 @@
 from datetime import UTC, date, datetime, timedelta
 from typing import Final
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
@@ -29,6 +30,7 @@ from bikechance_ml.features.reference import (
 )
 from bikechance_ml.features.schema import SERVING_DROPPED, SERVING_SCHEMA, feature_columns
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
+from bikechance_ml.models import matrix
 from tests import features_fixture as fixture
 
 #: 突き合わせる列。**61 列すべて**（`h_min` を含む）。
@@ -358,3 +360,34 @@ def test_a_dormant_port_matches_too() -> None:
     # 上限に張り付いた行が実際にあること（この検査が空回りしていない証拠）
     capped = [row for row in rows if row["minutes_since_last_change"] == CHANGE_CAP_MINUTES]
     assert capped, "上限に達した行が無い（仕込みを見直す）"
+
+
+# ── モデルに渡す行列（W4 プラン §6.5）─────────────────────────
+def test_the_model_matrix_matches_too() -> None:
+    """**学習と推論で、モデルに渡る行列がビットまで同じ。**
+
+    61 列の値が一致するのは上の検査が見ている。ここで見るのは、その値を
+    **62 列の行列に並べた結果**が一致すること——列の順序・型・カテゴリの符号化まで
+    含めて、木が同じ位置で同じ値を見るかどうかである。
+
+    ずれても例外は出ない。**確率だけが静かに変わる**ので、機械で固定する。
+    """
+    day_inputs = fixture.build_inputs()
+    built = build.build_day(day_inputs)
+    at = _base_times(built.table)[-1]
+    served = _serve_all(day_inputs, at, day_inputs.table)
+
+    trained = _rows_by_key(built.table, at)
+    day_matrix = matrix.build(_only(built.table, at, sorted(trained)))
+    now_matrix = matrix.build(_only(served, None, sorted(trained)))
+    assert day_matrix.columns == now_matrix.columns
+    assert np.array_equal(day_matrix.values, now_matrix.values, equal_nan=True)
+
+
+def _only(table: pa.Table, at: datetime | None, keys: list[tuple[object, ...]]) -> pa.Table:
+    """鍵の並びで行を選び、**同じ順**にそろえる（表ごとに行順が違うため）。"""
+    rows = table.to_pylist()
+    if at is not None:
+        rows = [row for row in rows if row["t"].replace(tzinfo=UTC) == at]
+    by_key = {tuple(row[key] for key in KEYS): row for row in rows}
+    return pa.Table.from_pylist([by_key[key] for key in keys], schema=table.schema)

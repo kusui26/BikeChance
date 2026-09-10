@@ -29,6 +29,14 @@ FORMAT_VERSION: Final[int] = 1
 #: 確率を丸める桁。0.0001 は確率 ×1000 の分解能より細かい。
 RATE_DIGITS: Final[int] = 6
 
+#: `model_versions.kind` に入る値。
+KIND: Final[str] = "baseline"
+
+
+def artifact_path(model_version: str) -> str:
+    """`models` バケット内のパス。**版がそのままファイル名**になる。"""
+    return f"{KIND}/{model_version}.json.gz"
+
 
 @dataclass(frozen=True)
 class TargetModel:
