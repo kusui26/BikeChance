@@ -24,6 +24,7 @@ from bikechance_ml.baselines.artifact import Artifact, to_bytes
 from bikechance_ml.eval.dataset import to_samples
 from bikechance_ml.features.constants import HORIZONS_MIN, MAX_STALENESS_S
 from bikechance_ml.features.grid import JST
+from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.fit_baseline import build_artifact
 from bikechance_ml.jobs.infer import (
     MODEL_BUCKET,
@@ -216,6 +217,7 @@ class FakePort:
     details: list[Mapping[str, object] | None] = field(default_factory=list)
     written: list[Mapping[str, object]] = field(default_factory=list)
     reads: list[tuple[str, datetime, datetime]] = field(default_factory=list)
+    weather_reads: list[tuple[datetime, datetime]] = field(default_factory=list)
     downloads: list[str] = field(default_factory=list)
     body: bytes | None = None
     next_id: int = 1
@@ -235,6 +237,11 @@ class FakePort:
 
     def list_holidays(self) -> tuple[date, ...]:
         return ()
+
+    def list_weather(self, start: datetime, end: datetime) -> tuple[WeatherRow, ...]:
+        """**頼まれた窓だけ**返す（どの窓を読みに来たかは `weather_reads` に残る）。"""
+        self.weather_reads.append((start, end))
+        return serving.weather_within(serving.weather_rows(AT), start, end)
 
     def download(self, bucket: str, path: str) -> bytes | None:
         if bucket == MODEL_BUCKET:
@@ -410,6 +417,7 @@ def test_the_record_does_not_repeat_the_columns() -> None:
         "features_ms",
         "excluded",
         "reference_date",
+        "weather_issues",
     }
     assert to_record(_summary(cpu_ms=42))["cpu_ms"] == 42
 

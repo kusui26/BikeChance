@@ -25,7 +25,7 @@ from typing import Final
 
 import pyarrow as pa
 
-from bikechance_ml.features import build, neighbors, static
+from bikechance_ml.features import build, neighbors, static, weather
 from bikechance_ml.features.grid import JST
 from bikechance_ml.features.reference import (
     NeighborRow,
@@ -33,11 +33,13 @@ from bikechance_ml.features.reference import (
     StationGeoRow,
     SystemReference,
 )
+from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 
 DIRECTORY: Final[Path] = Path(__file__).resolve().parent / "fixtures" / "features_golden"
 SNAPSHOTS: Final[Path] = DIRECTORY / "snapshots.csv"
 REFERENCE: Final[Path] = DIRECTORY / "reference.json"
+WEATHER: Final[Path] = DIRECTORY / "weather.json"
 EXPECTED: Final[Path] = DIRECTORY / "expected.csv"
 
 #: 基準日（JST）。2026-09-07 は月曜。
@@ -152,6 +154,26 @@ def _optional_float(value: object) -> float | None:
     return None if value is None else float(str(value))
 
 
+def load_weather_rows() -> tuple[WeatherRow, ...]:
+    """`weather.json` を `weather_hourly` の行と同じ形にする。
+
+    **行のまま返す。** 推論側は「`available_at` が窓に入るぶんだけ」を組み立て直すので
+    （`test_features_parity.py`）、絞れる形で持っておく必要がある。
+    """
+    document = json.loads(WEATHER.read_text(encoding="utf-8"))
+    return tuple(
+        WeatherRow(
+            cell_lat_idx=int(cell["lat_idx"]),
+            cell_lon_idx=int(cell["lon_idx"]),
+            issued_hour=datetime.fromisoformat(issue["issued_hour"]).astimezone(UTC),
+            available_at=datetime.fromisoformat(issue["available_at"]).astimezone(UTC),
+            values={name: list(cell[name]) for name in weather.SERIES},
+        )
+        for issue in document["issues"]
+        for cell in issue["cells"]
+    )
+
+
 def build_inputs() -> build.DayInputs:
     """フィクスチャから組み立ての入力を作る。**テストと生成器で同じ道を通す。**"""
     systems, estimates, holidays = load_reference()
@@ -161,4 +183,5 @@ def build_inputs() -> build.DayInputs:
         day=DAY,
         reference=build.Reference(facts=facts, links=links, holidays=holidays),
         table=load_snapshots(),
+        weather=weather.to_weather(load_weather_rows()),
     )

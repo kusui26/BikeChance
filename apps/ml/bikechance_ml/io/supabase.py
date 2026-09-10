@@ -25,7 +25,10 @@ from bikechance_ml.features.reference import (
     StationGeoRow,
     StationStatusRow,
 )
+from bikechance_ml.features.weather import SERIES as WEATHER_SERIES
+from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
+from bikechance_ml.jobs.weather_archive import PendingIssue
 from bikechance_ml.json_shape import (
     ShapeError,
     as_bool,
@@ -54,6 +57,9 @@ NEIGHBOR_PAGE_SIZE: Final[int] = 10_000
 
 #: スナップショットの 1 ページ。1 行が 5,800〜14,900 要素の配列 4 本なので小さく刻む。
 SNAPSHOT_PAGE_SIZE: Final[int] = 24
+
+#: 予報の 1 ページ。1 行は 8 要素の配列 3 本なので、台帳と同じくらいの大きさで刻める。
+WEATHER_PAGE_SIZE: Final[int] = 5_000
 
 #: ページ送りの上限。`offset` が効かない相手に当たっても無限に回らないための歯止め。
 #: 台帳 14,900 件でも 4 往復で終わるので、100 は十分に余裕がある。
@@ -386,6 +392,54 @@ class SupabaseIo:
         )
         return as_int(response.json(), "upsert_forecasts")
 
+    # ── 天気（W4 プラン §6.4）────────────────────────────────
+    def list_weather_pending(self, since: datetime, limit: int) -> tuple[PendingIssue, ...]:
+        """まだ取り込んでいない発行を、古い順に。**下限を必ず渡す。**
+
+        `v_weather_pending` は時刻で切っていない（保守の保持期間と二重管理にしない
+        ため。0037）ので、**保持期間より短い窓を呼ぶ側が添える**。添えないと、
+        30 日で消えた発行が「未処理」として蘇り、取り込みと削除を繰り返す。
+        """
+        rows = self._rows(
+            "/rest/v1/v_weather_pending",
+            {
+                "select": "hour_epoch_s,issued_hour,available_at,n_cells,n_loaded",
+                "available_at": f"gte.{_iso_z(since)}",
+                "order": "available_at.asc",
+                "limit": str(limit),
+            },
+            "v_weather_pending",
+        )
+        return tuple(_to_pending_issue(row) for row in rows)
+
+    def list_weather(self, start: datetime, end: datetime) -> tuple[WeatherRow, ...]:
+        """`available_at` が半開区間 `[start, end)` に入る予報。
+
+        **これは読み込み量の都合であって、リークを止める規律ではない。**
+        どの発行を使ってよいかを決めるのは `features/weather.py` の 1 か所である。
+        """
+        rows = self._paged(
+            "/rest/v1/weather_hourly",
+            {
+                "select": "cell_lat_idx,cell_lon_idx,issued_hour,available_at,"
+                + ",".join(WEATHER_SERIES),
+                "and": f"(available_at.gte.{_iso_z(start)},available_at.lt.{_iso_z(end)})",
+                "order": "available_at.asc,cell_lat_idx.asc,cell_lon_idx.asc",
+            },
+            WEATHER_PAGE_SIZE,
+            "weather_hourly",
+        )
+        return tuple(_to_weather_row(row) for row in rows)
+
+    def upsert_weather_hourly(self, rows: Sequence[Mapping[str, object]]) -> int:
+        """予報をまとめて書く。**同じ発行を入れ直しても結果は変わらない。**"""
+        if not rows:
+            return 0
+        response = self._request(
+            "POST", "/rest/v1/rpc/upsert_weather_hourly", "rest", json={"p_rows": list(rows)}
+        )
+        return as_int(response.json(), "upsert_weather_hourly")
+
     # ── 書き込み ────────────────────────────────────────────────
     def upload_parquet(self, path: str, body: bytes) -> None:
         """同じパスに上書きする。同じ時間帯を 2 回処理しても結果が変わらない。"""
@@ -440,6 +494,34 @@ class SupabaseIo:
             "rest",
             json={"p_id": run_id, "p_status": status, "p_detail": dict(detail)},
         )
+
+
+def _to_pending_issue(row: object) -> PendingIssue:
+    fields = as_dict(row, "v_weather_pending")
+    return PendingIssue(
+        hour_epoch_s=as_int(field(fields, "hour_epoch_s", "pending"), "hour_epoch_s"),
+        issued_hour=_to_datetime(as_str(field(fields, "issued_hour", "pending"), "issued_hour")),
+        available_at=_to_datetime(as_str(field(fields, "available_at", "pending"), "available_at")),
+        n_cells=as_int(field(fields, "n_cells", "pending"), "n_cells"),
+        n_loaded=as_int(field(fields, "n_loaded", "pending"), "n_loaded"),
+    )
+
+
+def _to_weather_row(row: object) -> WeatherRow:
+    fields = as_dict(row, "weather_hourly")
+    return WeatherRow(
+        cell_lat_idx=as_int(field(fields, "cell_lat_idx", "weather"), "cell_lat_idx"),
+        cell_lon_idx=as_int(field(fields, "cell_lon_idx", "weather"), "cell_lon_idx"),
+        issued_hour=_to_datetime(as_str(field(fields, "issued_hour", "weather"), "issued_hour")),
+        available_at=_to_datetime(as_str(field(fields, "available_at", "weather"), "available_at")),
+        values={name: _nullable_floats(fields, name) for name in WEATHER_SERIES},
+    )
+
+
+def _nullable_floats(fields: Mapping[str, object], name: str) -> list[float | None]:
+    """`real[]` の 1 列。**要素の null は null のまま**（0 で埋めない）。"""
+    items = as_list(field(fields, name, "weather"), name)
+    return [None if one is None else as_float(one, f"weather.{name}") for one in items]
 
 
 def _to_station_status(row: object) -> StationStatusRow:

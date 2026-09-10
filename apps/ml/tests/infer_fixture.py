@@ -4,7 +4,8 @@
   1. 前日の**参照スナップショット**（Storage の Parquet 2 本）
   2. 自系統の **`status_snapshots` の 2 つの窓**
   3. 他系統の**直近 1 本**
-を読む。ここではその 3 つを、本物と同じ形で組み立てる。
+  4. **`at` までに入手できた予報**（PR D）
+を読む。ここではその 4 つを、本物と同じ形で組み立てる。
 
 **形を偽らない。** 参照スナップショットは `features/reference_snapshot.py` の
 関数で作り、観測は `jobs/snapshot_table.py` の `Snapshot` で持つ。だから
@@ -17,7 +18,7 @@ from typing import Final
 
 import pyarrow as pa
 
-from bikechance_ml.features.constants import GRID_MINUTES
+from bikechance_ml.features.constants import GRID_MINUTES, WEATHER_LEAD_HOURS
 from bikechance_ml.features.grid import reference_path
 from bikechance_ml.features.reference import (
     NeighborRow,
@@ -31,6 +32,8 @@ from bikechance_ml.features.reference_snapshot import (
     to_neighbors_table,
     to_stations_table,
 )
+from bikechance_ml.features.weather import SERIES as WEATHER_SERIES
+from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.build_features import to_parquet_bytes
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
@@ -46,6 +49,12 @@ STATIONS: Final[tuple[tuple[str, int, int, int], ...]] = (
 FETCH_DELAY: Final[timedelta] = timedelta(seconds=40)
 
 SYSTEMS: Final[tuple[str, ...]] = ("hellocycling", "docomo-cycle")
+
+#: 仕込みのポート（lat 35.68〜35.682 / lon 139.76）が落ちる気象格子。
+WEATHER_CELL: Final[tuple[int, int]] = (714, 2236)
+
+#: 予報を入手する時刻（毎正時からの分）。本番の実測は 17.6 分（`v_weather_files`）。
+WEATHER_DELAY: Final[timedelta] = timedelta(minutes=18)
 
 
 def ledger(station_ids: Sequence[str]) -> tuple[StationRow, ...]:
@@ -149,6 +158,45 @@ def reference_files(
         reference_path(day, STATIONS_NAME): to_parquet_bytes(stations),
         reference_path(day, NEIGHBORS_NAME): to_parquet_bytes(neighbors),
     }
+
+
+def weather_rows(at: datetime, hours: int = 4) -> tuple[WeatherRow, ...]:
+    """`at` の手前 `hours` 時間ぶんの発行。**値は発行時刻から読める形**にしてある。
+
+    `precip_mm[k] = 発行の時 / 10 + k` など（ゴールデンのフィクスチャと同じ作り）。
+    どの発行のどの時間帯を引いたかが、値を見れば分かる。
+    """
+    top = at.replace(minute=0, second=0, microsecond=0)
+    made: list[WeatherRow] = []
+    for back in range(hours):
+        issued = top - timedelta(hours=back)
+        made.append(
+            WeatherRow(
+                cell_lat_idx=WEATHER_CELL[0],
+                cell_lon_idx=WEATHER_CELL[1],
+                issued_hour=issued,
+                available_at=issued + WEATHER_DELAY,
+                values=_weather_values(issued.hour),
+            )
+        )
+    return tuple(sorted(made, key=lambda one: one.available_at))
+
+
+def _weather_values(hour: int) -> Mapping[str, list[float | None]]:
+    leads = range(WEATHER_LEAD_HOURS)
+    made: dict[str, list[float | None]] = {
+        "precip_mm": [round(hour / 10 + k, 2) for k in leads],
+        "temp_c": [round(20 + hour / 100 + k * 0.5, 2) for k in leads],
+        "wind_kmh": [round(5 + hour / 100 + k, 2) for k in leads],
+    }
+    return {name: made[name] for name in WEATHER_SERIES}
+
+
+def weather_within(
+    made: Sequence[WeatherRow], start: datetime, end: datetime
+) -> tuple[WeatherRow, ...]:
+    """半開区間で絞る。**本物の `list_weather` と同じ切り方。**"""
+    return tuple(one for one in made if start <= one.available_at < end)
 
 
 def day_of(path: str) -> date:
