@@ -6,6 +6,7 @@
 """
 
 from datetime import date, datetime
+from typing import Final
 
 import numpy as np
 import pytest
@@ -13,10 +14,30 @@ import pytest
 from bikechance_ml.eval import harness, report
 from bikechance_ml.eval.dataset import to_samples
 from bikechance_ml.eval.split import mask_of, split_days
+from bikechance_ml.features.coverage import Coverage
 from bikechance_ml.features.grid import JST
+from bikechance_ml.features.schema import WEATHER_COLUMNS
 from tests import eval_fixture as fixture
 
 DAY0, DAY1, DAY2 = fixture.DAYS
+
+
+def _coverage(rows: int, ratio: float) -> Coverage:
+    """その割合になる数え上げ。**行数も日ごとに変える**（取り違えを見えるようにする）。"""
+    covered = round(rows * ratio)
+    return Coverage(rows=rows, covered=covered, by_column=dict.fromkeys(WEATHER_COLUMNS, covered))
+
+
+#: 学習 100% / **パージ 0%** / 検証 100%。分割は `split_days(DAYS, 1, 1)`。
+#: **パージ日まで数えていれば差が 100 ポイントになる**ので、0 が出れば数えていない。
+WEATHER: Final[dict[date, Coverage]] = dict(
+    zip(fixture.DAYS, (_coverage(100, 1.0), _coverage(200, 0.0), _coverage(300, 1.0)), strict=True)
+)
+
+#: **学習日だけ天気が無い。** 止める側の見え方（09-07 と 09-09 を混ぜた形）。
+MIXED: Final[dict[date, Coverage]] = dict(
+    zip(fixture.DAYS, (_coverage(100, 0.0), _coverage(200, 1.0), _coverage(300, 1.0)), strict=True)
+)
 
 
 def _day_of(row: dict[str, object]) -> date:
@@ -92,7 +113,7 @@ def test_b2_fallback_ratio_is_reported() -> None:
 
 
 def test_report_renders_the_judgement_first() -> None:
-    text = report.render_markdown(OUTCOME, "検査", "但し書き")
+    text = report.render_markdown(OUTCOME, "検査", "但し書き", weather=WEATHER)
     assert text.startswith("# 検査")
     assert "## 1. 判定" in text
     assert "但し書き" in text
@@ -106,7 +127,7 @@ def test_report_marks_unjudgeable_buckets() -> None:
         for day in fixture.DAYS
         for station in ("a", "b")
     ]
-    text = report.render_markdown(build(rows), "検査", "")
+    text = report.render_markdown(build(rows), "検査", "", weather=WEATHER)
     assert "判定対象外" in text
 
 
@@ -116,8 +137,45 @@ def test_report_warns_when_b2_is_really_b1() -> None:
         for index, day in enumerate(fixture.DAYS)
         for station in ("a", "b")
     ]
-    text = report.render_markdown(build(rows), "検査", "")
+    text = report.render_markdown(build(rows), "検査", "", weather=WEATHER)
     assert "B2 は実質 B1 である" in text
+
+
+# ── §2 データの素性（W4 プラン §8.5.3、PR I）─────────────────
+def test_the_report_lists_the_days_and_their_weather() -> None:
+    """**何で測ったかを、数字の前に出す。** 役割・行数・被覆を日ごとに並べる。"""
+    text = report.render_markdown(OUTCOME, "検査", "但し書き", weather=WEATHER)
+    assert "## 2. データ（読んだ日と天気の被覆）" in text
+    assert "| 2026-09-07 | 学習 | 100 | 100.000% |" in text
+    assert "| 2026-09-08 | パージ | 200 | 0.000% |" in text
+    assert "| 2026-09-09 | 検証 | 300 | 100.000% |" in text
+
+
+def test_the_spread_ignores_the_purge_day() -> None:
+    """**パージ日は読むが捨てる。** 差は学習日と検証日だけで測る。
+
+    この仕掛けではパージ日だけ 0% なので、**数えていれば 100 ポイント**になる。
+    """
+    text = report.render_markdown(OUTCOME, "検査", "", weather=WEATHER)
+    assert "**学習と検証の被覆の差**：0.00 ポイント" in text
+    assert "**揃っている**" in text
+
+
+def test_a_mixed_period_is_called_out() -> None:
+    """**学習日だけ天気が無い**なら、そう書く（`fit_lightgbm` はここで止まる）。"""
+    text = report.render_markdown(OUTCOME, "検査", "", weather=MIXED)
+    assert "**学習と検証の被覆の差**：100.00 ポイント" in text
+    assert "**混ざっている**" in text
+
+
+def test_the_column_evenness_is_stated_either_way() -> None:
+    """**揃っているときも書く。** 黙ると「見ていない」と区別できない。"""
+    even = report.render_markdown(OUTCOME, "検査", "", weather=WEATHER)
+    assert "**4 列の欠けかた**：全日で一致" in even
+
+    uneven = {**WEATHER, DAY2: Coverage(rows=300, covered=10, by_column={"temp_c": 20})}
+    text = report.render_markdown(OUTCOME, "検査", "", weather=uneven)
+    assert "**4 列の欠けかた**：**2026-09-09 で列ごとに違う**" in text
 
 
 def test_split_failure_is_loud() -> None:
@@ -143,15 +201,15 @@ def test_an_extra_model_joins_every_table() -> None:
     """**合否はバケツ別で決める**（W3-16）ので、外から足したモデルもそこに並ぶ。"""
     outcome = _extra(scenario(), 0.5)
     assert outcome.models == ("B0", "B1", "B2", "B3", "LGBM")
-    text = report.render_markdown(outcome, "検査", "")
-    for heading in ("## 2.", "## 3.", "## 4.", "## 5."):
+    text = report.render_markdown(outcome, "検査", "", weather=WEATHER)
+    for heading in ("## 3.", "## 4.", "## 5.", "## 6."):
         block = text.split(heading)[1].split("\n##")[0]
         assert "LGBM" in block, f"{heading} に LGBM が出ていない"
 
 
 def test_the_tables_stay_rectangular() -> None:
     """**列の数が行と揃っている。** 見出しだけ増やして本文がずれる事故を止める。"""
-    text = report.render_markdown(_extra(scenario(), 0.5), "検査", "")
+    text = report.render_markdown(_extra(scenario(), 0.5), "検査", "", weather=WEATHER)
     for block in text.split("\n\n"):
         rows = [one for one in block.splitlines() if one.startswith("|")]
         if len(rows) < 3:

@@ -21,6 +21,11 @@ OpenMP が無く `import lightgbm` が落ちるため（§12 の 126）。**平�
 `Booster.predict` と同じ値を出すことを、成果物を書く前に照合する**
 （`refuse_if_different`）。1 つでも違えば書かない。
 
+**天気の被覆が日によって違えば、当てはめる前に止まる**（PR I）。`feature_set` は
+「列が在る」しか語らないので、同じ `v3` でも天気が 1 件も入っていない日がある
+（W4 プラン §8.5.3）。承知のうえで混ぜるなら `--allow-mixed-weather` を付ける
+——**付けた事実は `model_versions.metrics.weather` に残る。**
+
 **早期終了は使わない。** 開発プラン §7.2 は「検証セットで 100 ラウンド」と書いているが、
 それは 学習 → パージ → 検証 → テスト の 4 分割が取れる前提である。いまは完全な暦日が
 3 日しか無く、検証を早期終了に使うと**その集合で B3 と比べる意味が消える**（モデル選択に
@@ -43,10 +48,11 @@ from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import harness, report
 from bikechance_ml.eval.dataset import TARGETS, Samples, Target, to_samples
 from bikechance_ml.eval.split import DaySplit, mask_of, split_days
+from bikechance_ml.features import coverage
 from bikechance_ml.features.arrays import Bools, Float64
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.io.supabase import SupabaseIo, open_storage
-from bikechance_ml.jobs.evaluate_baselines import days_between, load_days
+from bikechance_ml.jobs.evaluate_baselines import Loaded, days_between, load_days
 from bikechance_ml.models import artifact as lightgbm_artifact
 from bikechance_ml.models import forest, matrix
 from bikechance_ml.models.registry import LIGHTGBM_KIND, MODEL_BUCKET
@@ -194,10 +200,25 @@ def predict_on(forests: Mapping[str, forest.Forest], built: matrix.Matrix) -> di
     return {name: lightgbm_artifact.predict(one, built) for name, one in forests.items()}
 
 
-def fit_and_score(
-    table: pa.Table, samples: Samples, split: DaySplit
-) -> tuple[Mapping[str, forest.Forest], harness.Outcome, Mapping[str, Checked]]:
+@dataclass(frozen=True)
+class Fitted:
+    """当てはめの結果ひとそろい。**一緒に旅するものを 1 つにまとめる。**
+
+    指標（`outcome`）・森の照合（`checks`）・入力の素性（`weather`）は、**登録簿にも
+    モデルカードにも評価の表にも**入る。別々の引数で配ると、足したときに片方だけに
+    入る——`inference_log` で実際にそうなった（W4 プラン §8.5.8）。
+    """
+
+    forests: Mapping[str, forest.Forest]
+    outcome: harness.Outcome
+    checks: Mapping[str, Checked]
+    #: 読んだ日ごとの天気の被覆（**パージ日も含む**。役割は `outcome.split` が持つ）
+    weather: Mapping[date, coverage.Coverage]
+
+
+def fit_and_score(loaded: Loaded, samples: Samples, split: DaySplit) -> Fitted:
     """当てはめて平たくして、**B3 と同じ検証行の上で**測る。"""
+    table = loaded.table
     fit_mask = mask_of(samples, split.fit)
     built = matrix.build(table.filter(pa.array(mask_of(samples, split.evaluate))))
     rows = verification_rows(built.values)
@@ -208,33 +229,47 @@ def fit_and_score(
         for target in TARGETS
     }
     forests = {name: one for name, (one, _) in made.items()}
-    outcome = harness.run(samples, split, {MODEL_NAME: predict_on(forests, built)})
-    return forests, outcome, {name: check for name, (_, check) in made.items()}
+    return Fitted(
+        forests=forests,
+        outcome=harness.run(samples, split, {MODEL_NAME: predict_on(forests, built)}),
+        checks={name: check for name, (_, check) in made.items()},
+        weather=loaded.weather,
+    )
 
 
-def to_metrics(outcome: harness.Outcome, checks: Mapping[str, Checked]) -> dict[str, object]:
+def to_metrics(fitted: Fitted) -> dict[str, object]:
     """`model_versions.metrics` に入れる要約。**全体の重み付き Brier と B3 との差。**
 
     **照合の結果も残す**（W4-19）。配信は木を numpy で歩くので、「その森が
     `Booster.predict` と同じ値を出すことを何行で確かめたか」は**登録簿に残すべき事実**である。
+
+    **天気の被覆も残す**（PR I）。`feature_set` は列が在ることしか語らないので、
+    **何割の行に天気が入っていたか**を日ごとに書く。`--allow-mixed-weather` で通した
+    場合も、**そのことは `spread_pp` と `max_spread_pp` の並びに出る**。
     """
-    rows = {
-        f"{one.slice.system}/{one.slice.target}": {
-            "n": one.n,
-            "b3": round(one.weighted["B3"].brier, 6),
-            "lgbm": round(one.weighted[MODEL_NAME].brier, 6),
-        }
-        for one in outcome.overall
-    }
+    outcome = fitted.outcome
     return {
         "split": outcome.split.describe(),
         "n_fit": outcome.n_fit,
         "n_eval": outcome.n_eval,
         "feature_set": FEATURE_SET,
         "num_boost_round": NUM_BOOST_ROUND,
-        "brier_weighted": rows,
-        "forest_check": _to_check_rows(checks),
+        "brier_weighted": _to_brier_rows(outcome),
+        "forest_check": _to_check_rows(fitted.checks),
+        "weather": _to_weather_rows(fitted),
         "caveat": "学習日が少ない。配線の確認であって精度の評価ではない（W4-07）",
+    }
+
+
+def _to_brier_rows(outcome: harness.Outcome) -> dict[str, object]:
+    """system × ターゲットの重み付き Brier を、**B3 と並べて**残す。"""
+    return {
+        f"{one.slice.system}/{one.slice.target}": {
+            "n": one.n,
+            "b3": round(one.weighted["B3"].brier, 6),
+            "lgbm": round(one.weighted[MODEL_NAME].brier, 6),
+        }
+        for one in outcome.overall
     }
 
 
@@ -245,6 +280,21 @@ def _to_check_rows(checks: Mapping[str, Checked]) -> dict[str, object]:
         "targets": {
             name: {"n_rows": one.n_rows, "max_gap": one.max_gap} for name, one in checks.items()
         },
+    }
+
+
+def _to_weather_rows(fitted: Fitted) -> dict[str, object]:
+    """天気の被覆を JSON にする。**許容も一緒に残す**（`_to_check_rows` と同じ作法）。
+
+    **「明示して通したか」という別の印は持たない。** `spread_pp` が `max_spread_pp`
+    を超えていれば、それが「通した」ということである。**印を別に持つと、印だけ
+    書き換えられる**（値そのものが証拠であるほうがよい）。
+    """
+    used = coverage.restrict(fitted.weather, fitted.outcome.split.used())
+    return {
+        "max_spread_pp": coverage.MAX_SPREAD_PP,
+        "spread_pp": round(coverage.spread_pp(used.values()), 4),
+        "by_day": {day.isoformat(): one.as_dict() for day, one in sorted(fitted.weather.items())},
     }
 
 
@@ -263,10 +313,7 @@ def build_artifact(
 
 
 def to_registration(
-    artifact: lightgbm_artifact.LightGbmArtifact,
-    outcome: harness.Outcome,
-    checks: Mapping[str, Checked],
-    card_path: str | None,
+    artifact: lightgbm_artifact.LightGbmArtifact, fitted: Fitted, card_path: str | None
 ) -> dict[str, object]:
     """`register_model_version` に渡す形。**`candidate` としてしか登録できない。**"""
     return {
@@ -276,7 +323,7 @@ def to_registration(
         "feature_set": artifact.feature_set,
         "artifact_path": lightgbm_artifact.artifact_path(artifact.model_version),
         "train_days": list(artifact.train_days),
-        "metrics": to_metrics(outcome, checks),
+        "metrics": to_metrics(fitted),
         "card_path": card_reference(card_path),
         "note": "W4 の PR E′。配線の確認（W4-07）。精度は問わない",
     }
@@ -314,7 +361,49 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--card", default=None, help="モデルカードの出力先")
     parser.add_argument("--upload", action="store_true", help="成果物を Storage に置く")
     parser.add_argument("--register", action="store_true", help="model_versions に登録する")
+    parser.add_argument(
+        "--allow-mixed-weather",
+        action="store_true",
+        help="天気の被覆が日で違っても当てはめる（**登録簿に残る**。W4 プラン §8.5.3）",
+    )
     return parser.parse_args(argv)
+
+
+def refuse_mixed_weather(
+    weather: Mapping[date, coverage.Coverage], split: DaySplit, *, allowed: bool
+) -> None:
+    """**被覆の違う日が混ざっていたら、当てはめる前に止める。**
+
+    止めるのは当てはめの**前**である（5 分かけてから捨てない）。数えるのは学習日と
+    検証日だけで、**パージ日は読むが捨てる**ので入れない（`DaySplit.used`）。
+
+    `--allow-mixed-weather` で通せるが、**通した事実は消えない**：
+    `model_versions.metrics.weather` に `spread_pp` と `max_spread_pp` が並ぶ。
+    """
+    used = coverage.restrict(weather, split.used())
+    if not allowed:
+        coverage.refuse_if_mixed(used)
+        return
+    print(f"天気の被覆が違うまま当てはめます: {coverage.describe(used)}", file=sys.stderr)
+
+
+def prepare(
+    loaded: Loaded, *, eval_days: int, purge_days: int, allow_mixed_weather: bool
+) -> tuple[Samples, DaySplit]:
+    """分割を決め、**当てはめの前に天気の門を通す**（PR I）。
+
+    門を `run` の中に直書きしないのは、**呼び出し側が呼ぶのをやめても気づけない**
+    からである（PR E′ で 1 度そうなった）。ここを通す限り、検査は本物の経路を見る。
+
+    **開く順も意味を持つ。** 分割 → 門 → `to_samples` の順にするのは、止めるなら
+    行を整数に直す前に止めたいため（3 日ぶんで 618 万行。実測では **1.1 秒**で止まる）。
+    """
+    split = split_days(loaded.days, eval_days, purge_days)
+    print(f"天気の被覆: {coverage.describe(loaded.weather)}", file=sys.stderr)
+    refuse_mixed_weather(loaded.weather, split, allowed=allow_mixed_weather)
+    samples = to_samples(loaded.table)
+    print(f"{split.describe()} / 全 {len(samples):,} 行", file=sys.stderr)
+    return samples, split
 
 
 def _write(path: str | None, text: str, label: str) -> None:
@@ -332,12 +421,15 @@ def run(argv: Sequence[str] | None = None) -> int:
     local = Path(options.local) if options.local else None
 
     with open_storage(read_storage_config()) as source:
-        table, found = _load(source, days, local)
-        samples = to_samples(table)
-        split = split_days(found, options.eval_days, options.purge_days)
-        print(f"{split.describe()} / 全 {len(samples):,} 行", file=sys.stderr)
-        forests, outcome, checks = fit_and_score(table, samples, split)
-        artifact = build_artifact(forests, split.fit)
+        loaded = _load(source, days, local)
+        samples, split = prepare(
+            loaded,
+            eval_days=options.eval_days,
+            purge_days=options.purge_days,
+            allow_mixed_weather=options.allow_mixed_weather,
+        )
+        fitted = fit_and_score(loaded, samples, split)
+        artifact = build_artifact(fitted.forests, split.fit)
         body = lightgbm_artifact.to_bytes(artifact)
         if options.upload:
             source.upload(
@@ -347,23 +439,23 @@ def run(argv: Sequence[str] | None = None) -> int:
                 lightgbm_artifact.CONTENT_TYPE,
             )
         if options.register:
-            source.register_model_version(to_registration(artifact, outcome, checks, options.card))
+            source.register_model_version(to_registration(artifact, fitted, options.card))
 
     if options.out:
         Path(options.out).write_bytes(body)
     _write(
         options.report,
-        report.render_markdown(outcome, _title(artifact), _NOTE, "fit_lightgbm"),
+        report.render_markdown(
+            fitted.outcome, _title(artifact), _NOTE, "fit_lightgbm", weather=fitted.weather
+        ),
         "評価",
     )
-    _write(options.card, render_card(artifact, outcome, checks), "モデルカード")
+    _write(options.card, render_card(artifact, fitted), "モデルカード")
     print(f"{artifact.describe()} / {len(body):,} バイト")
     return 0
 
 
-def _load(
-    source: SupabaseIo, days: Sequence[date], local: Path | None
-) -> tuple[pa.Table, tuple[date, ...]]:
+def _load(source: SupabaseIo, days: Sequence[date], local: Path | None) -> Loaded:
     """**全列を読む。** `evaluate_baselines` は 11 列に絞るが、LightGBM は 62 列を使う。"""
     return load_days(None if local else source, days, local, columns=None)
 
@@ -375,8 +467,8 @@ def _title(artifact: lightgbm_artifact.LightGbmArtifact) -> str:
 _NOTE: Final[str] = (
     "> **⚠️ この表は「配線が通っているか」の確認であって、精度の評価ではない**（W4-07）。\n>\n"
     "> 完全な暦日がまだ少なく、学習・パージ・検証を切ると**学習に使える日が 1〜2 日**しか\n"
-    "> 残らない。**天気の 4 列は 2026-09-08 以降しか埋まらない**ので（W4 プラン §5.4）、\n"
-    "> 学習日と検証日で入力の分布そのものが違う。\n>\n"
+    "> 残らない。**天気がどれだけ入っていたかは §2 に出る**——`feature_set` は列が在る\n"
+    "> ことしか語らず、同じ `v3` でも 0% の日と 99.98% の日がある（W4 プラン §8.5.3）。\n>\n"
     "> **早期終了を使っていない**（本数は固定）。検証集合をモデル選択に使うと、\n"
     "> その集合で B3 と比べる意味が消えるためである。\n>\n"
     "> 測り直しは **9/16 以降**（完全な暦日が 9 日になり、学習 6 日・パージ 1 日・"
@@ -415,6 +507,22 @@ def _judgement_lines(outcome: harness.Outcome) -> list[str]:
     ]
 
 
+def _weather_limit(fitted: Fitted) -> str:
+    """カードの「限界」に**測った数字**を書く。**日付を決め打ちにしない。**
+
+    以前は「天気は 2026-09-08 以降しか無い」と書いてあった。**日付は動くのに文章は
+    動かない**ので、貯まった日で当てはめ直したあとも同じ但し書きが残る。
+    """
+    used = coverage.restrict(fitted.weather, fitted.outcome.split.used())
+    spread = coverage.spread_pp(used.values())
+    if spread > coverage.MAX_SPREAD_PP:
+        return (
+            f"- **天気の被覆が学習日と検証日で {spread:.2f} ポイント違う**"
+            f"（許容 {coverage.MAX_SPREAD_PP}）。`--allow-mixed-weather` で通してある"
+        )
+    return f"- **天気の被覆は揃っている**（学習日と検証日の差 {spread:.2f} ポイント）"
+
+
 def _verification_lines(checks: Mapping[str, Checked]) -> list[str]:
     """**配信の実装が学習と同じ値を出すことの確認**（W4-19）。カードに必ず載せる。
 
@@ -441,13 +549,10 @@ def _verification_lines(checks: Mapping[str, Checked]) -> list[str]:
     return lines
 
 
-def render_card(
-    artifact: lightgbm_artifact.LightGbmArtifact,
-    outcome: harness.Outcome,
-    checks: Mapping[str, Checked],
-) -> str:
+def render_card(artifact: lightgbm_artifact.LightGbmArtifact, fitted: Fitted) -> str:
     """モデルカード（開発プラン §7.3）。**登録の前提**なので、ここで必ず作る。"""
-    metrics = to_metrics(outcome, checks)
+    outcome = fitted.outcome
+    metrics = to_metrics(fitted)
     lines = [
         f"# モデルカード：{artifact.model_version}",
         "",
@@ -465,7 +570,14 @@ def render_card(
         f"節 {', '.join(f'{name} {one.n_nodes:,}' for name, one in artifact.forests.items())} |",
         f"| 作成 | {artifact.created_at} |",
         "",
-        *_verification_lines(checks),
+        "## 学習に使ったデータ",
+        "",
+        "**`feature_set` は「列が在る」しか語らない**（W4 プラン §8.5.3）。何割の行に"
+        "天気が入っていたかを日ごとに出す。",
+        "",
+        *report.weather_block(fitted.weather, outcome.split),
+        "",
+        *_verification_lines(fitted.checks),
         "## 指標（全体、重み付き Brier）",
         "",
         "| system / ターゲット | n | B3 | LightGBM | 差 |",
@@ -495,8 +607,7 @@ def render_card(
             "## 既知の限界",
             "",
             "- **学習日が少ない。** 完全な暦日が 3 日しか無く、パージを挟むと学習は 1〜2 日になる",
-            "- **天気は 2026-09-08 以降しか無い**（W4 プラン §5.4）。学習日と検証日で"
-            "入力の分布が違う",
+            _weather_limit(fitted),
             "- **早期終了を使っていない**（本数を固定）。検証集合をモデル選択に使わないため",
             "- **校正していない。** ECE は測るが isotonic は当てていない（開発プラン §7.4、W5）",
             "- **履歴プロファイルが無い**（`prof_*`。過去 28 日が要る。W5）",

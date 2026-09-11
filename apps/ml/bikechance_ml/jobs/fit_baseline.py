@@ -97,10 +97,12 @@ def run(argv: Sequence[str] | None = None) -> int:
     local = Path(options.local) if options.local else None
 
     with open_storage(read_storage_config()) as source:
-        table, found = load_days(None if local else source, days, local)
-        samples = to_samples(table)
-        ports = _port_names(table)
-        artifact = build_artifact(samples, ports, found)
+        loaded = load_days(None if local else source, days, local)
+        samples = to_samples(loaded.table)
+        ports = _port_names(loaded.table)
+        # **天気の被覆は見ない。** ベースラインが読むのは 6 列で、天気はその中に無い
+        # （`baselines/` は `Samples` しか触らない）。混ざっても値が変わらない
+        artifact = build_artifact(samples, ports, loaded.days)
         body = to_bytes(artifact)
         if options.upload:
             source.upload(MODEL_BUCKET, artifact_path(artifact.model_version), body, CONTENT_TYPE)

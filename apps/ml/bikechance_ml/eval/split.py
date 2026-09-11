@@ -37,6 +37,14 @@ class DaySplit:
     purge: tuple[date, ...]
     evaluate: tuple[date, ...]
 
+    def used(self) -> tuple[date, ...]:
+        """**当てはめと検証に使う日。** パージ日は読むが捨てるので入れない。
+
+        入力の素性（天気の被覆など）を突き合わせるとき、捨てる日まで数えると
+        **鳴かなくてよいところで鳴く**（`features/coverage.py`）。
+        """
+        return (*self.fit, *self.evaluate)
+
     def describe(self) -> str:
         return (
             f"学習 {_span(self.fit)}（{len(self.fit)} 日）/ "
