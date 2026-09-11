@@ -10,7 +10,7 @@
 -- **行単位の検査は必ず `system_id` で絞る。** 他のデータが混ざっていても結果が変わらないように。
 
 begin;
-select plan(43);
+select plan(44);
 
 -- ────────────────────────────────────────────────────────────────
 -- 権限
@@ -30,12 +30,21 @@ select is(
       and has_table_privilege('anon', c.oid, 'select')),
   0, 'anon が select できる「テーブル」は 1 つも無い');
 
+-- **数と名前の両方を固定する。** 数だけだと、1 枚消して 1 枚足したときに素通りする。
 select is(
   (select count(*)::int
      from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'v'
       and has_table_privilege('anon', c.oid, 'select')),
-  2, 'anon が select できる「ビュー」はちょうど 2 つ');
+  3, 'anon が select できる「ビュー」はちょうど 3 つ（0039 で v1_station_neighbors を足した）');
+
+select is(
+  (select string_agg(c.relname, ',' order by c.relname)
+     from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind = 'v'
+      and has_table_privilege('anon', c.oid, 'select')),
+  'v1_feeds,v1_station_neighbors,v1_stations_current',
+  '公開しているのはこの 3 枚（名前も固定する）');
 
 select ok(not has_table_privilege('anon', 'public.station_status_latest', 'select'),
           'anon は station_status_latest を読めない');

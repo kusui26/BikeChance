@@ -20,6 +20,7 @@ import {
   feedRowSchema,
   stationRowSchema,
   systemFilters,
+  type Filter,
 } from "./view-query";
 
 const BBOX = { west: 139.76, south: 35.67, east: 139.78, north: 35.69 };
@@ -113,10 +114,13 @@ describe("bboxFilters", () => {
 
   it("下限は gte、上限は lte（境界のポートを落とさない）", () => {
     const filters = bboxFilters(BBOX);
-    expect(filters.filter((filter) => filter.op === "gte").map((f) => f.value)).toEqual([
-      BBOX.south,
-      BBOX.west,
-    ]);
+    // `filter` は共用体を絞らないので、型ガードで「範囲の条件」だけを取り出す
+    const isRange = (
+      filter: Filter,
+    ): filter is Extract<Filter, { op: "gte" | "lte"; value: number }> =>
+      filter.op === "gte" || filter.op === "lte";
+    const lower = filters.filter(isRange).filter((filter) => filter.op === "gte");
+    expect(lower.map((filter) => filter.value)).toEqual([BBOX.south, BBOX.west]);
   });
 });
 
@@ -155,9 +159,15 @@ describe("行の検査", () => {
     expect(stationRowSchema.safeParse(unseen).success).toBe(true);
   });
 
-  it("座標と is_present は NULL を許さない", () => {
-    // bbox で絞った結果しか読まないので座標は必ずある。無い＝ビューか問い合わせの誤り
-    expect(stationRowSchema.safeParse({ ...stationRow, lat: null }).success).toBe(false);
+  it("**座標は NULL を許す**（ID で引くと座標の無いポートが出てくる）", () => {
+    // bbox で引けば範囲比較で外れるが、`/v1/trip-check` は ID で引く。
+    // 実測（2026-09-11、本番）で座標の無いポートは 10 件あり、うち 1 件は予測も持っていた。
+    // **落ちているはずを型に書かない**（`hasLocation` で明示的に外す）
+    expect(stationRowSchema.safeParse({ ...stationRow, lat: null }).success).toBe(true);
+    expect(stationRowSchema.safeParse({ ...stationRow, lon: null }).success).toBe(true);
+  });
+
+  it("is_present は NULL を許さない（ビューが必ず入れる）", () => {
     expect(stationRowSchema.safeParse({ ...stationRow, is_present: null }).success).toBe(false);
   });
 

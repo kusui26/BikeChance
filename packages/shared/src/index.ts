@@ -6,4 +6,5 @@ export * from "./constants";
 export * from "./forecast";
 export * from "./freshness";
 export * from "./storage-path";
+export * from "./trip";
 export * from "./weather-path";

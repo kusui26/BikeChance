@@ -23,6 +23,14 @@ export const PROBLEM_CODES = [
   "arrival_conflict",
   "arrival_malformed",
   "arrival_out_of_range",
+  // `/v1/trip-check`（W4 プラン §6.7）
+  "station_missing",
+  "unknown_station",
+  "same_station",
+  "depart_missing",
+  "ride_malformed",
+  "ride_out_of_range",
+  "station_location_missing",
   "upstream_unavailable",
 ] as const;
 
@@ -39,6 +47,13 @@ const TITLES: Readonly<Record<ProblemCode, string>> = {
   arrival_conflict: "at と in_min は同時に指定できません",
   arrival_malformed: "到着時刻の形式が正しくありません",
   arrival_out_of_range: "到着時刻が予測できる範囲の外です",
+  station_missing: "ポートが指定されていません",
+  unknown_station: "未知のポートです",
+  same_station: "出発と到着が同じポートです",
+  depart_missing: "出発時刻が指定されていません",
+  ride_malformed: "乗車時間の形式が正しくありません",
+  ride_out_of_range: "乗車時間が範囲外です",
+  station_location_missing: "ポートの座標がありません",
   upstream_unavailable: "データベースに接続できません",
 };
 
