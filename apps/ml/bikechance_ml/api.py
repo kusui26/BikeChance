@@ -24,8 +24,9 @@ from fastapi.responses import JSONResponse
 from bikechance_ml import __version__
 from bikechance_ml.auth import is_authorized
 from bikechance_ml.config import MissingConfigError, read_config
+from bikechance_ml.features.grid import jst_yesterday
 from bikechance_ml.io.supabase import SupabaseIo, open_supabase
-from bikechance_ml.jobs.build_reference import ReferencePort, build_and_upload, yesterday
+from bikechance_ml.jobs.build_reference import ReferencePort, build_and_upload
 from bikechance_ml.jobs.compact import CompactPort, compact_hour
 from bikechance_ml.jobs.compact import to_detail as compact_detail
 from bikechance_ml.jobs.infer import InferPort, run_inference
@@ -164,7 +165,7 @@ def build_app(
 
         now = datetime.now(UTC)
         try:
-            day = date.fromisoformat(date_text) if date_text else yesterday(now)
+            day = date.fromisoformat(date_text) if date_text else jst_yesterday(now)
         except ValueError:
             return _problem(400, "invalid_date", "date は YYYY-MM-DD（JST の暦日）です。")
 

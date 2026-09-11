@@ -45,6 +45,15 @@ def jst_date(at: datetime) -> date:
     return at.astimezone(JST).date()
 
 
+def jst_yesterday(now: datetime) -> date:
+    """**JST の昨日。** 日次ジョブが「前日ぶん」を作るときの既定の対象。
+
+    参照スナップショット（05:00 JST）も学習サンプル（06:00 JST）も、**前日ぶん**を
+    作る。どちらも JST の暦日で切るので、ここで 1 か所にまとめる。
+    """
+    return jst_date(now) - timedelta(days=1)
+
+
 def jst_minute_of_day(at: datetime) -> int:
     """JST の 0 時からの経過分（0〜1439）。"""
     local = at.astimezone(JST)
