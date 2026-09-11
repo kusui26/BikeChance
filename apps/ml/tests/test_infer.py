@@ -12,8 +12,9 @@ PR C から、除外も暦も**学習と同じ経路**（`build_now`）が決め
 
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
+from typing import Final
 
 import pyarrow as pa
 import pytest
@@ -22,11 +23,13 @@ from fastapi.testclient import TestClient
 from bikechance_ml.api import build_app
 from bikechance_ml.baselines.artifact import Artifact, artifact_path, to_bytes
 from bikechance_ml.eval.dataset import to_samples
-from bikechance_ml.features.constants import HORIZONS_MIN, MAX_STALENESS_S
+from bikechance_ml.features.build import NowStats
+from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN, MAX_STALENESS_S
 from bikechance_ml.features.grid import JST
 from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.fit_baseline import build_artifact
 from bikechance_ml.jobs.infer import (
+    IN_COLUMNS,
     Forecast,
     InferSummary,
     batches,
@@ -462,10 +465,26 @@ def test_the_record_does_not_repeat_the_columns() -> None:
         "excluded",
         "reference_date",
         "weather_issues",
+        "stations_without_weather",
+        "stations_unreferenced",
+        "feature_set",
         "model_kind",
         "model_feature_set",
     }
     assert to_record(_summary(cpu_ms=42))["cpu_ms"] == 42
+
+
+def test_the_record_is_the_response_minus_the_columns() -> None:
+    """**一覧は 1 つだけ。** 記録は応答から列に在るものを落としたものである。
+
+    以前は応答と記録で別々に欄を並べていたので、**片方に足してもう片方を忘れる道**が
+    あった（W4 プラン §8.5.8）。ここで「射影である」ことを固定しておけば、
+    次に欄を足したときも両方に入る。
+    """
+    summary = _summary(cpu_ms=42)
+    detail = to_detail(summary)
+    assert set(to_record(summary)) == set(detail) - IN_COLUMNS
+    assert set(detail) >= IN_COLUMNS, "列の側の鍵が応答に無い（名前を変えたら両方直す）"
 
 
 def _summary(*, cpu_ms: int) -> InferSummary:
@@ -497,6 +516,148 @@ def test_features_ms_is_reported() -> None:
     # **どの版の参照データを使ったか**も残す（00:00〜05:00 JST は 1 つ古い版になる）
     yesterday = (AT.astimezone(JST).date() - timedelta(days=1)).isoformat()
     assert recorded["reference_date"] == yesterday
+
+
+# ── 内訳がぜんぶ記録に届くこと（W4 プラン §8.5.8）───────────────
+#: `NowStats` の欄のうち、**わざと記録に出さないもの**と、その理由。
+#:
+#: **ここに書いていない欄は、記録に出ていなければならない。** 下の検査がそれを固定する。
+#: 出さない judgement をこの表に書かせることで、「うっかり落ちた」と「出さないと決めた」を
+#: 区別する——`stations_without_weather` が 1 度も記録に出なかったのは前者だった。
+NOT_RECORDED: Final[Mapping[str, str]] = {
+    "at": "基準時刻は `base_observed_at` と `generated_at` が列で持っている",
+    "predictable": "`stations - skipped` で出る（同じ数を 2 か所に置かない）",
+    "rows": "`n_rows` として列に在る",
+}
+
+
+class TroubledPort(FakePort):
+    """**0 でない内訳が出る代役。**
+
+    値が 0 のままだと、「本当に 0 だった」のか「配線を忘れて既定値のまま」なのかを
+    検査が区別できない。**本番で実際に起きている 2 つの状況**を作る。
+
+      * **天気を別の格子へずらす**（§12 の 119。要求した格子と計算した格子が食い違い、
+        4 ポートが恒久的に NULL になっている）→ 全ポートが「天気なし」になる
+      * **参照スナップショットから 1 ポート落とす**（§6.3c。新しいポートは載るまで
+        予測が出ない）→ 1 ポートが「未掲載」になる
+    """
+
+    def list_weather(self, start: datetime, end: datetime) -> tuple[WeatherRow, ...]:
+        rows = super().list_weather(start, end)
+        return tuple(replace(one, cell_lat_idx=one.cell_lat_idx + 10) for one in rows)
+
+    def download(self, bucket: str, path: str) -> bytes | None:
+        if bucket == MODEL_BUCKET:
+            return super().download(bucket, path)
+        self.downloads.append(path)
+        # 台帳の最後の 1 ポートを参照に載せない
+        return serving.reference_files(serving.day_of(path), self.rows[:-1]).get(path)
+
+
+def test_every_now_stat_reaches_the_record() -> None:
+    """**`NowStats` が計算した内訳は、出さないと決めたもの以外すべて記録に届く。**
+
+    `stations_without_weather`（PR D）も `stations_unreferenced`（PR C）も、
+    計算されて `as_dict()` にも入っていたのに、**`inference_log` には 1 度も出て
+    いなかった**（W4 プラン §8.5.8）。§6.3c は「数は `stations_unreferenced` に出る」と
+    書いていたが、出ていなかった。
+
+    **数え上げで固定する。** 欄を足して転送を忘れれば、ここが落ちる。
+    """
+    port = TroubledPort(body=to_bytes(ARTIFACT))
+    run_inference(port, "hellocycling", NOW)
+    recorded = port.details[0]
+    assert recorded is not None
+    missing = [
+        name
+        for name in NowStats.__dataclass_fields__
+        if name not in recorded and name not in NOT_RECORDED
+    ]
+    assert missing == [], f"計算しているのに記録に出ていない内訳: {missing}"
+
+
+def test_the_ports_without_weather_and_reference_are_recorded() -> None:
+    """**2 つの数が、0 でない値で記録に届く。**
+
+    **0 のままの代役では検査にならない**（配線を忘れても既定の 0 と区別できない）。
+    `TroubledPort` が本番で起きている 2 つの状況を作り、**その数がそのまま出る**ことを
+    確かめる。
+    """
+    port = TroubledPort(body=to_bytes(ARTIFACT))
+    summary = run_inference(port, "hellocycling", NOW)
+    recorded = port.details[0]
+    assert recorded is not None
+
+    # **計算元と突き合わせる。** 要約どうしで比べると、2 つを取り違えていても
+    # 記録と要約が同じ値になるので気づけない
+    _, ready = read_features(TroubledPort(body=to_bytes(ARTIFACT)), "hellocycling", AT, frozenset())
+    stats = ready.stats
+
+    # 仕込みが効いていること。**2 つが違う数**でなければ取り違えを見抜けない
+    assert stats.stations_without_weather > 0, "天気なしのポートを作れていない（仕込みの誤り）"
+    assert stats.stations_unreferenced > 0, "未掲載のポートを作れていない（仕込みの誤り）"
+    assert stats.stations_without_weather != stats.stations_unreferenced, (
+        "2 つが同じ数だと取り違えを見抜けない"
+    )
+
+    assert recorded["stations_without_weather"] == stats.stations_without_weather
+    assert recorded["stations_unreferenced"] == stats.stations_unreferenced
+    assert to_detail(summary)["stations_without_weather"] == stats.stations_without_weather
+    assert to_detail(summary)["stations_unreferenced"] == stats.stations_unreferenced
+
+
+def test_the_diagnostics_are_zero_when_nothing_is_wrong() -> None:
+    """**何も起きていなければ 0。** 常に 0 でない数を出しているのではないことを見る。"""
+    port = ready_port()
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.n_without_weather == 0
+    assert summary.n_unreferenced == 0
+
+
+def test_both_feature_sets_are_recorded() -> None:
+    """**作った版と、当てはめたときの版は別物で、両方要る**（W4-17）。
+
+    ベースラインが読む 6 列は v0 から v3 まで変わっていないので、`model_feature_set`
+    が v0 のまま `feature_set` が v3 になるのが正常である。**片方しか出さないと、
+    版を上げたことが記録から読めない。**
+    """
+    port = ready_port()
+    summary = run_inference(port, "hellocycling", NOW)
+    recorded = port.details[0]
+    assert recorded is not None
+    assert recorded["feature_set"] == FEATURE_SET
+    assert recorded["model_feature_set"] == summary.model_feature_set
+    assert "feature_set" in recorded and "model_feature_set" in recorded
+
+
+def test_the_dry_run_reports_the_same_diagnostics() -> None:
+    """**試し打ちでも同じ内訳が出る。** 組み立てが 1 か所になっている証拠になる。
+
+    以前は試し打ちと本番で要約を別々に組み立てていた。**片方だけに欄を足す道**が
+    在ったので、ここで両方が同じ経路を通ることを固定する。
+    """
+    from bikechance_ml.models import artifact as lightgbm_artifact
+    from tests.test_model_artifact import ARTIFACT as LGBM
+
+    port = ready_port()
+    port.candidate = Registered(
+        model_version=LGBM.model_version,
+        kind="lightgbm",
+        feature_set=LGBM.feature_set,
+        artifact_path=lightgbm_artifact.artifact_path(LGBM.model_version),
+        status="candidate",
+    )
+    port.lightgbm_body = lightgbm_artifact.to_bytes(LGBM)
+
+    summary = run_inference(port, "hellocycling", NOW, LGBM.model_version)
+    assert summary.status == "dry_run"
+    detail = to_detail(summary)
+    for name in ("stations_without_weather", "stations_unreferenced", "feature_set"):
+        assert name in detail, f"試し打ちの応答に {name} が無い"
+    assert detail["feature_set"] == FEATURE_SET
+    # **試し打ちは記録しない**ので、`inference_log` には行が増えない（W4-18）
+    assert port.details == []
 
 
 def test_cpu_time_is_measured_and_reported() -> None:
