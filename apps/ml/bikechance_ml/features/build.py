@@ -27,6 +27,7 @@ import pyarrow as pa
 
 from bikechance_ml.features import (
     asof,
+    coverage,
     exclude,
     flow,
     labels,
@@ -179,6 +180,9 @@ class DayStats:
     weather_issues: int
     #: 気象格子に当たらなかったポート数（**理由は 3 つある**。`_without_weather`）
     stations_without_weather: int
+    #: 天気 4 列が**入っている行の割合**。`feature_set` はここまで語らない
+    #: （§8.5.3。同じ `v3` でも 0% の日と 99.98% の日がある）
+    weather_coverage: coverage.Coverage
 
     def as_dict(self) -> dict[str, object]:
         """JSON に出す形。"""
@@ -194,6 +198,7 @@ class DayStats:
             "excluded": dict(sorted(self.excluded.items())),
             "weather_issues": self.weather_issues,
             "stations_without_weather": self.stations_without_weather,
+            "weather_coverage": self.weather_coverage.as_dict(),
         }
 
 
@@ -1047,4 +1052,7 @@ def _stats(
         excluded=counts,
         weather_issues=inputs.weather.n_issues,
         stations_without_weather=without_weather,
+        # **作った表そのものから数える。** 発行が在っても格子が当たらなければ NULL に
+        # なるので、`weather_issues` では被覆を語れない（§8.5.3）
+        weather_coverage=coverage.measure(table),
     )

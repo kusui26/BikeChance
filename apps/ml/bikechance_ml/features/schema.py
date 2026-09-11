@@ -136,6 +136,11 @@ _WEATHER: Final[list[pa.Field]] = [
     pa.field("wind_kmh", pa.float32(), nullable=True),
 ]
 
+#: 天気の列名。**`_WEATHER` から引く**（正を 2 つにしない）。被覆を測る
+#: `features/coverage.py` が使う——「どれが天気か」を別の場所に書き写すと、
+#: 列を足したときに片方だけが増える。
+WEATHER_COLUMNS: Final[tuple[str, ...]] = tuple(field.name for field in _WEATHER)
+
 SCHEMA: Final[pa.Schema] = pa.schema(
     [
         *_KEYS,

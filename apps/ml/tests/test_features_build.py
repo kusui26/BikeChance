@@ -10,13 +10,16 @@
 
 import csv
 from collections import defaultdict
+from collections.abc import Mapping
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import pyarrow as pa
 import pytest
 
-from bikechance_ml.features import build
+from bikechance_ml.features import build, coverage
+from bikechance_ml.features import weather as weather_module
 from bikechance_ml.features.constants import (
     FEATURE_SET,
     HORIZONS_MIN,
@@ -376,6 +379,59 @@ def test_a_port_outside_the_archived_cells_is_counted() -> None:
     フィクスチャに入れていないので 1 件になる。"""
     assert BUILT.stats.stations_without_weather == 1
     assert BUILT.stats.weather_issues == 4
+
+
+# ── 天気の被覆（W4 プラン §8.5.3、PR I）──────────────────────
+def _only_the_last_issue() -> weather_module.Weather:
+    """**最後の発行だけ**を残した予報。09-08（アーカイブが時の途中で始まった日）と同じ形。"""
+    rows = fixture.load_weather_rows()
+    latest = max(one.available_at for one in rows)
+    return weather_module.to_weather([one for one in rows if one.available_at == latest])
+
+
+def test_the_weather_coverage_is_measured_from_the_table() -> None:
+    """**別経路で検算する。** 内訳の数ではなく、出力の表を数え直して突き合わせる。"""
+    again = coverage.measure(TABLE)
+    assert BUILT.stats.weather_coverage == again
+    assert again.covered == TABLE.num_rows, "ゴールデンは 4 列とも埋まっている"
+
+
+def test_a_day_without_any_forecast_has_no_coverage() -> None:
+    """**09-07 と同じ形**（予報が 1 件も無い）。`feature_set` は `v3` のままである。"""
+    without = build.build_day(replace(fixture.build_inputs(), weather=weather_module.empty()))
+    assert without.stats.feature_set == FEATURE_SET
+    assert without.stats.weather_issues == 0
+    assert without.stats.weather_coverage.ratio == 0.0
+    assert without.stats.weather_coverage.rows == TABLE.num_rows
+
+
+def test_a_day_where_the_forecast_started_late_is_partly_covered() -> None:
+    """**09-08 と同じ形**：早い基準時刻だけ天気が無い。**0% でも 100% でもない。**
+
+    3 つの値（0%・途中・100%）が出ることで、**被覆が表について動いている**ことが分かる。
+    どれか 1 つだけを見ていると、決め打ちの数と区別できない。
+    """
+    late = build.build_day(replace(fixture.build_inputs(), weather=_only_the_last_issue()))
+    covered = late.stats.weather_coverage
+    assert 0 < covered.covered < covered.rows
+    assert covered == coverage.measure(late.table)
+
+
+#: `as_dict` に出さないと決めた欄。**理由を書かせる**（うっかり落ちたのと区別するため）。
+NOT_IN_THE_DICT: Final[Mapping[str, str]] = {}
+
+
+def test_every_day_stat_reaches_the_dict() -> None:
+    """**数えたものは全部出す**（W4 プラン §8.5.8 の教訓）。
+
+    `NowStats` では 2 つが `inference_log` に届いていなかった。**欄を足して転送を
+    忘れる道**は `DayStats` にも同じようにある（`build_features` の標準出力、のちに
+    `job_runs`）ので、ここで数え上げる。
+    """
+    emitted = set(BUILT.stats.as_dict())
+    counted = {one.name for one in fields(build.DayStats)}
+    assert counted - emitted == set(NOT_IN_THE_DICT), "数えたのに出していない欄がある"
+    assert emitted - counted == set(), "`DayStats` に無い鍵が出ている"
 
 
 def test_the_target_weather_moves_with_the_horizon() -> None:

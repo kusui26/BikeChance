@@ -23,7 +23,8 @@
 import argparse
 import io as _io
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -34,12 +35,29 @@ from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import harness, report
 from bikechance_ml.eval.dataset import NEEDED_COLUMNS, concat, to_samples
 from bikechance_ml.eval.split import split_days
+from bikechance_ml.features import coverage
 from bikechance_ml.features.grid import features_path
 from bikechance_ml.io.supabase import PARQUET_BUCKET, SupabaseIo, open_storage
 
 
 class NoSamplesError(RuntimeError):
     """1 日ぶんも読めなかった。"""
+
+
+@dataclass(frozen=True)
+class Loaded:
+    """読めた学習サンプル。**表と、読めた日と、日ごとの天気の被覆。**
+
+    **被覆を一緒に返すのは、読んだ人にしか測れないからである。** 組み立てたときの数は
+    どこにも保存されておらず、`feature_set` は「列が在る」しか語らない（§8.5.3）。
+    ここで数えておけば、**すでに在る日**にも効き、作り直しても食い違わない。
+    """
+
+    table: pa.Table
+    #: 実際に読めた日（無い日は飛ばしてある）。**分割はこれで切る。**
+    days: tuple[date, ...]
+    #: 日ごとの天気の被覆。**読む列を絞る前**の表から数える
+    weather: Mapping[date, coverage.Coverage]
 
 
 def days_between(start: date, end: date) -> tuple[date, ...]:
@@ -52,23 +70,30 @@ def load_days(
     days: Sequence[date],
     local: Path | None,
     columns: Sequence[str] | None = NEEDED_COLUMNS,
-) -> tuple[pa.Table, tuple[date, ...]]:
+) -> Loaded:
     """日ごとのサンプルを読む。**無い日は飛ばし、読めた日を返す。**
 
     `columns` を `None` にすると**全列**を返す。ベースラインが読むのは 11 列だけだが、
     LightGBM は 62 列を使う（`jobs/fit_lightgbm.py`）。
+
+    **被覆は列を絞る前に数える。** 絞ったあとの表には天気の列が無く、そこで数えると
+    「絞ったから 0」と「本当に 0」が区別できない。絞る側に移したら
+    `coverage.measure` が `MissingWeatherColumnsError` で止める。
     """
     tables: list[pa.Table] = []
     found: list[date] = []
+    weather: dict[date, coverage.Coverage] = {}
     for day in days:
         body = _one_day(source, day, local)
         if body is None:
             continue
-        tables.append(pq.read_table(_io.BytesIO(body)))
+        table = pq.read_table(_io.BytesIO(body))
+        tables.append(table)
         found.append(day)
+        weather[day] = coverage.measure(table)
     if not tables:
         raise NoSamplesError("学習サンプルが 1 日ぶんも見つかりません")
-    return concat(tables, columns), tuple(found)
+    return Loaded(table=concat(tables, columns), days=tuple(found), weather=weather)
 
 
 def _one_day(source: SupabaseIo | None, day: date, local: Path | None) -> bytes | None:
@@ -99,15 +124,18 @@ def run(argv: Sequence[str] | None = None) -> int:
     local = Path(options.local) if options.local else None
 
     if local is not None:
-        table, found = load_days(None, days, local)
+        loaded = load_days(None, days, local)
     else:
         with open_storage(read_storage_config()) as source:
-            table, found = load_days(source, days, None)
+            loaded = load_days(source, days, None)
 
-    samples = to_samples(table)
-    split = split_days(found, options.eval_days, options.purge_days)
+    samples = to_samples(loaded.table)
+    split = split_days(loaded.days, options.eval_days, options.purge_days)
     outcome = harness.run(samples, split)
-    text = report.render_markdown(outcome, options.title, options.note)
+    # **被覆は出すが、ここでは止めない。** ベースラインは天気の列を読まない
+    # （`NEEDED_COLUMNS` に無い）ので、混ざっても B0〜B3 の数字は変わらない。
+    # 止めるのは成果物を書く `fit_lightgbm` だけである（W4 プラン §6.8 の PR I）
+    text = report.render_markdown(outcome, options.title, options.note, weather=loaded.weather)
 
     if options.out is None:
         print(text)

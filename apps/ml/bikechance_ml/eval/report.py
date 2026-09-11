@@ -9,16 +9,22 @@
   * **B2 が B1 に落ちた割合**（高ければ B2 は実質 B1。W3-17）
   * **Brier < 0.001 のバケツ**（相対改善が数値ノイズになるので判定の対象外。W3-16）
   * **B3 が B1 に負けていないか**（負けていれば混合の当てはめを疑う）
+
+**§2 は「何で測ったか」である**（PR I）。`feature_set` は列が在ることしか語らないので、
+**天気が入っていた割合**を日ごとに出す（W4 プラン §8.5.3）。
 """
 
-from collections.abc import Sequence
-from datetime import UTC, datetime
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime
 from typing import Final
 
 from bikechance_ml.eval.harness import Outcome, SliceScores
 from bikechance_ml.eval.metrics import skill
+from bikechance_ml.eval.split import DaySplit
 from bikechance_ml.features.constants import FEATURE_SET
+from bikechance_ml.features.coverage import MAX_SPREAD_PP, Coverage, restrict, spread_pp
 from bikechance_ml.features.grid import JST
+from bikechance_ml.features.schema import WEATHER_COLUMNS
 
 #: 相対改善を判定に使ってよい Brier の下限（W3-16、§4.4 の 30a）。
 JUDGEABLE_BRIER: Final[float] = 0.001
@@ -32,12 +38,20 @@ GAP_BAR_WIDTH: Final[int] = 12
 
 
 def render_markdown(
-    outcome: Outcome, title: str, note: str, generator: str = "evaluate_baselines"
+    outcome: Outcome,
+    title: str,
+    note: str,
+    generator: str = "evaluate_baselines",
+    *,
+    weather: Mapping[date, Coverage],
 ) -> str:
     """1 回の評価を Markdown にする。
 
     `generator` は**この表を作ったジョブ**。読む人が「どのコマンドで作り直せるか」を
     たどれるようにするためで、決め打ちにすると別のジョブが作った表が嘘をつく。
+
+    `weather` は**必ず渡す**（既定値を置かない）。省けるようにすると、次に評価を足す
+    人が省いて、また「同じ `v3` なのに中身が違う表」が出る（§8.5.3）。
     """
     lines = [
         f"# {title}",
@@ -50,6 +64,8 @@ def render_markdown(
         note,
         "",
         *_judgement(outcome),
+        "",
+        *_data_block(outcome, weather),
         "",
         *_overall_block(outcome),
         "",
@@ -121,10 +137,62 @@ def _judgeable(outcome: Outcome) -> int:
     return sum(1 for one in outcome.by_bucket if one.weighted["B0"].brier >= JUDGEABLE_BRIER)
 
 
+# ── データの素性 ──────────────────────────────────────────────
+def _data_block(outcome: Outcome, weather: Mapping[date, Coverage]) -> list[str]:
+    """**何で測ったか。** 数字の前に、その数字が載っているデータを出す。"""
+    return [
+        "## 2. データ（読んだ日と天気の被覆）",
+        "",
+        "**`feature_set` は「列が在る」しか語らない**（W4 プラン §8.5.3）。同じ `v3` でも、"
+        "天気が 1 件も入っていない日と 99.98% 入っている日がある。",
+        "",
+        *weather_block(weather, outcome.split),
+    ]
+
+
+def weather_block(weather: Mapping[date, Coverage], split: DaySplit) -> list[str]:
+    """読んだ日と天気の被覆の表。**モデルカードからも呼ぶ**（正を 2 つにしない）。"""
+    return [
+        _row("日", "役割", "行", "天気の被覆"),
+        _rule(2, 2),
+        *(
+            _row(f"{day:%Y-%m-%d}", _role(day, split), f"{one.rows:,}", f"{one.ratio:.3%}")
+            for day, one in sorted(weather.items())
+        ),
+        "",
+        *_spread_lines(weather, split),
+        *_uniform_lines(weather),
+    ]
+
+
+def _role(day: date, split: DaySplit) -> str:
+    if day in split.fit:
+        return "学習"
+    return "検証" if day in split.evaluate else "パージ"
+
+
+def _spread_lines(weather: Mapping[date, Coverage], split: DaySplit) -> list[str]:
+    """**学習と検証の差だけを見る。** パージ日は読むが捨てる。"""
+    spread = spread_pp(restrict(weather, split.used()).values())
+    verdict = "混ざっている" if spread > MAX_SPREAD_PP else "揃っている"
+    return [
+        f"- **学習と検証の被覆の差**：{spread:.2f} ポイント（許容 {MAX_SPREAD_PP}。**{verdict}**）"
+    ]
+
+
+def _uniform_lines(weather: Mapping[date, Coverage]) -> list[str]:
+    """**4 列が同じ行で欠けているか。** 揃っているときも書く（黙らない）。"""
+    uneven = [day for day, one in sorted(weather.items()) if not one.is_uniform]
+    if not uneven:
+        return [f"- **{len(WEATHER_COLUMNS)} 列の欠けかた**：全日で一致"]
+    days = "、".join(f"{day:%Y-%m-%d}" for day in uneven)
+    return [f"- **{len(WEATHER_COLUMNS)} 列の欠けかた**：**{days} で列ごとに違う**"]
+
+
 # ── 表 ────────────────────────────────────────────────────────
 def _overall_block(outcome: Outcome) -> list[str]:
     return [
-        "## 2. 全体（system × ターゲット、重み付き）",
+        "## 3. 全体（system × ターゲット、重み付き）",
         "",
         "**総合値は自明な行に支配される**（3 台以上ある行が過半）。見当をつけるための表で、"
         "合否は §4 のバケツ別で決める（W3-16）。",
@@ -160,7 +228,7 @@ def _overall_row(one: SliceScores, models: Sequence[str]) -> str:
 
 def _horizon_block(outcome: Outcome) -> list[str]:
     return [
-        "## 3. 水平別（重み付き Brier）",
+        "## 4. 水平別（重み付き Brier）",
         "",
         _header(
             "| system | ターゲット | h（分） | n",
@@ -195,7 +263,7 @@ def _bucket_block(outcome: Outcome) -> list[str]:
     compared = [one for one in outcome.models if one not in ("B2",)]
     extra = [one for one in outcome.models if one not in BASELINE_COLUMNS]
     lines = [
-        "## 4. 台数バケツ別（重み付き Brier）",
+        "## 5. 台数バケツ別（重み付き Brier）",
         "",
         "**合否はここで決める。** `Brier < 0.001` の行は相対改善が数値ノイズになるので"
         "「判定対象外」と書く（W3-16、§4.4 の 30a）。",
@@ -237,7 +305,7 @@ def _bucket_row(one: SliceScores, compared: Sequence[str], extra: Sequence[str])
 
 def _calibration_block(outcome: Outcome) -> list[str]:
     lines = [
-        "## 5. キャリブレーション（ECE、重み付き）",
+        "## 6. キャリブレーション（ECE、重み付き）",
         "",
         "**「70% と言った日の 7 割で降る」からのずれ。** 合格基準は ECE < 0.03"
         "（開発プラン §7.1）。B0 は 0 か 1 しか出さないので、ECE は「外した割合」に等しい。",
@@ -260,7 +328,7 @@ def _calibration_block(outcome: Outcome) -> list[str]:
 def _reliability_block(outcome: Outcome) -> list[str]:
     """信頼度図（開発プラン §7.1）。**画像を作らず、数と棒で見せる。**"""
     lines = [
-        "## 6. 信頼度図（B3、重み付き、system × ターゲットの総合）",
+        "## 7. 信頼度図（B3、重み付き、system × ターゲットの総合）",
         "",
         "**「p と言った行のうち、実際に何割が 1 だったか」。** 対角線に乗っていれば"
         "確率として正しい。区間は 20 等分で、行の無い区間は出さない。",
@@ -297,7 +365,7 @@ def _gap_bar(gap: float) -> str:
 def _weighting_block(outcome: Outcome) -> list[str]:
     """重み付きと重み無しの比較（§7.7）。**差が説明できることを確かめる。**"""
     return [
-        "## 7. 重み付きと重み無し",
+        "## 8. 重み付きと重み無し",
         "",
         "**重み付きが主**（開発プラン §6.2）。難所（`bikes <= 2` または `docks <= 2`）を "
         "4 倍濃く抽出しているので、**重み無しの Brier は難所に引かれて大きく出る**。"
@@ -323,7 +391,7 @@ def _weighting_row(one: SliceScores) -> str:
 
 def _fitting_block(outcome: Outcome) -> list[str]:
     lines = [
-        "## 8. 当てはめの中身",
+        "## 9. 当てはめの中身",
         "",
         "| ターゲット | B1 のセル | B1 に無かった行 | B2 のセル "
         "| **B2 が B1 に落ちた割合** | B3 の係数 |",
