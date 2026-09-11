@@ -13,14 +13,10 @@ from datetime import UTC, date, datetime
 
 import pytest
 
+from bikechance_ml.features.grid import jst_yesterday
 from bikechance_ml.features.reference import NeighborRow, StationAttributeRow, StationGeoRow
 from bikechance_ml.features.reference_snapshot import NEIGHBORS_NAME, STATIONS_NAME
-from bikechance_ml.jobs.build_reference import (
-    JOB_NAME,
-    ReferencePort,
-    build_and_upload,
-    yesterday,
-)
+from bikechance_ml.jobs.build_reference import JOB_NAME, ReferencePort, build_and_upload
 
 DAY = date(2026, 9, 9)
 NOW = datetime(2026, 9, 10, 20, 0, tzinfo=UTC)
@@ -155,4 +151,4 @@ def test_a_day_without_snapshots_is_reported_not_invented() -> None:
 def test_yesterday_is_the_jst_day_before() -> None:
     """05:00 JST に走らせるので、**前日ぶんが揃っている**。"""
     # 2026-09-10 20:00 UTC = 2026-09-11 05:00 JST → 前日は 09-10
-    assert yesterday(NOW) == date(2026, 9, 10)
+    assert jst_yesterday(NOW) == date(2026, 9, 10)

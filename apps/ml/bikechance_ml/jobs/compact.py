@@ -13,12 +13,12 @@
 同じバイト列を 2 回書くだけで、結果は変わらない。
 """
 
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final, Protocol
 
+from bikechance_ml.jobs import recording
 from bikechance_ml.jobs.snapshot_table import (
     Snapshot,
     StationRow,
@@ -33,11 +33,6 @@ from bikechance_ml.jobs.snapshot_table import (
 JOB_NAME: Final[str] = "compact_parquet"
 
 MS_PER_S: Final[int] = 1000
-
-
-def _log(message: str) -> None:
-    """Vercel の関数ログに残す。**要約には載せない**（呼び出し元の失敗ではない）。"""
-    print(message, file=sys.stderr)
 
 
 class CompactPort(Protocol):
@@ -202,27 +197,13 @@ def to_detail(summary: CompactSummary) -> dict[str, object]:
     }
 
 
-def _record_quietly(port: CompactPort, run_id: int | None, summary: CompactSummary) -> None:
-    """記録の失敗でジョブを落とさない。畳めたことのほうが大事。"""
-    if run_id is None:
-        return
-    try:
-        port.job_finished(run_id, "ok" if summary.ok else "failed", to_detail(summary))
-    except Exception as cause:
-        _log(f"job_finished に失敗した: {type(cause).__name__}: {cause}")
-
-
 def compact_hour(port: CompactPort, now: datetime, hour: datetime | None = None) -> CompactSummary:
     """指定（既定は直前）の 1 時間を、システムごとに 1 ファイルへ畳む。"""
     started = datetime.now(UTC)
     start, end = resolve_window(now, hour)
 
     # 記録を始められなくても処理は行う。記録の不調で 1 時間ぶんを落とさない
-    run_id: int | None = None
-    try:
-        run_id = port.job_started(JOB_NAME)
-    except Exception as cause:
-        _log(f"job_started に失敗した: {type(cause).__name__}: {cause}")
+    run_id = recording.started_quietly(port, JOB_NAME)
 
     # システム一覧の取得など、全体が落ちた場合。要約に理由を残して 500 を返す
     try:
@@ -234,5 +215,5 @@ def compact_hour(port: CompactPort, now: datetime, hour: datetime | None = None)
 
     elapsed_ms = int((datetime.now(UTC) - started).total_seconds() * MS_PER_S)
     summary = _summarize(start, outcomes, elapsed_ms, error)
-    _record_quietly(port, run_id, summary)
+    recording.record_quietly(port, run_id, "ok" if summary.ok else "failed", to_detail(summary))
     return summary

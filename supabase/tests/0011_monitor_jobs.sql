@@ -8,7 +8,7 @@
 -- 確かめられるのは記録と抑制の論理まで（0007 と同じ）。
 
 begin;
-select plan(82);
+select plan(84);
 
 -- 自分の前提を作る
 delete from public.status_snapshots;
@@ -128,8 +128,8 @@ select is(
   true, 'postgres は BYPASSRLS（security definer の中から全行が見える）'
 );
 
--- 0020 で 9 本、0021・0022・0025・0029・0036・0037 が 1 本ずつ足して 15 本
-select is((select count(*)::int from public.monitored_jobs), 15, '監視対象は 15 ジョブ');
+-- 0020 で 9 本、0021・0022・0025・0029・0036・0037・0040 が 1 本ずつ足して 16 本
+select is((select count(*)::int from public.monitored_jobs), 16, '監視対象は 16 ジョブ');
 
 -- **参照スナップショットは Vercel Cron だが、見張りには入れる**（0036。§12 の 116）。
 -- 学習も推論も「前日の版」を読むので、止まると翌日に静かに壊れる
@@ -138,6 +138,22 @@ select ok(
       and expected_every = interval '1 day' and missing_after = interval '30 hours'
      from public.monitored_jobs where job_name = 'build_reference'),
   'build_reference は日次で見張る（pg_cron ではないので cron_job_name は NULL）');
+-- **学習サンプルは GitHub Actions だが、見張りには入れる**（0040。§8.5.2）。
+-- 止まったまま 30 日経つと、天気が保持期間で消えて作り直せなくなる
+select ok(
+  (select is_active and cron_job_name is null
+      and expected_every = interval '1 day' and missing_after = interval '30 hours'
+     from public.monitored_jobs where job_name = 'build_features'),
+  'build_features は日次で見張る（pg_cron ではないので cron_job_name は NULL）');
+
+-- **登録した直後は鳴らない。** `check_jobs_missing` は `added_at + missing_after` を
+-- 過ぎた行しか見ない（0020）。入れた瞬間に「1 度も成功していません」と鳴ると、
+-- 見張りを足すたびに誤報が出て、誰も通知を読まなくなる
+select ok(
+  (select added_at + missing_after > now()
+     from public.monitored_jobs where job_name = 'build_features'),
+  '足したばかりの build_features は、まだ検査の対象にならない');
+
 select is(
   (select array_agg(job_name order by job_name) from public.monitored_jobs where not is_active),
   array['trigger_backup_collect', 'trigger_infer'],

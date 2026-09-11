@@ -31,7 +31,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bikechance_ml.config import read_storage_config
-from bikechance_ml.features.grid import JST, day_hours, reference_path
+from bikechance_ml.features.grid import day_hours, jst_yesterday, reference_path
 from bikechance_ml.features.reference import (
     NeighborRow,
     StationAttributeRow,
@@ -49,6 +49,7 @@ from bikechance_ml.features.reference_snapshot import (
     to_stations_table,
 )
 from bikechance_ml.io.supabase import PARQUET_BUCKET, open_storage
+from bikechance_ml.jobs import recording
 from bikechance_ml.jobs.build_features import SYSTEM_IDS, to_parquet_bytes
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from bikechance_ml.jobs.snapshot_table import has_current_schema, parquet_path
@@ -155,41 +156,11 @@ def to_summary(
 
 
 # ── 実行 ──────────────────────────────────────────────────────
-def yesterday(now: datetime) -> date:
-    """JST の昨日。**05:00 JST に走らせるので、前日ぶんが揃っている。**"""
-    return (now.astimezone(JST) - timedelta(days=1)).date()
-
-
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="参照スナップショットを 1 日ぶん作る")
     parser.add_argument("--date", default=None, help="JST の暦日（既定は昨日）")
     parser.add_argument("--upload", action="store_true", help="Storage に置く")
     return parser.parse_args(argv)
-
-
-def _log(message: str) -> None:
-    print(message, file=sys.stderr)
-
-
-def _started_quietly(source: ReferencePort) -> int | None:
-    """記録を始められなくても作る。**記録の不調で 1 日ぶんを落とさない**（`compact` と同じ）。"""
-    try:
-        return source.job_started(JOB_NAME)
-    except Exception as cause:
-        _log(f"job_started に失敗した: {type(cause).__name__}")
-        return None
-
-
-def _record_quietly(
-    source: ReferencePort, run_id: int | None, status: str, detail: Mapping[str, object]
-) -> None:
-    """記録の失敗でジョブを落とさない。置けたことのほうが大事。"""
-    if run_id is None:
-        return
-    try:
-        source.job_finished(run_id, status, detail)
-    except Exception as cause:
-        _log(f"job_finished に失敗した: {type(cause).__name__}")
 
 
 def build_and_upload(source: ReferencePort, day: date, now: datetime) -> dict[str, object]:
@@ -205,7 +176,7 @@ def build_and_upload(source: ReferencePort, day: date, now: datetime) -> dict[st
     「動いたが失敗した」と区別できない。詰めるのは**例外の種類だけ**にする（`infer` と
     同じ。文言に接続先が混じる経路を作らない）。
     """
-    run_id = _started_quietly(source)
+    run_id = recording.started_quietly(source, JOB_NAME)
     try:
         stations, neighbors, missing = build_tables(source, day, built_at=now)
         bodies = {
@@ -215,7 +186,7 @@ def build_and_upload(source: ReferencePort, day: date, now: datetime) -> dict[st
         for name, body in bodies.items():
             source.upload_parquet(reference_path(day, name), body)
     except Exception as cause:
-        _record_quietly(
+        recording.record_quietly(
             source, run_id, "failed", {"date": day.isoformat(), "error": type(cause).__name__}
         )
         raise
@@ -224,13 +195,14 @@ def build_and_upload(source: ReferencePort, day: date, now: datetime) -> dict[st
         "date": day.isoformat(),
         **to_summary(stations, neighbors, missing, {k: len(v) for k, v in bodies.items()}),
     }
-    _record_quietly(source, run_id, "ok", summary)
+    recording.record_quietly(source, run_id, "ok", summary)
     return summary
 
 
 def run(argv: Sequence[str] | None = None) -> int:
     options = _arguments(argv)
-    day = date.fromisoformat(options.date) if options.date else yesterday(datetime.now(UTC))
+    # **既定は前日ぶん。** 05:00 JST に走らせるので、その日の観測は揃っている
+    day = date.fromisoformat(options.date) if options.date else jst_yesterday(datetime.now(UTC))
     with open_storage(read_storage_config()) as source:
         if options.upload:
             summary = build_and_upload(source, day, datetime.now(UTC))

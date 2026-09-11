@@ -1,0 +1,91 @@
+name: 学習サンプル（日次）
+
+# 前日ぶんの学習サンプル（`features/date=YYYY-MM-DD/part.parquet`）を作って Storage に置く。
+# W4 プラン §6.8 の PR J。
+#
+# **Vercel Cron ではなく GitHub Actions に置く**（W4-27）。実測 41〜65 秒・ピーク 1.28 GB
+# で Vercel の枠（300 秒・2 GB）には収まるが、**5 分毎の推論と同じサービスに 3 分・1.3 GB の
+# バッチを混ぜない**。公開リポジトリなので Actions は無制限・無料である（開発プラン D-12）。
+#
+# **06:00 JST（21:00 UTC）に前日ぶんを作る。** `LOOKAHEAD_HOURS = 3` なので前日 21:00 JST の
+# 基準時刻は当日 03:00 JST までの観測を要求し、参照スナップショットは前日 05:00 JST に
+# 置かれている。**どちらも満たす最も早い枠**である。
+#
+# **`schedule` と `workflow_dispatch` だけで起動する。** 秘密を使うワークフローに
+# `push` / `pull_request` を付けない——fork からの PR に秘密が渡らない仕組みは在るが、
+# **外から起動しうる経路そのものを作らない**（開発プラン D-12）。
+#
+# **注意**：GitHub はリポジトリが 60 日間無活動だと `schedule` を自動で止める。
+# また `schedule` は混雑時に遅れる（数分〜）。見張りの閾値（30 時間）はそれを見込んである。
+on:
+  schedule:
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "JST の暦日（YYYY-MM-DD）。空なら前日。欠けた日を埋めるときに使う"
+        required: false
+        type: string
+
+# 何も書かない。**このジョブは GITHUB_TOKEN を 1 つも使わない。**
+permissions: {}
+
+# **手で埋める回と定時の回をぶつけない。** どちらも同じパスに上書きするので壊れはしないが、
+# 同時に走らせる理由が無い。待たせる（`cancel-in-progress: false`）のは、
+# **始まった回を途中で捨てない**ため。
+concurrency:
+  group: build-features
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: features/date=… を作って置く
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # **ここが鍵の在り処。** `training` 環境の secrets だけがこのジョブに渡る
+    environment: training
+    defaults:
+      run:
+        working-directory: apps/ml
+    steps:
+      - uses: actions/checkout@v7
+
+      # python.yml と同じ組み立て。**サードパーティのアクションに依存しない**
+      - name: uv を入れる
+        run: pip install --upgrade uv
+
+      - name: Python 3.12 を用意する
+        run: uv python install 3.12
+
+      # **`--extra dev` を付けない。** 当てはめる側（lightgbm・scipy で 122 MB）は要らず、
+      # 入れるのは本番と同じ依存（pyarrow・numpy・httpx・fastapi）だけでよい
+      - name: 依存を入れる（uv.lock どおり、本番の依存だけ）
+        run: uv sync --frozen --python 3.12
+
+      # **入力は `env:` で渡す**（`${{ }}` をスクリプトに直接埋めない）。
+      #
+      # **3 回まで試す。** Supabase Storage は一過性の 504 を返すことがある
+      # （2026-09-11 に手元で 1 度。60 秒でタイムアウトして返ってきた）。1 日ぶんを
+      # 落とすと、**30 日後に天気が消えて作り直せなくなる**（`weather_hourly` の保持）。
+      # 失敗した回も `job_runs` に `failed` として残るので、**直ったことは隠れない**。
+      - name: 1 日ぶんを作って置く
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          TARGET_DATE: ${{ inputs.date }}
+        run: |
+          args=(--upload)
+          if [ -n "${TARGET_DATE}" ]; then
+            args+=(--date "${TARGET_DATE}")
+          fi
+          for attempt in 1 2 3; do
+            if uv run python -m bikechance_ml.jobs.build_features "${args[@]}"; then
+              exit 0
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "::warning::${attempt} 回目が失敗しました。120 秒待って試し直します"
+              sleep 120
+            fi
+          done
+          echo "::error::3 回とも失敗しました。job_runs の build_features を見てください"
+          exit 1
