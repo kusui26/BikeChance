@@ -90,6 +90,9 @@ const fakePort = (options: PortOptions = {}) => {
       calls.push({ bbox: params.bbox, system_id: params.system_id, limit: params.limit });
       return { rows, total: options.total ?? rows.length };
     },
+    // `/v1/stations` は使わない。`ReadPort` を満たすためだけに置く
+    listStationsByIds: async () => [],
+    listNeighbors: async () => [],
   };
   return { port, calls };
 };

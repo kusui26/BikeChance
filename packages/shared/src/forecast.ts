@@ -77,48 +77,59 @@ const outOfRange = (minutes: number): ArrivalResult =>
 const accept = (minutes: number): ArrivalResult =>
   inRange(minutes) ? { ok: true, in_min: roundArrival(minutes) } : outOfRange(minutes);
 
-const fromMinutes = (raw: string): ArrivalResult => {
+const fromMinutes = (raw: string, labels: ArrivalLabels): ArrivalResult => {
   const minutes = Number(raw);
   return DECIMAL_MINUTES.test(raw) && Number.isFinite(minutes)
     ? accept(minutes)
-    : failed("arrival_malformed", "in_min は数（分）です。");
+    : failed("arrival_malformed", `${labels.in_min} は数（分）です。`);
 };
 
-const fromTimestamp = (at: string, now: Date): ArrivalResult => {
+const fromTimestamp = (at: string, now: Date, labels: ArrivalLabels): ArrivalResult => {
   const arrival = new Date(at);
   if (Number.isNaN(arrival.getTime())) {
-    return failed("arrival_malformed", "at は ISO 8601（タイムゾーン付き）です。");
+    return failed("arrival_malformed", `${labels.at} は ISO 8601（タイムゾーン付き）です。`);
   }
   // **タイムゾーンを必須にする。** 素の日時を UTC と決めつけると 9 時間ずれる
   if (!HAS_TIMEZONE.test(at)) {
     return failed(
       "arrival_malformed",
-      "at にはタイムゾーンを付けてください（例 2026-09-09T14:00:00Z）。",
+      `${labels.at} にはタイムゾーンを付けてください（例 2026-09-09T14:00:00Z）。`,
     );
   }
   return accept((arrival.getTime() - now.getTime()) / MS_PER_MINUTE);
 };
+
+/** 本文に出す引数の名前。`/v1/trip-check` は `depart_at` / `depart_in_min` で受ける。 */
+export type ArrivalLabels = { readonly at: string; readonly in_min: string };
+
+const DEFAULT_LABELS: ArrivalLabels = { at: "at", in_min: "in_min" };
 
 /**
  * `?at=` か `?in_min=` を「何分先か」に直す。
  *
  * **両方来たら断る。** どちらを優先するかを決めると、片方を無視したことが呼ぶ側から
  * 見えない。**どちらも無ければ予測を返さない**（`in_min: null`）。
+ *
+ * `labels` は本文に出す引数名。**エンドポイントによって名前が違う**（`/v1/stations` は
+ * `at` / `in_min`、`/v1/trip-check` は `depart_at` / `depart_in_min`）ので、
+ * 存在しない引数名を案内しないために受け取る。
  */
 export const parseArrival = (params: {
   readonly at: string | null;
   readonly in_min: string | null;
   readonly now: Date;
+  readonly labels?: ArrivalLabels;
 }): ArrivalResult => {
+  const labels = params.labels ?? DEFAULT_LABELS;
   const at = blankToNull(params.at);
   const raw = blankToNull(params.in_min);
   if (at !== null && raw !== null) {
-    return failed("arrival_conflict", "at と in_min は同時に指定できません。");
+    return failed("arrival_conflict", `${labels.at} と ${labels.in_min} は同時に指定できません。`);
   }
   if (raw !== null) {
-    return fromMinutes(raw);
+    return fromMinutes(raw, labels);
   }
-  return at === null ? { ok: true, in_min: null } : fromTimestamp(at, params.now);
+  return at === null ? { ok: true, in_min: null } : fromTimestamp(at, params.now, labels);
 };
 
 /**

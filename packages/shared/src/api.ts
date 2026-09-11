@@ -145,6 +145,84 @@ export const stationsResponseSchema = z.object({
 });
 
 /**
+ * 行程が成立する確率（W4 プラン §6.7、W4-24）。
+ *
+ * **`trip` が非 null であることと、`from.forecast` と `to.forecast` が両方非 null で
+ * あることは同値**である（契約 10）。片側でも欠けたら掛け算をしない——欠けた値を
+ * 0 とみなしたり、片側だけで代用したりしない。
+ *
+ * **`p_bike` と `p_dock` はここに複製しない。** 同じ数を 2 か所に置くと、どちらが正かが
+ * 決まらない（契約 4 と同じ理由）。`trip` が非 null なら両端の `forecast` が在ることが
+ * 保証されるので、呼ぶ側は `from.forecast.p_bike` と `to.forecast.p_dock` を読む。
+ */
+export const tripOutcomeSchema = z.object({
+  /** 出発で借りられ、到着で返せる確率（0〜1）。**独立仮定**（`notice` を参照）。 */
+  p_trip: z.number().min(0).max(1),
+  /**
+   * 0〜3。**両端の小さいほう。** 鎖は弱い環の強さしかない。
+   */
+  confidence: z.number().int().min(0).max(3),
+  /**
+   * **独立仮定の注記。** 数と同じ欄に置く——別の場所に置くと、数だけ取り出して
+   * 注記を落とせてしまう。文言は `TRIP_INDEPENDENCE_NOTICE`。
+   */
+  notice: z.string().min(1),
+});
+
+/**
+ * 代替のポート候補（W4-25）。
+ *
+ * **同一システム・400 m 以内**で、**その端点と同じ時刻の確率が高い順**に最大 5 件。
+ * 予測を出せないポートは入れない（確率を答えられない候補は問いに答えていない）。
+ *
+ * **「端点より良い」では絞っていない。** 出すかどうかは画面の判断で、API は材料を渡す。
+ */
+export const tripAlternativeSchema = z.object({
+  /** 端点からの距離（m）。`station_neighbors` が日次で計算した値。 */
+  distance_m: z.number().int().nonnegative(),
+  /** **`forecast` は、その端点と同じ時刻**（出発側なら `depart_in_min`）で出してある。 */
+  station: stationCurrentSchema,
+});
+
+/**
+ * `/v1/trip-check` の応答（W4 プラン §6.7）。
+ *
+ * **確率が指す時刻は 2 つある。**
+ *   * `from.forecast` … `generated_at ＋ depart_in_min`（借りる時刻）
+ *   * `to.forecast` … `generated_at ＋ arrive_in_min`（返す時刻）
+ *
+ * どちらも `generated_at` からの相対で、**読んだ時刻からではない**。応答が CDN に
+ * 留まっていた時間だけ離れる（最大 3 分）ので、**表示は絶対時刻で行う**
+ * （W4 プラン §12 の 114）。
+ */
+export const tripCheckResponseSchema = z.object({
+  api_version: z.literal("v1"),
+  generated_at: z.iso.datetime(),
+  /** いずれかのフィードの観測が途切れている。 */
+  stale: z.boolean(),
+  /** **行程は 1 つの系統の中で完結する。** 事業者をまたぐ行程は成立しない（W4-21）。 */
+  system_id: systemIdSchema,
+  /** 出発ポートに着く時刻（**5 分に丸めた後**）。 */
+  depart_in_min: z.number().int().positive(),
+  /** 実際に使った乗車時間（分）。 */
+  ride_min: z.number().int().nonnegative(),
+  /** **サーバーが概算したか。** true なら直線距離 ÷ 14 km/h で、実際の経路より短い。 */
+  ride_min_estimated: z.boolean(),
+  /** 到着ポートに着く時刻。`depart_in_min ＋ ride_min`。 */
+  arrive_in_min: z.number().int().nonnegative(),
+  from: stationCurrentSchema,
+  to: stationCurrentSchema,
+  /** **片側でも予測が欠けたら null**（契約 10）。 */
+  trip: tripOutcomeSchema.nullable(),
+  alternatives: z.object({
+    from: z.array(tripAlternativeSchema),
+    to: z.array(tripAlternativeSchema),
+  }),
+  feeds: z.array(feedStatusSchema),
+  attribution: z.array(attributionSchema),
+});
+
+/**
  * エラー応答（RFC 9457 Problem Details）。開発プラン §8.3。
  *
  * `type` は相対 URI にする。ドメインを決め打ちにせず、`about:blank` のように
@@ -164,4 +242,7 @@ export type FeedStatus = z.infer<typeof feedStatusSchema>;
 export type StationForecast = z.infer<typeof stationForecastSchema>;
 export type StationCurrent = z.infer<typeof stationCurrentSchema>;
 export type StationsResponse = z.infer<typeof stationsResponseSchema>;
+export type TripOutcome = z.infer<typeof tripOutcomeSchema>;
+export type TripAlternative = z.infer<typeof tripAlternativeSchema>;
+export type TripCheckResponse = z.infer<typeof tripCheckResponseSchema>;
 export type Problem = z.infer<typeof problemSchema>;

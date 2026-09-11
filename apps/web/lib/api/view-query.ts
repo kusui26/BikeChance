@@ -11,6 +11,8 @@ import { z } from "zod";
 /** ビューの名前はここだけに書く。基底テーブルは公開経路のどこからも名指ししない。 */
 export const FEEDS_VIEW = "v1_feeds";
 export const STATIONS_VIEW = "v1_stations_current";
+/** 代替候補（`/v1/trip-check`。migration 0039、W4-26）。 */
+export const NEIGHBORS_VIEW = "v1_station_neighbors";
 
 /** `v1_feeds` から読む列。`select("*")` にしないのは、列が増えたときに気づけるようにするため。 */
 export const FEED_COLUMNS =
@@ -23,10 +25,14 @@ export const STATION_COLUMNS =
   "forecast_horizons_min,forecast_p_bike_x1000,forecast_p_dock_x1000,forecast_confidence," +
   "forecast_base_observed_at,forecast_model_version,forecast_generated_at";
 
+export const NEIGHBOR_COLUMNS = "station_id,nb_station_id,distance_m";
+
 /** 絞り込み 1 つ。`op` は supabase-js の同名メソッドに対応する。 */
 export type Filter =
   | { readonly op: "gte" | "lte"; readonly column: string; readonly value: number }
-  | { readonly op: "eq"; readonly column: string; readonly value: string };
+  | { readonly op: "eq"; readonly column: string; readonly value: string }
+  | { readonly op: "is"; readonly column: string; readonly value: boolean }
+  | { readonly op: "in"; readonly column: string; readonly values: readonly string[] };
 
 /**
  * 矩形を 4 つの範囲条件に写す。
@@ -43,6 +49,36 @@ export const bboxFilters = (bbox: Bbox): readonly Filter[] => [
 /** システムの絞り込み。未指定なら条件を足さない。 */
 export const systemFilters = (system_id: SystemId | null): readonly Filter[] =>
   system_id === null ? [] : [{ op: "eq", column: "system_id", value: system_id }];
+
+/**
+ * ID を並べてポートを引く（`/v1/trip-check`）。
+ *
+ * **`system_id` で絞らない。** `station_id` はシステムをまたいで衝突するので（実測で
+ * 313 件）、系統の絞り込みを掛けると「別の系統にある ID を渡した」のか「どこにも無い」
+ * のかが区別できない。**全部引いてから呼ぶ側で選り分ける**ことで、
+ * 「その ID は別のシステムのものです」と答えられる（W4-21）。
+ */
+export const stationIdFilters = (station_ids: readonly string[]): readonly Filter[] => [
+  { op: "in", column: "station_id", values: station_ids },
+];
+
+/**
+ * 代替候補の絞り込み（W4-25）。**同一システム・指定の半径まで。**
+ *
+ * 2 つの端点ぶんをまとめて引く（`station_id` を並べる）。ビューは 500 m まで持っていて
+ * 絞り込みを焼き付けていないので（W4-26）、ここで半径を決める。
+ */
+export const neighborFilters = (params: {
+  readonly system_id: SystemId;
+  readonly station_ids: readonly string[];
+  readonly radius_m: number;
+}): readonly Filter[] => [
+  { op: "eq", column: "system_id", value: params.system_id },
+  { op: "in", column: "station_id", values: params.station_ids },
+  // **同一システムだけ。** 別事業者の自転車は借りられない（`same_system` が在る理由）
+  { op: "is", column: "same_system", value: true },
+  { op: "lte", column: "distance_m", value: params.radius_m },
+];
 
 /** 並びは固定する。同じ要求が同じ応答になり、差分も追える。 */
 export const STATION_ORDER = ["system_id", "station_id"] as const;
@@ -65,16 +101,21 @@ export const feedRowSchema = z.object({
 /**
  * `v1_stations_current` の 1 行。
  *
- * `lat` / `lon` を非 null にしているのは、bbox で絞った結果しか読まないからで、
- * 座標の無いポート（属性をまだ取れていない）は範囲比較で自然に外れる（開発プラン §8.3）。
- * 逆に `name` / `capacity` / `bikes` などは NULL があり得る（未取得・未観測）。
+ * **`lat` / `lon` は NULL になりうる。** 属性の日次同期がまだ届いていないポートと、
+ * 属性が失効したポートがそれに当たる（開発プラン §8.3）。bbox で引くかぎり範囲比較で
+ * 自然に外れるが、**ID で引くと出てくる**（`/v1/trip-check`）。
+ *
+ * 実測（2026-09-11、本番）：**座標の無いポートは 10 件**あり、**そのうち 1 件は予測を
+ * 持っていた**。「座標が無い＝予測も無い」ではない。
+ *
+ * `name` / `capacity` / `bikes` なども NULL があり得る（未取得・未観測）。
  */
 export const stationRowSchema = z.object({
   system_id: systemIdSchema,
   station_id: z.string().min(1),
   name: z.string().nullable(),
-  lat: z.number(),
-  lon: z.number(),
+  lat: z.number().nullable(),
+  lon: z.number().nullable(),
   /** **固定のラック数のみ**。動的な系統は NULL（0035）。 */
   capacity: z.number().int().nullable(),
   bikes: z.number().int().nullable(),
@@ -103,5 +144,19 @@ export const stationRowSchema = z.object({
   forecast_generated_at: z.string().nullable(),
 });
 
+/**
+ * `v1_station_neighbors` の 1 行（0039）。
+ *
+ * **`system_id` と `nb_system_id` は読まない。** `neighborFilters` が同一システムに
+ * 絞っているので、どちらも要求した系統と等しいと分かっている。読まない列は
+ * `NEIGHBOR_COLUMNS` にも並べない（増えたときに気づける状態を保つ）。
+ */
+export const neighborRowSchema = z.object({
+  station_id: z.string().min(1),
+  nb_station_id: z.string().min(1),
+  distance_m: z.number().int().nonnegative(),
+});
+
 export type FeedRow = z.infer<typeof feedRowSchema>;
 export type StationRow = z.infer<typeof stationRowSchema>;
+export type NeighborRow = z.infer<typeof neighborRowSchema>;

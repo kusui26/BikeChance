@@ -17,19 +17,25 @@ import { z } from "zod";
 import {
   FEEDS_VIEW,
   FEED_COLUMNS,
+  NEIGHBORS_VIEW,
+  NEIGHBOR_COLUMNS,
   STATIONS_VIEW,
   STATION_COLUMNS,
   STATION_ORDER,
   bboxFilters,
   feedRowSchema,
+  neighborFilters,
+  neighborRowSchema,
+  stationIdFilters,
   stationRowSchema,
   systemFilters,
   type FeedRow,
   type Filter,
+  type NeighborRow,
   type StationRow,
 } from "./view-query";
 
-export type { FeedRow, StationRow } from "./view-query";
+export type { FeedRow, NeighborRow, StationRow } from "./view-query";
 
 export type StationsPage = {
   readonly rows: readonly StationRow[];
@@ -44,6 +50,19 @@ export type ReadPort = {
     readonly system_id: SystemId | null;
     readonly limit: number;
   }) => Promise<StationsPage>;
+  /**
+   * ID を並べてポートを引く（`/v1/trip-check`）。**系統では絞らない**（W4-21）。
+   * `station_id` はシステムをまたいで衝突するので、選り分けるのは呼ぶ側の仕事になる。
+   */
+  readonly listStationsByIds: (params: {
+    readonly station_ids: readonly string[];
+  }) => Promise<readonly StationRow[]>;
+  /** 代替候補（同一システム・指定の半径まで）。**距離の昇順**で返す。 */
+  readonly listNeighbors: (params: {
+    readonly system_id: SystemId;
+    readonly station_ids: readonly string[];
+    readonly radius_m: number;
+  }) => Promise<readonly NeighborRow[]>;
 };
 
 /** DB に届かなかった／応答の形が違った。上位はこれを 503 に写す。 */
@@ -54,11 +73,13 @@ export class ReadError extends Error {
   }
 }
 
-/** 絞り込みを順に適用する。3 つのメソッドはどれも同じビルダを返す。 */
+/** 絞り込みを順に適用する。どのメソッドも同じビルダを返す。 */
 type Filterable<T> = {
   readonly gte: (column: string, value: number) => T;
   readonly lte: (column: string, value: number) => T;
   readonly eq: (column: string, value: string) => T;
+  readonly is: (column: string, value: boolean) => T;
+  readonly in: (column: string, values: readonly string[]) => T;
 };
 
 const applyFilters = <T extends Filterable<T>>(builder: T, filters: readonly Filter[]): T =>
@@ -70,6 +91,12 @@ const applyFilters = <T extends Filterable<T>>(builder: T, filters: readonly Fil
         return acc.lte(filter.column, filter.value);
       case "eq":
         return acc.eq(filter.column, filter.value);
+      // 真偽値は `eq` ではなく `is`。PostgREST は `eq.true` も解するが、**NULL を含む列で
+      // 意味が変わる**（`is` は三値論理を正しく扱う）ので、真偽値は常に `is` で送る
+      case "is":
+        return acc.is(filter.column, filter.value);
+      case "in":
+        return acc.in(filter.column, filter.values);
     }
   }, builder);
 
@@ -114,5 +141,39 @@ export const createSupabaseReadPort = (client: SupabaseClient): ReadPort => ({
     }
     const rows = parseRows(STATIONS_VIEW, stationRowSchema, data);
     return { rows, total: count ?? rows.length };
+  },
+
+  listStationsByIds: async ({ station_ids }) => {
+    // **空の `in` は送らない。** PostgREST は `in.()` を構文誤りとして 400 にする
+    if (station_ids.length === 0) {
+      return [];
+    }
+    const selected = client.from(STATIONS_VIEW).select(STATION_COLUMNS);
+    const { data, error } = await applyFilters(selected, stationIdFilters(station_ids)).abortSignal(
+      AbortSignal.timeout(V1_QUERY_TIMEOUT_MS),
+    );
+    if (error !== null) {
+      throw toReadError(STATIONS_VIEW, error);
+    }
+    return parseRows(STATIONS_VIEW, stationRowSchema, data);
+  },
+
+  listNeighbors: async ({ system_id, station_ids, radius_m }) => {
+    if (station_ids.length === 0) {
+      return [];
+    }
+    const selected = client.from(NEIGHBORS_VIEW).select(NEIGHBOR_COLUMNS);
+    // 並びは固定する。同じ要求が同じ応答になり、差分も追える（`STATION_ORDER` と同じ方針）
+    const { data, error } = await applyFilters(
+      selected,
+      neighborFilters({ system_id, station_ids, radius_m }),
+    )
+      .order("distance_m", { ascending: true })
+      .order("nb_station_id", { ascending: true })
+      .abortSignal(AbortSignal.timeout(V1_QUERY_TIMEOUT_MS));
+    if (error !== null) {
+      throw toReadError(NEIGHBORS_VIEW, error);
+    }
+    return parseRows(NEIGHBORS_VIEW, neighborRowSchema, data);
   },
 });
