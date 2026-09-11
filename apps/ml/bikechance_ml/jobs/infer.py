@@ -23,7 +23,7 @@ LightGBM は W4 以降（W3-18）。**予測テーブルを埋め始め、5 分�
 import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Final, Protocol
 
@@ -229,9 +229,16 @@ class InferSummary:
     reference_date: str | None = None
     #: 使えた予報の発行数。**0 なら天気の 4 列は全部 NULL**（W4 プラン §6.4）
     weather_issues: int = 0
+    #: 気象格子に当たらなかったポート数。**理由は 3 つある**（W4 プラン §6.4、§12 の 119）
+    n_without_weather: int = 0
+    #: 参照スナップショットに未掲載のポート数。**この数は予測が出ない**（同 §6.3c、§12 の 118）
+    n_unreferenced: int = 0
+    #: **いま作っている**特徴量の版（`FEATURE_SET`）。`model_feature_set` とは別物
+    feature_set: str = ""
     #: 配った版の種類（`baseline` / `lightgbm`）。**何を配ったかが後から読める**
     model_kind: str = ""
-    #: その版を**当てはめたときの**特徴量の版。配信側は `FEATURE_SET`（W4 プラン §6.5）
+    #: その版を**当てはめたときの**特徴量の版。**`feature_set` と一致しなくてよい**
+    #: （ベースラインが読む 6 列は v0 から v3 まで変わっていない。W4-17）
     model_feature_set: str = ""
     #: 試し打ちで作れた予測の数（書いていないので `n_rows` は 0 になる）
     n_predicted: int = 0
@@ -430,26 +437,65 @@ def _dry_run(
     base = port.read_base_observed_at(system_id)
     stale = base is None or (at - base).total_seconds() > MAX_STALENESS_S
     forecasts = predict(predictor, system_id, at, ready.table, stale)
+    return replace(
+        _completed(
+            system_id=system_id,
+            status="dry_run",
+            base=base,
+            predictor=predictor,
+            ready=ready,
+            started=started,
+            cpu_started=cpu_started,
+            features_ms=features_ms,
+            reference_day=reference_day,
+            # **書いていないので 0。** 出せた数は `predicted` に出る
+            n_rows=0,
+        ),
+        n_predicted=len(forecasts),
+        sample=_sample_of(forecasts),
+    )
+
+
+def _completed(
+    *,
+    system_id: str,
+    status: str,
+    base: datetime | None,
+    predictor: Predictor,
+    ready: build.Ready,
+    started: datetime,
+    cpu_started: int,
+    features_ms: int,
+    reference_day: date,
+    n_rows: int,
+) -> InferSummary:
+    """走り切った 1 回の要約。**`ready.stats` から何を持ち出すかを、ここ 1 か所で決める。**
+
+    以前は試し打ちと本番でこの組み立てを 2 回書いていた。そのため PR D で足した
+    `stations_without_weather` と、PR C の `stations_unreferenced` が**どちらの側にも
+    入らなかった**——計算されているのに `inference_log` に出ない状態が続いた
+    （W4 プラン §8.5.8）。**写す場所を 1 つにして、次に足したものが片方だけに入る道を消す。**
+    """
     return InferSummary(
         system_id=system_id,
-        status="dry_run",
+        status=status,
         base_observed_at=base,
         model_version=predictor.model_version,
         n_stations=ready.stats.stations,
         n_skipped=sum(ready.stats.excluded.values()),
         n_unknown_ports=predictor.unknown_ports(system_id, ready.table),
-        # **書いていないので 0。** 出せた数は `predictable` に出る
-        n_rows=0,
+        n_rows=n_rows,
         duration_ms=_elapsed_ms(started),
         cpu_ms=_cpu_ms(cpu_started),
         features_ms=features_ms,
         excluded=dict(sorted(ready.stats.excluded.items())),
         reference_date=reference_day.isoformat(),
         weather_issues=ready.stats.weather_issues,
+        n_without_weather=ready.stats.stations_without_weather,
+        n_unreferenced=ready.stats.stations_unreferenced,
+        feature_set=ready.stats.feature_set,
         model_kind=predictor.kind,
         model_feature_set=predictor.feature_set,
-        n_predicted=len(forecasts),
-        sample=_sample_of(forecasts),
     )
 
 
@@ -487,23 +533,17 @@ def _produce(
     forecasts = predict(predictor, system_id, at, ready.table, stale)
     payload = to_payload(forecasts, at, base, predictor.model_version)
     written = sum(port.upsert_forecasts(chunk) for chunk in batches(payload, UPSERT_BATCH))
-    return InferSummary(
+    return _completed(
         system_id=system_id,
         status="ok",
-        base_observed_at=base,
-        model_version=predictor.model_version,
-        n_stations=ready.stats.stations,
-        n_skipped=sum(ready.stats.excluded.values()),
-        n_unknown_ports=predictor.unknown_ports(system_id, ready.table),
-        n_rows=written,
-        duration_ms=_elapsed_ms(started),
-        cpu_ms=_cpu_ms(cpu_started),
+        base=base,
+        predictor=predictor,
+        ready=ready,
+        started=started,
+        cpu_started=cpu_started,
         features_ms=features_ms,
-        excluded=dict(sorted(ready.stats.excluded.items())),
-        reference_date=reference_day.isoformat(),
-        weather_issues=ready.stats.weather_issues,
-        model_kind=predictor.kind,
-        model_feature_set=predictor.feature_set,
+        reference_day=reference_day,
+        n_rows=written,
     )
 
 
@@ -570,6 +610,15 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         "excluded": dict(summary.excluded),
         "reference_date": summary.reference_date,
         "weather_issues": summary.weather_issues,
+        # **気象格子に当たらないポート**（W4 プラン §6.4）と、**参照スナップショットに
+        # 未掲載のポート**（同 §6.3c）。どちらも毎回計算していたのに、**転送を忘れて
+        # いたので記録に出ていなかった**（同 §8.5.8）。0 でない値が出るのが正常である
+        "stations_without_weather": summary.n_without_weather,
+        "stations_unreferenced": summary.n_unreferenced,
+        # **いま作っている**特徴量の版。`model_feature_set` は**当てはめたときの**版で、
+        # **一致しなくてよい**（ベースラインが読む 6 列は v0 から v3 まで変わっていない。
+        # W4-17）。両方を出さないと、版を上げたことが記録から読めない
+        "feature_set": summary.feature_set,
         "model_kind": summary.model_kind,
         "model_feature_set": summary.model_feature_set,
         # **試し打ちのときだけ載せる。** 通常の推論では 0 と空になる
@@ -582,29 +631,21 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
     }
 
 
-def to_record(summary: InferSummary) -> dict[str, object]:
-    """`inference_log.detail` に残す要約。
+#: `inference_log` が**列で持っている**値（`to_detail` の鍵で書く）。
+#:
+#: 同じ値を jsonb にも並べると 1 日 576 行ぶん無駄に膨らむ（0030 の冒頭）。
+#: `ok` は `status` から決まるので、これも列の側に数える。
+IN_COLUMNS: Final[frozenset[str]] = frozenset(
+    {"ok", "system", "status", "base_observed_at", "model_version", "rows", "duration_ms", "error"}
+)
 
-    **列に在るものは入れない。** `status` / `n_rows` / `duration_ms` / `error` /
-    `model_version` / `base_observed_at` は列で持っているので、同じ値を jsonb にも
-    並べると 1 日 576 行ぶん無駄に膨らむ（0030 の冒頭）。
+
+def to_record(summary: InferSummary) -> dict[str, object]:
+    """`inference_log.detail` に残す要約。**応答から、列に在るものを落としたもの。**
+
+    **一覧は `to_detail` の 1 つだけにする。** 以前は応答と記録で別々に欄を並べて
+    いたので、**片方に足してもう片方を忘れる道**があった。実際 `cpu_ms` は記録にだけ、
+    `stations_without_weather` はどちらにも無い、という食い違いが起きていた
+    （W4 プラン §8.5.8）。
     """
-    return {
-        "stations": summary.n_stations,
-        "skipped": summary.n_skipped,
-        "unknown_ports": summary.n_unknown_ports,
-        # **`cpu_ms` は列にしない。** 開発プラン §5.3 の DDL には在るが、実装では
-        # `detail` に入れる（列を足さずに済み、0030 でその口を作った）
-        "cpu_ms": summary.cpu_ms,
-        # 推論の所要の大半は特徴量づくり。**分けて見えないと、遅くなったときに
-        # どこが遅いか分からない**（W4 プラン §6.3 の完了条件）
-        "features_ms": summary.features_ms,
-        "excluded": dict(summary.excluded),
-        # **どの版の参照データで出した予測か。** 00:00〜05:00 JST は 1 つ古い版になる
-        "reference_date": summary.reference_date,
-        # **天気が乗っているか。** 0 なら取り込みが止まっている（`load_weather`）
-        "weather_issues": summary.weather_issues,
-        # **何を配ったか。** 版は列に在るが、種類と特徴量の版は在らない
-        "model_kind": summary.model_kind,
-        "model_feature_set": summary.model_feature_set,
-    }
+    return {key: value for key, value in to_detail(summary).items() if key not in IN_COLUMNS}
