@@ -188,7 +188,7 @@ create function pg_temp.cron_only() returns text[] language sql immutable as $$
     'check_reference_data', 'check_inference',
     'rebuild_geo', 'rebuild_station_geo', 'rebuild_station_neighbors',
     -- 他の関数の中からだけ呼ぶ補助
-    'send_alert', 'config_int', 'jsonb_boolean', 'jsonb_number',
+    'send_alert', 'config_int', 'jsonb_boolean', 'jsonb_number', 'failure_reason',
     -- Supabase が作る（こちらの管理外）
     'rls_auto_enable',
     -- このテスト自身が既定権限を測るために作る

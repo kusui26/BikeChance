@@ -8,7 +8,7 @@
 -- 確かめられるのは記録と抑制の論理まで（0007 と同じ）。
 
 begin;
-select plan(84);
+select plan(100);
 
 -- 自分の前提を作る
 delete from public.status_snapshots;
@@ -227,6 +227,86 @@ delete from public.job_runs; delete from public.alert_state;
 insert into public.job_runs (job_name, started_at, finished_at, status)
 values ('pgtap_fake_job', now() - interval '5 hours', now() - interval '5 hours', 'failed');
 select is(public.check_jobs_failed() -> 'alerts', '0'::jsonb, '3 時間より古い失敗では鳴らない');
+
+-- ────────────────────────────────────────────────────────────────
+-- 通知に「何が失われたか」を書く（0041、W4 プラン §6.8 の PR K）
+-- ────────────────────────────────────────────────────────────────
+-- **理由の取り出しは、実際に書かれている 4 つの形を並べたもの。** 推測ではない
+select is(public.failure_reason(jsonb_build_object('error', 'boom', 'code', 'XX000')),
+          'boom', 'error（ジョブ全体が落ちた形）を拾う');
+select is(public.failure_reason(
+            jsonb_build_object('n_failed', 1,
+                               'failures', jsonb_build_array('0: fetch/TypeError: fetch failed'))),
+          '0: fetch/TypeError: fetch failed',
+          'failures（分割が落ちた形。**2026-09-10 に拾えなかった形**）を拾う');
+select is(public.failure_reason(
+            jsonb_build_object('ok', false, 'systems', jsonb_build_array(
+              jsonb_build_object('system_id', 'a', 'error', null),
+              jsonb_build_object('system_id', 'b', 'error', 'storage 500')))),
+          'storage 500', 'systems[].error（系統が落ちた形）を拾う');
+select is(public.failure_reason(jsonb_build_object('reason', 'cron_secret が未設定')),
+          'cron_secret が未設定', 'reason（起動できなかった形）を拾う');
+
+-- **知らない形でも黙らない。** NULL を返すと、また「last_error: null」だけが届く
+select is(public.failure_reason(jsonb_build_object('未知の鍵', 42)),
+          '{"未知の鍵": 42}', '知らない形は生の断片を返す');
+select is(public.failure_reason(null), null, 'detail が無ければ理由も無い');
+select is(public.failure_reason('{}'::jsonb), null, '空の detail は理由にしない');
+-- 空文字は理由として採らない。**ただし黙りもしない**——生の断片が出る
+select is(public.failure_reason(jsonb_build_object('error', '')),
+          '{"error": ""}', '空文字は理由にせず、生の断片に落ちる');
+
+-- **`error` が在れば、ほかの鍵より優先する**（ジョブ全体の失敗のほうが上位の事実）
+select is(public.failure_reason(
+            jsonb_build_object('error', '全体が落ちた', 'failures', jsonb_build_array('分割'))),
+          '全体が落ちた', 'error が在れば failures より優先する');
+
+-- 完了条件：**`archive_weather` を 1 回わざと失敗させると、理由と「取り返せない」が出る**
+delete from public.job_runs; delete from public.alert_state;
+insert into public.job_runs (job_name, started_at, finished_at, status, detail)
+values ('archive_weather', now() - interval '2 minutes', now(), 'failed',
+        jsonb_build_object('n_batches', 6, 'n_saved', 5, 'n_failed', 1,
+                           'failures', jsonb_build_array('0: fetch/TypeError: fetch failed')));
+select is(public.check_jobs_failed() -> 'alerts', '1'::jsonb, 'archive_weather の失敗で鳴る');
+select is(
+  (select last_value->>'last_error' from public.alert_state
+    where alert_key = 'job_failed:archive_weather'),
+  '0: fetch/TypeError: fetch failed',
+  '通知に理由が入る（2026-09-10 は null だった）'
+);
+select alike(
+  (select last_value->>'message' from public.alert_state
+    where alert_key = 'job_failed:archive_weather'),
+  '%二度と取れません%',
+  '通知の本文に「取り返せない」と書いてある'
+);
+select alike(
+  (select last_value->>'message' from public.alert_state
+    where alert_key = 'job_failed:archive_weather'),
+  '%Open-Meteo は過去の発行を返さない%',
+  '本文にその理由（なぜ取り返せないか）も入る'
+);
+
+-- **印の無いジョブには足さない。** 全部に同じ文が付くと、付いていることに意味が無くなる
+delete from public.job_runs; delete from public.alert_state;
+insert into public.job_runs (job_name, started_at, finished_at, status, detail)
+values ('compact_parquet', now() - interval '2 minutes', now(), 'failed',
+        jsonb_build_object('error', 'boom'));
+select is(public.check_jobs_failed() -> 'alerts', '1'::jsonb, 'compact_parquet の失敗でも鳴る');
+select is(
+  (select last_value->>'message' from public.alert_state
+    where alert_key = 'job_failed:compact_parquet'),
+  'compact_parquet が直近 3 時間に 1 回失敗しました',
+  '印の無いジョブの本文は元のまま（再実行で取り返せるので足すことが無い）'
+);
+
+-- **印が付いているのは 1 本だけ**であることを固定する（増やすなら理由を書いてから）
+select is(
+  (select array_agg(job_name order by job_name) from public.monitored_jobs
+    where failure_note is not null),
+  array['archive_weather'],
+  'failure_note が付いているのは archive_weather だけ'
+);
 
 -- **monitored_jobs に入っていないジョブの失敗も拾う**（どこで落ちても知りたい）
 delete from public.job_runs; delete from public.alert_state;
