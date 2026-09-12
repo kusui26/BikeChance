@@ -11,7 +11,7 @@
       "framework": "fastapi",
       "functions": {
         "**/*.py": {
-          "maxDuration": 120
+          "maxDuration": 240
         }
       }
     }

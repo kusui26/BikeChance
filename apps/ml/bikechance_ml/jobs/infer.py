@@ -40,6 +40,7 @@ from bikechance_ml.features.constants import (
 from bikechance_ml.features.grid import from_epoch_ms, jst_date, to_epoch_ms
 from bikechance_ml.features.reference import SystemReference
 from bikechance_ml.features.weather import WeatherRow
+from bikechance_ml.jobs import forecast_log
 from bikechance_ml.jobs.build_features import (
     SYSTEM_IDS,
     Estimates,
@@ -90,6 +91,7 @@ class InferPort(Protocol):
         detail: Mapping[str, object] | None = None,
     ) -> None: ...
     def upsert_forecasts(self, rows: Sequence[Mapping[str, object]]) -> int: ...
+    def upload_forecast_log(self, path: str, body: bytes) -> None: ...
 
 
 def grid_time(now: datetime) -> datetime:
@@ -240,6 +242,10 @@ class InferSummary:
     #: その版を**当てはめたときの**特徴量の版。**`feature_set` と一致しなくてよい**
     #: （ベースラインが読む 6 列は v0 から v3 まで変わっていない。W4-17）
     model_feature_set: str = ""
+    #: 予測ログ（`forecast-log/`）を置けたか。`"ok"` か `"failed:<例外の種類>"`。
+    #: **置けなくても推論は落とさない**ので（D-24）、失敗はここにしか出ない。
+    #: 試し打ちは何も書かないので空のままになる
+    forecast_log: str = ""
     #: 試し打ちで作れた予測の数（書いていないので `n_rows` は 0 になる）
     n_predicted: int = 0
     #: 試し打ちの見本 1 件
@@ -450,6 +456,8 @@ def _dry_run(
             reference_day=reference_day,
             # **書いていないので 0。** 出せた数は `predicted` に出る
             n_rows=0,
+            # **試し打ちは予測ログも書かない**（W4-18。どこにも書かないのが試し打ち）
+            forecast_log_status="",
         ),
         n_predicted=len(forecasts),
         sample=_sample_of(forecasts),
@@ -468,6 +476,7 @@ def _completed(
     features_ms: int,
     reference_day: date,
     n_rows: int,
+    forecast_log_status: str,
 ) -> InferSummary:
     """走り切った 1 回の要約。**`ready.stats` から何を持ち出すかを、ここ 1 か所で決める。**
 
@@ -496,6 +505,7 @@ def _completed(
         feature_set=ready.stats.feature_set,
         model_kind=predictor.kind,
         model_feature_set=predictor.feature_set,
+        forecast_log=forecast_log_status,
     )
 
 
@@ -533,6 +543,10 @@ def _produce(
     forecasts = predict(predictor, system_id, at, ready.table, stale)
     payload = to_payload(forecasts, at, base, predictor.model_version)
     written = sum(port.upsert_forecasts(chunk) for chunk in batches(payload, UPSERT_BATCH))
+    # **配ってから記録する。** 順番に意味がある：ログを置けなくても配信は済んでいる
+    logged = _record_forecasts(
+        port, forecasts, system_id=system_id, at=at, base=base, ready=ready, chosen=predictor
+    )
     return _completed(
         system_id=system_id,
         status="ok",
@@ -544,7 +558,45 @@ def _produce(
         features_ms=features_ms,
         reference_day=reference_day,
         n_rows=written,
+        forecast_log_status=logged,
     )
+
+
+def _record_forecasts(
+    port: InferPort,
+    forecasts: Sequence[Forecast],
+    *,
+    system_id: str,
+    at: datetime,
+    base: datetime,
+    ready: build.Ready,
+    chosen: Predictor,
+) -> str:
+    """配った確率を `forecast-log/` に残す（D-24、W5 プラン §6.1）。
+
+    **置けなくても推論は落とさない。** 配ることのほうが大事で、ログは決定的なモデルと
+    保存済みの入力から作り直せる（W3-18）。ただし作り直しには `weather_hourly` の
+    **30 日**が要るので、**黙って落とさない**：成否は `inference_log.detail.forecast_log`
+    に残る（`monitor_jobs` は `job_runs` を見るので、ここは鳴らない）。
+
+    **覚え書きの `feature_set` は「いま作った特徴量の版」**である（`model_feature_set`
+    ではない）。あとから「どの版の特徴量で出した確率か」を辿るための欄で、当てはめた
+    ときの版は `model_version` から引ける（W4-17）。
+    """
+    try:
+        file = forecast_log.build(
+            forecasts,
+            system_id=system_id,
+            base_observed_at=base,
+            generated_at=at,
+            model_version=chosen.model_version,
+            feature_set=ready.stats.feature_set,
+        )
+        port.upload_forecast_log(file.path, file.body)
+    except Exception as cause:
+        _log(f"予測ログを置けませんでした: {system_id} / {type(cause).__name__}")
+        return f"failed:{type(cause).__name__}"
+    return "ok"
 
 
 def _skipped(
@@ -607,6 +659,9 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         # 遅くなったときに読み込みなのか組み立てなのかが分からない
         "features_ms": summary.features_ms,
         "cpu_ms": summary.cpu_ms,
+        # **予測ログを置けたか**（D-24、W5 プラン §6.1）。置けなくても推論は落とさない
+        # ので、**失敗はここにしか出ない**。試し打ちは何も書かないので欄ごと出ない
+        **({"forecast_log": summary.forecast_log} if summary.forecast_log else {}),
         "excluded": dict(summary.excluded),
         "reference_date": summary.reference_date,
         "weather_issues": summary.weather_issues,

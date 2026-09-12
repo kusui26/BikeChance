@@ -8,7 +8,7 @@
 -- 確かめられるのは記録と抑制の論理まで（0007 と同じ）。
 
 begin;
-select plan(100);
+select plan(107);
 
 -- 自分の前提を作る
 delete from public.status_snapshots;
@@ -491,6 +491,63 @@ select ok(pg_temp.has_alert('inference_stuck'), '通知する');
 select is(
   (select last_value->>'systems' from public.alert_state where alert_key = 'inference_stuck'),
   'hellocycling', 'どのシステムかを payload に入れる'
+);
+
+-- ────────────────────────────────────────────────────────────────
+-- 予測ログが置けていない（0042、W5 プラン §6.1 の PR A）
+-- ────────────────────────────────────────────────────────────────
+-- **置けなくても推論は落とさない**（W3-18）ので、`status` は `ok` のままである。
+-- 失敗は `detail.forecast_log` にしか出ない——**R19 と同じ「誰も見ていない」形**。
+-- 天気ほどではないが期限もある：作り直しには `weather_hourly` の 30 日が要る。
+delete from public.inference_log where true;
+delete from public.alert_state;
+
+insert into public.inference_log
+  (system_id, generated_at, base_observed_at, model_version, status, detail)
+values ('hellocycling', now() - interval '1 minute', now() - interval '1 minute',
+        'm1', 'ok', '{"forecast_log": "ok"}'::jsonb);
+select is(
+  public.check_inference() -> 'unlogged', '0'::jsonb, '置けていれば数えない'
+);
+
+insert into public.inference_log
+  (system_id, generated_at, base_observed_at, model_version, status, detail)
+values ('hellocycling', now() - interval '2 minutes', now() - interval '2 minutes',
+        'm1', 'ok', '{"forecast_log": "failed:TimeoutError"}'::jsonb);
+select is(
+  public.check_inference() -> 'unlogged', '1'::jsonb,
+  '**配信が ok でもログが置けていなければ数える**（status では気づけない）'
+);
+select ok(pg_temp.has_alert('forecast_log_failed'), '通知する');
+select is(
+  (select last_value->>'last_error' from public.alert_state
+    where alert_key = 'forecast_log_failed'),
+  'failed:TimeoutError',
+  '**理由まで載せる**（W4 の PR K：「1 回失敗しました」では動けない）'
+);
+select ok(
+  (select last_value->>'message' like '%作り直す%' from public.alert_state
+    where alert_key = 'forecast_log_failed'),
+  '**何が失われるかを書く**（配信は無事で、失われるのはその時刻の記録）'
+);
+
+-- **3 時間より前は数えない**（古い失敗で鳴り続けない）
+insert into public.inference_log
+  (system_id, generated_at, base_observed_at, model_version, status, detail)
+values ('docomo-cycle', now() - interval '4 hours', now() - interval '4 hours',
+        'm1', 'ok', '{"forecast_log": "failed:SupabaseError"}'::jsonb);
+select is(
+  public.check_inference() -> 'unlogged', '1'::jsonb, '窓は直近 3 時間'
+);
+
+-- **欄が無い回は数えない。** マイグレーションを先に出してもコードが古ければ欄は無い
+insert into public.inference_log
+  (system_id, generated_at, base_observed_at, model_version, status, detail)
+values ('docomo-cycle', now() - interval '3 minutes', now() - interval '3 minutes',
+        'm1', 'ok', '{"rows": 100}'::jsonb);
+select is(
+  public.check_inference() -> 'unlogged', '1'::jsonb,
+  '**欄が無い回は「置けなかった」と数えない**（デプロイの順序で鳴らない）'
 );
 
 -- 親の検査に持ち込まないよう、片づけてから戻す

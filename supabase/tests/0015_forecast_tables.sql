@@ -7,7 +7,7 @@
 --   * 匿名ロールからは**何も見えない**
 
 begin;
-select plan(44);
+select plan(48);
 
 delete from public.station_forecasts where true;
 delete from public.inference_log where true;
@@ -237,6 +237,31 @@ select is(
   (select allowed_mime_types from storage.buckets where id = 'gbfs-parquet'),
   array['application/vnd.apache.parquet'],
   'gbfs-parquet は Parquet だけのまま（成果物を混ぜない）'
+);
+
+-- ────────────────────────────────────────────────────────────────
+-- 予測ログの置き場所（0042。D-24、W5 プラン §6.1）
+-- ────────────────────────────────────────────────────────────────
+-- **`station_forecasts` は 5 分毎に上書きされる。** 記録しなかったサイクルは
+-- 作り直すしかなく、作り直しには `weather_hourly` の 30 日が要る（W5-10）
+select is(
+  (select count(*)::int from storage.buckets where id = 'forecast-log'), 1,
+  '予測ログのバケットがある（W6 の shadow の前提。開発プラン §8.4）'
+);
+select is(
+  (select public from storage.buckets where id = 'forecast-log'), false,
+  '**非公開**（読み書きはサービスロールのみ）'
+);
+select is(
+  (select allowed_mime_types from storage.buckets where id = 'forecast-log'),
+  array['application/vnd.apache.parquet'],
+  'Parquet だけを受け付ける（0017 と同じ IANA 登録済みの型）'
+);
+-- **`gbfs-parquet` と分けたのは寿命が違うから**（あちらは無期限、こちらは 12 か月）。
+-- 同じ MIME を許すので「混ぜても通ってしまう」——**分けたことを検査で固定する**
+select isnt(
+  (select id from storage.buckets where id = 'forecast-log'), 'gbfs-parquet',
+  '学習用アーカイブとは別のバケット（保持期間を別々に決められるようにする）'
 );
 
 -- ────────────────────────────────────────────────────────────────

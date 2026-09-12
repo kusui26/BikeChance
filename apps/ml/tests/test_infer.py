@@ -17,6 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Final
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from fastapi.testclient import TestClient
 
@@ -27,6 +28,7 @@ from bikechance_ml.features.build import NowStats
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN, MAX_STALENESS_S
 from bikechance_ml.features.grid import JST
 from bikechance_ml.features.weather import WeatherRow
+from bikechance_ml.jobs import forecast_log
 from bikechance_ml.jobs.fit_baseline import build_artifact
 from bikechance_ml.jobs.infer import (
     IN_COLUMNS,
@@ -242,6 +244,10 @@ class FakePort:
     candidate: Registered | None = None
     #: LightGBM の成果物（`lightgbm/` のパスに置かれたことにする）
     lightgbm_body: bytes | None = None
+    #: 置いた予測ログ（パス → バイト列）。**1 サイクル 1 ファイル**（D-24）
+    logs: dict[str, bytes] = field(default_factory=dict)
+    #: 予測ログだけを失敗させる。**落ちても配信は続く**ことを確かめるため
+    fail_forecast_log: bool = False
 
     def read_base_observed_at(self, system_id: str) -> datetime | None:
         return self.base
@@ -308,6 +314,11 @@ class FakePort:
     def upsert_forecasts(self, rows: Sequence[Mapping[str, object]]) -> int:
         self.written.extend(rows)
         return len(rows)
+
+    def upload_forecast_log(self, path: str, body: bytes) -> None:
+        if self.fail_forecast_log:
+            raise TimeoutError("storage が応答しない")
+        self.logs[path] = body
 
 
 def ready_port(rows: Sequence[tuple[str, int, int, int]] = STATIONS) -> FakePort:
@@ -516,6 +527,116 @@ def test_features_ms_is_reported() -> None:
     # **どの版の参照データを使ったか**も残す（00:00〜05:00 JST は 1 つ古い版になる）
     yesterday = (AT.astimezone(JST).date() - timedelta(days=1)).isoformat()
     assert recorded["reference_date"] == yesterday
+
+
+# ── 予測ログ（`forecast-log/`。D-24、W5 プラン §6.1）──────────
+def test_a_cycle_writes_exactly_one_log_file() -> None:
+    """**1 サイクル 1 ファイル。** 欠落を数えられるのはこの約束があるから。"""
+    port = ready_port()
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.forecast_log == "ok"
+    assert list(port.logs) == [forecast_log.log_path("hellocycling", BASE, ARTIFACT.model_version)]
+
+
+def test_the_log_holds_every_port_that_was_served() -> None:
+    """**配った行がそのまま残る。** `station_forecasts` と同じ数・同じ確率になる。"""
+    port = ready_port()
+    run_inference(port, "hellocycling", NOW)
+    table = pq.read_table(pa.BufferReader(next(iter(port.logs.values()))))
+    assert table.num_rows == len(port.written) == len(STATIONS)
+    logged = dict(
+        zip(table.column("station_id").to_pylist(), table.column("p_bike_x1000"), strict=True)
+    )
+    for row in port.written:
+        assert logged[row["station_id"]].as_py() == row["p_bike_x1000"]
+
+
+def test_the_log_can_be_joined_to_the_measurements() -> None:
+    """**結合の鍵は `base_observed_at`。** `station_forecasts` と同じ文字列にする。"""
+    port = ready_port()
+    run_inference(port, "hellocycling", NOW)
+    table = pq.read_table(pa.BufferReader(next(iter(port.logs.values()))))
+    assert set(table.column("base_observed_at").to_pylist()) == {BASE.isoformat()}
+    assert {row["base_observed_at"] for row in port.written} == {BASE.isoformat()}
+
+
+def test_the_log_records_which_feature_set_made_it() -> None:
+    """覚え書きは**当てはめたときの版ではなく、いま作った特徴量の版**（W4-17）。"""
+    port = ready_port()
+    run_inference(port, "hellocycling", NOW)
+    metadata = pq.read_table(pa.BufferReader(next(iter(port.logs.values())))).schema.metadata
+    assert metadata[b"feature_set"] == FEATURE_SET.encode()
+    assert metadata[b"system_id"] == b"hellocycling"
+
+
+def test_a_storage_failure_does_not_stop_the_serving() -> None:
+    """**配ることのほうが大事で、ログは作り直せる**（W3-18、D-24）。
+
+    Storage が落ちても `station_forecasts` は埋まり、`inference_log` は `ok` のまま。
+    """
+    port = ready_port()
+    port.fail_forecast_log = True
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    assert summary.n_rows == len(STATIONS)
+    assert port.finished == [(2, "ok", len(STATIONS))]
+    assert port.logs == {}
+
+
+def test_a_storage_failure_is_still_written_down() -> None:
+    """**黙って落とさない。** 失敗は `detail` にしか出ないので、種類まで残す。"""
+    port = ready_port()
+    port.fail_forecast_log = True
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.forecast_log == "failed:TimeoutError"
+    recorded = port.details[0]
+    assert recorded is not None and recorded["forecast_log"] == "failed:TimeoutError"
+
+
+def test_the_failure_note_carries_no_message() -> None:
+    """**例外の文言は接続先や鍵を抱えうる**（CLAUDE.md §5）。種類だけにする。"""
+    port = ready_port()
+    port.fail_forecast_log = True
+    detail = to_detail(run_inference(port, "hellocycling", NOW))
+    assert "storage が応答しない" not in str(detail)
+
+
+def test_a_dry_run_writes_no_log() -> None:
+    """**試し打ちはどこにも書かない**（W4-18）。予測ログも例外ではない。
+
+    書けば `forecast-log/` に候補の確率が混ざり、**実運用 Brier が配っていない
+    モデルを測る**ことになる（`station_forecasts` に書かないのと同じ理由）。
+    """
+    port = ready_port()
+    port.candidate = Registered(
+        model_version="baseline-candidate",
+        kind="baseline",
+        feature_set=ARTIFACT.feature_set,
+        artifact_path=artifact_path("baseline-candidate"),
+        status="candidate",
+    )
+    summary = run_inference(port, "hellocycling", NOW, "baseline-candidate")
+    assert summary.status == "dry_run"
+    assert port.logs == {}
+    assert "forecast_log" not in to_detail(summary)
+
+
+def test_a_skipped_cycle_writes_no_log() -> None:
+    """**2 度目は掴めないので何も起きない。** ログも増えない。"""
+    port = ready_port()
+    run_inference(port, "hellocycling", NOW)
+    run_inference(port, "hellocycling", NOW)
+    assert len(port.logs) == 1
+
+
+def test_the_same_observation_overwrites_the_same_path() -> None:
+    """パスは `(基準時刻, 版)` で決まる。**作り直しても増えない。**"""
+    first = ready_port()
+    run_inference(first, "hellocycling", NOW)
+    second = ready_port()
+    run_inference(second, "hellocycling", NOW)
+    assert list(first.logs) == list(second.logs)
+    assert next(iter(first.logs.values())) == next(iter(second.logs.values()))
 
 
 # ── 内訳がぜんぶ記録に届くこと（W4 プラン §8.5.8）───────────────

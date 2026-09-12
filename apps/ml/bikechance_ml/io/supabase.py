@@ -51,6 +51,12 @@ PARQUET_BUCKET: Final[str] = "gbfs-parquet"
 #: Parquet の Content-Type。IANA 登録済みの型で、バケットの `allowed_mime_types` と揃える。
 PARQUET_CONTENT_TYPE: Final[str] = "application/vnd.apache.parquet"
 
+#: 予測ログを置くバケット。0042 で作る。**`gbfs-parquet` に相乗りさせない**——あちらは
+#: 無期限で、こちらは 12 か月保持である（D-24）。中身は同じ Parquet でも、
+#: **寿命と作り直し方が違うものを混ぜると保持を別々に決められない**
+#: （W3 プラン §12 の 106 と同じ判断）。形は `jobs/forecast_log.py`。
+FORECAST_LOG_BUCKET: Final[str] = "forecast-log"
+
 #: 台帳の 1 ページ。14,900 件なら 4 往復（5,000 が 3 回と、空のページ 1 回）で済む。
 STATION_PAGE_SIZE: Final[int] = 5_000
 
@@ -511,6 +517,14 @@ class SupabaseIo:
     def upload_parquet(self, path: str, body: bytes) -> None:
         """同じパスに上書きする。同じ時間帯を 2 回処理しても結果が変わらない。"""
         self.upload(PARQUET_BUCKET, path, body, PARQUET_CONTENT_TYPE)
+
+    def upload_forecast_log(self, path: str, body: bytes) -> None:
+        """予測ログの 1 サイクルぶんを置く（D-24）。
+
+        **同じパスに上書きする。** パスは `(基準時刻, 版)` で決まるので、同じ観測に
+        対する 2 度目は同じ中身になる。
+        """
+        self.upload(FORECAST_LOG_BUCKET, path, body, PARQUET_CONTENT_TYPE)
 
     def upload(self, bucket: str, path: str, body: bytes, content_type: str) -> None:
         """Storage の 1 オブジェクトを置く（上書き）。"""
