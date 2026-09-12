@@ -46,15 +46,34 @@ ISSUED: Final[datetime] = issued_hour_of(HOUR_EPOCH_S)
 NOW: Final[datetime] = ISSUED + timedelta(hours=1)
 
 
-def _issue(hour_epoch_s: int = HOUR_EPOCH_S, n_cells: int = 2, n_loaded: int = 0) -> PendingIssue:
+def _issue(
+    hour_epoch_s: int = HOUR_EPOCH_S,
+    n_cells: int = 2,
+    n_loaded: int = 0,
+    available_at: datetime | None = None,
+) -> PendingIssue:
     issued = issued_hour_of(hour_epoch_s)
     return PendingIssue(
         hour_epoch_s=hour_epoch_s,
         issued_hour=issued,
-        available_at=issued + timedelta(minutes=18),
+        available_at=available_at if available_at is not None else issued + timedelta(minutes=18),
         n_cells=n_cells,
         n_loaded=n_loaded,
     )
+
+
+def _recent_issue() -> PendingIssue:
+    """**入口（`/ml/weather`）の検査で使う発行。**
+
+    入口は `datetime.now(UTC)` を使い、既定の窓は「48 時間前まで」である。発行時刻は
+    フィクスチャに縛られている（`read_batch` が `hourly.time` の範囲を要求する）ので
+    動かせないが、**`available_at` は動かせる**。
+
+    **固定の `available_at` にしていたせいで、2026-09-12 01:18 UTC にこの検査は
+    期限切れになった**——フィクスチャの発行が 48 時間より古くなり、窓から外れて
+    「未処理が 0 件」になった。**日付が来ると落ちる検査は、書いた日にしか通らない。**
+    """
+    return _issue(available_at=datetime.now(UTC) - timedelta(minutes=1))
 
 
 def _key(row: Mapping[str, object]) -> tuple[int, int, str]:
@@ -242,14 +261,14 @@ AUTH: Final[Mapping[str, str]] = {"Authorization": "Bearer s3cret"}
 
 def test_route_requires_the_cron_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     """**DB にもログにも何も書かずに弾く。**"""
-    port = FakePort(pending=(_issue(),))
+    port = FakePort(pending=(_recent_issue(),))
     response = _client(port, monkeypatch).get("/ml/weather")
     assert response.status_code == 401
     assert port.runs == []
 
 
 def test_route_returns_the_summary(monkeypatch: pytest.MonkeyPatch) -> None:
-    port = FakePort(pending=(_issue(),))
+    port = FakePort(pending=(_recent_issue(),))
     response = _client(port, monkeypatch).get("/ml/weather", headers=dict(AUTH))
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
@@ -258,7 +277,9 @@ def test_route_returns_the_summary(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_route_returns_500_when_an_issue_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """**失敗は 500 で返す**（Vercel Observability のエラー率検知を効かせる）。"""
-    port = FakePort(pending=(_issue(),), missing=frozenset({weather_object_path(HOUR_EPOCH_S, 0)}))
+    port = FakePort(
+        pending=(_recent_issue(),), missing=frozenset({weather_object_path(HOUR_EPOCH_S, 0)})
+    )
     response = _client(port, monkeypatch).get("/ml/weather", headers=dict(AUTH))
     assert response.status_code == 500
     assert response.json()["failed"] == 1

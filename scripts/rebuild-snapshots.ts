@@ -16,19 +16,40 @@
  * **必ず古い順に流す**（W2-08）。`stations.idx` は「その時点で未登録のポートを入力順に
  * 末尾へ足す」で採番されるため、順序が違えば別の値になる。
  *
+ * **`--dry-run` は「流したら何が起きるか」と「すでに在るものが生 JSON と一致しているか」の
+ * 両方を見る**（W4 プラン §6.8 の PR M）。以前は一覧とパーティションを数えるだけで、
+ * **生 JSON を 1 バイトも読んでいなかった**——数えるだけでは、正規化が壊れていても
+ * 気づけない。突き合わせの規則は `@bikechance/gbfs-core` の `verifyRebuild` にあり、
+ * フィクスチャで CI が毎回通す。**書き込みは一切しない。**
+ *
  * 使い方:
  *   pnpm exec tsx scripts/rebuild-snapshots.ts <環境ファイル> <system> <開始日> <終了日> [--dry-run]
- *   pnpm exec tsx scripts/rebuild-snapshots.ts .env hellocycling 2026-09-06 2026-09-06 --dry-run
+ *
+ *   # 1 日ぶんを突き合わせる（書かない）
+ *   pnpm exec tsx scripts/rebuild-snapshots.ts .env hellocycling 2026-09-08 2026-09-08 --dry-run
+ *   # 様子見だけなら件数を絞る（ドコモは 1 日 1,050 件）
+ *   pnpm exec tsx scripts/rebuild-snapshots.ts .env docomo-cycle 2026-09-08 2026-09-08 --dry-run --sample=20
+ *   # 実際に流す（--dry-run を外す）
+ *   pnpm exec tsx scripts/rebuild-snapshots.ts .env hellocycling 2026-09-06 2026-09-06
  *
  * 日付は **UTC**（Storage のパスと同じ）。開始日・終了日とも含む。
+ *
+ * **実測**（2026-09-12、本番）：hellocycling 1 日 288 件・1,719 万値で 3 分 21 秒、
+ * docomo-cycle 1 日 1,050 件・2,445 万値で 9 分 46 秒。**どちらも食い違い 0。**
  */
 import { readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import {
+  SNAPSHOT_FIELDS,
   buildIngestArgs,
   normalizeStationStatus,
   parseStationStatusFeed,
+  verifyRebuild,
   type IngestArgs,
+  type LedgerStation,
+  type RebuildVerification,
+  type SnapshotSource,
+  type StoredSnapshot,
 } from "@bikechance/gbfs-core";
 import {
   RAW_BUCKET,
@@ -183,6 +204,112 @@ const listIngestedEpochs = async (
   }
 };
 
+/** `stations` の 1 行（台帳）。`idx` が配列の位置を決める。 */
+const isLedgerRow = (value: unknown): value is LedgerStation =>
+  typeof value === "object" &&
+  value !== null &&
+  typeof Reflect.get(value, "station_id") === "string" &&
+  typeof Reflect.get(value, "idx") === "number";
+
+const isNumberArray = (value: unknown): value is number[] =>
+  Array.isArray(value) && value.every((one) => typeof one === "number");
+
+/** `status_snapshots` の 1 行のうち、突き合わせに要る分だけ。 */
+const isStoredRow = (value: unknown): value is StoredSnapshot => {
+  if (typeof value !== "object" || value === null) return false;
+  const raw_path = Reflect.get(value, "raw_path");
+  return (
+    typeof Reflect.get(value, "observed_at") === "string" &&
+    typeof Reflect.get(value, "n_stations") === "number" &&
+    (raw_path === null || typeof raw_path === "string") &&
+    SNAPSHOT_FIELDS.every((field) => isNumberArray(Reflect.get(value, field)))
+  );
+};
+
+/** 台帳を丸ごと読む。**`idx` の順に並べる**（配列の位置と対応させるため）。 */
+const listLedger = async (env: Env, system_id: SystemId): Promise<LedgerStation[]> => {
+  const found: LedgerStation[] = [];
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const query =
+      `select=station_id,idx&system_id=eq.${system_id}` +
+      `&order=idx.asc&limit=${PAGE_SIZE}&offset=${offset}`;
+    const response = await fetch(`${env["SUPABASE_URL"]}/rest/v1/stations?${query}`, {
+      headers: authHeaders(env),
+    });
+    if (!response.ok) {
+      throw new Error(`REST stations が ${response.status}`);
+    }
+    const body: unknown = await response.json();
+    if (!Array.isArray(body)) {
+      throw new Error("stations が配列を返さなかった");
+    }
+    const rows: readonly unknown[] = body;
+    found.push(...rows.filter(isLedgerRow));
+    if (rows.length < PAGE_SIZE) {
+      return found;
+    }
+  }
+};
+
+/** その `observed_at` の行。**無ければ null**（取り込み漏れとして数える）。 */
+const readSnapshotRow = async (
+  env: Env,
+  system_id: SystemId,
+  observed_at: string,
+): Promise<StoredSnapshot | null> => {
+  const query =
+    `select=observed_at,n_stations,raw_path,${SNAPSHOT_FIELDS.join(",")}` +
+    `&system_id=eq.${system_id}&observed_at=eq.${encodeURIComponent(observed_at)}&limit=1`;
+  const response = await fetch(`${env["SUPABASE_URL"]}/rest/v1/status_snapshots?${query}`, {
+    headers: authHeaders(env),
+  });
+  if (!response.ok) {
+    throw new Error(`REST status_snapshots が ${response.status}`);
+  }
+  const body: unknown = await response.json();
+  if (!Array.isArray(body)) {
+    throw new Error("status_snapshots が配列を返さなかった");
+  }
+  const [row] = body;
+  return isStoredRow(row) ? row : null;
+};
+
+const snapshotSource = (env: Env, system_id: SystemId): SnapshotSource => ({
+  readFeed: (path) => downloadFeed(env, path),
+  readSnapshot: (observed_at) => readSnapshotRow(env, system_id, observed_at),
+});
+
+/** 突き合わせの結果を人が読む形に。**食い違いは先頭だけ出す**（全部は多すぎる）。 */
+const reportVerification = (outcome: RebuildVerification): void => {
+  console.log("");
+  console.log(
+    `突き合わせ  : ${outcome.checked} 件中 ${outcome.matched} 件一致` +
+      `（値 ${outcome.n_values.toLocaleString("en-US")} 個。` +
+      `取り込み漏れ ${outcome.missing_rows.length} / 読めず ${outcome.unreadable.length}）`,
+  );
+  for (const path of outcome.missing_rows.slice(0, 5)) {
+    console.log(`  行が無い: ${path}`);
+  }
+  for (const one of outcome.unreadable.slice(0, 5)) {
+    console.log(`  読めず: ${one.path}: ${one.error}`);
+  }
+  for (const one of outcome.differing.slice(0, 3)) {
+    console.log(
+      `  食い違い: ${one.observed_at} 値 ${one.differences.length} / ` +
+        `未知のポート ${one.unknown_stations.length} / ` +
+        `件数 ${one.n_stations_rebuilt} vs ${one.n_stations_stored}` +
+        `${one.path_differs ? " / raw_path が違う" : ""}`,
+    );
+    for (const diff of one.differences.slice(0, 5)) {
+      console.log(
+        `    ${diff.station_id}（idx ${diff.idx}）${diff.field}: ` +
+          `生 JSON ${diff.rebuilt} / 保存 ${diff.stored}`,
+      );
+    }
+  }
+  console.log(outcome.ok ? "一致しました。" : "**一致しませんでした。**");
+};
+
 const downloadFeed = async (env: Env, path: string): Promise<unknown> => {
   const response = await fetch(`${env["SUPABASE_URL"]}/storage/v1/object/${RAW_BUCKET}/${path}`, {
     headers: authHeaders(env),
@@ -261,7 +388,7 @@ const ingestOne = async (
 };
 
 const USAGE =
-  "使い方: pnpm exec tsx scripts/rebuild-snapshots.ts <環境ファイル> <system> <開始日 UTC> <終了日 UTC> [--dry-run] [--force] [--min-presence-ratio=N]";
+  "使い方: pnpm exec tsx scripts/rebuild-snapshots.ts <環境ファイル> <system> <開始日 UTC> <終了日 UTC> [--dry-run] [--force] [--min-presence-ratio=N] [--sample=N]";
 
 type Options = {
   readonly envPath: string;
@@ -277,6 +404,11 @@ type Options = {
   readonly minPresenceRatio: number | null;
   /** 既に取り込み済みのものも落とし直す。既定は落とさない（ダウンロードの節約）。 */
   readonly force: boolean;
+  /**
+   * `--dry-run` で突き合わせる件数の上限。既定は**全部**。
+   * ドコモは 1 日 1,080 件あるので、様子を見るだけなら小さくする。
+   */
+  readonly sample: number | null;
 };
 
 /** 引数を読む。足りなければ例外にする（呼び出し側で使い方を出す）。 */
@@ -299,6 +431,11 @@ export const parseOptions = (argv: readonly string[]): Options => {
   if (minPresenceRatio !== null && !Number.isFinite(minPresenceRatio)) {
     throw new Error(`--min-presence-ratio が数値ではありません: ${ratioFlag}`);
   }
+  const sampleFlag = flags.find((f) => f.startsWith("--sample="));
+  const sample = sampleFlag === undefined ? null : Number(sampleFlag.split("=")[1]);
+  if (sample !== null && (!Number.isInteger(sample) || sample < 1)) {
+    throw new Error(`--sample が 1 以上の整数ではありません: ${sampleFlag}`);
+  }
   return {
     envPath,
     system_id,
@@ -307,6 +444,7 @@ export const parseOptions = (argv: readonly string[]): Options => {
     dryRun: flags.includes("--dry-run"),
     minPresenceRatio,
     force: flags.includes("--force"),
+    sample,
   };
 };
 
@@ -319,6 +457,7 @@ const main = async (): Promise<void> => {
     dryRun,
     minPresenceRatio,
     force,
+    sample,
   } = parseOptions(process.argv.slice(2));
 
   const env = readEnv(envPath);
@@ -332,8 +471,9 @@ const main = async (): Promise<void> => {
   }
   // **古い順に流す**（W2-08）。stations.idx の採番順を本番と揃える
   const sorted = [...listed].sort((a, b) => a.epoch_s - b.epoch_s);
-  const ingested = force ? new Set<number>() : await listIngestedEpochs(env, system, from, to);
-  const objects = sorted.filter((object) => !ingested.has(object.epoch_s));
+  // **`--force` でも取り込み済みの一覧は取る。** `--dry-run` の突き合わせはこちらを見る
+  const ingested = await listIngestedEpochs(env, system, from, to);
+  const objects = sorted.filter((object) => force || !ingested.has(object.epoch_s));
 
   console.log(`system      : ${system}`);
   console.log(`範囲        : ${fromArg} 〜 ${toArg}（UTC、${days.length} 日）`);
@@ -342,6 +482,37 @@ const main = async (): Promise<void> => {
     `取り込み済み: ${ingested.size} 件${force ? "（--force のため落とし直す）" : "（落とさない）"}`,
   );
   console.log(`対象        : ${objects.length} オブジェクト`);
+
+  // **`--dry-run` は「流したら何が起きるか」だけでなく「すでに在るものが生 JSON と
+  // 一致しているか」まで見る。** 数えるだけでは、正規化が壊れていても気づけない
+  // （W4 プラン §6.8 の PR M）。**書かない。**
+  if (dryRun) {
+    const already = sorted.filter((object) => ingested.has(object.epoch_s));
+    const targets = sample === null ? already : already.slice(0, sample);
+    console.log(
+      `突き合わせ対象: ${targets.length} オブジェクト` +
+        `${sample === null ? "" : `（--sample=${sample}）`}`,
+    );
+    if (targets.length > 0) {
+      await assertPartitions(env, targets);
+      const ledger = await listLedger(env, system);
+      console.log(`台帳        : ${ledger.length} ポート`);
+      const outcome = await verifyRebuild({
+        source: snapshotSource(env, system),
+        system_id: system,
+        ledger,
+        objects: targets,
+      });
+      reportVerification(outcome);
+      if (!outcome.ok) {
+        process.exitCode = 1;
+      }
+    }
+    console.log("");
+    console.log("--dry-run のため書き込みません。");
+    return;
+  }
+
   if (objects.length === 0) {
     console.log("対象がありません。");
     return;
@@ -354,12 +525,6 @@ const main = async (): Promise<void> => {
 
   await assertPartitions(env, objects);
   console.log("パーティション: 対象月すべて存在");
-
-  if (dryRun) {
-    console.log("");
-    console.log("--dry-run のため書き込みません。");
-    return;
-  }
 
   const failed: string[] = [];
   let inserted = 0;
