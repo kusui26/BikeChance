@@ -142,13 +142,19 @@ def read_reference_on(
 
 
 def load_snapshots(
-    source: FeaturesPort, day: date, cache: Path | None
+    source: ReadsStorage, day: date, cache: Path | None, hours: Sequence[datetime] | None = None
 ) -> tuple[pa.Table, tuple[str, ...]]:
-    """全システムの Parquet を読んで 1 つの表にする。**無い時間帯は記録して進む。**"""
+    """全システムの Parquet を読んで 1 つの表にする。**無い時間帯は記録して進む。**
+
+    `hours` を渡すとその時間帯だけを読む。**プロファイル（`jobs/build_profiles.py`）は
+    ラベルも同時刻履歴も要らないので、学習の 25 時間ではなく 2 時間で足りる**
+    （W5 プラン §6.2）。既定は学習の窓。
+    """
+    wanted = parquet_hours(day, LOOKBACK_HOURS, LOOKAHEAD_HOURS) if hours is None else hours
     tables: list[pa.Table] = []
     missing: list[str] = []
     for system_id in SYSTEM_IDS:
-        for hour in parquet_hours(day, LOOKBACK_HOURS, LOOKAHEAD_HOURS):
+        for hour in wanted:
             body = _one_hour(source, system_id, hour, cache)
             if body is None:
                 missing.append(f"{system_id} {hour:%Y-%m-%dT%H}Z")
