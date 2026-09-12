@@ -71,7 +71,7 @@ def exclude_at_base(
         ("no_asof_at_t", np.asarray(feature_row == NO_ROW, dtype=np.bool_)),
         ("stale_at_t", too_old(grid_ms, observed_at_ms, feature_row)),
         ("unobserved_at_t", np.asarray((bikes == MISSING) | (docks == MISSING), dtype=np.bool_)),
-        ("suspended_at_t", _suspended(flags)),
+        ("suspended_at_t", suspended(flags)),
     )
     start = (
         np.ones(feature_row.shape, dtype=bool)
@@ -117,12 +117,16 @@ def too_old(at_ms: Int64, observed_at_ms: Int64, row: Int32) -> Bools:
     return np.asarray((row != NO_ROW) & (age_s > MAX_STALENESS_S), dtype=np.bool_)
 
 
-def _suspended(flags: Int16) -> Bools:
+def suspended(flags: Int16) -> Bools:
     """運用停止か。**貸出と返却の両方のビットが立っていなければ停止**とみなす。
 
     実際に現れる値は 7 / 1 / -1 だけ（データ辞書 §2 の (9)）なので、これは
     「`flags = 1`」と同義になる。ビットで書いておけば、事業者が 3 や 5 を出し始めても
     意味が変わらない。
+
+    **`t` の側では除外の理由**（`exclude_at_base`）だが、**プロファイルでは数える対象**
+    である（`features/profile.py` の `n_suspended`）——あちらには `t` が無く、休止していた
+    時間を分母に入れるかどうかは読む側の判断になる（W5 プラン §6.2）。**だから公開する。**
     """
     both = FLAG_RENTING | FLAG_RETURNING
     return np.asarray((flags < 0) | ((flags & both) != both), dtype=np.bool_)

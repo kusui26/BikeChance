@@ -8,7 +8,7 @@
 -- 確かめられるのは記録と抑制の論理まで（0007 と同じ）。
 
 begin;
-select plan(107);
+select plan(109);
 
 -- 自分の前提を作る
 delete from public.status_snapshots;
@@ -128,8 +128,8 @@ select is(
   true, 'postgres は BYPASSRLS（security definer の中から全行が見える）'
 );
 
--- 0020 で 9 本、0021・0022・0025・0029・0036・0037・0040 が 1 本ずつ足して 16 本
-select is((select count(*)::int from public.monitored_jobs), 16, '監視対象は 16 ジョブ');
+-- 0020 で 9 本、0021・0022・0025・0029・0036・0037・0040・0043 が 1 本ずつ足して 17 本
+select is((select count(*)::int from public.monitored_jobs), 17, '監視対象は 17 ジョブ');
 
 -- **参照スナップショットは Vercel Cron だが、見張りには入れる**（0036。§12 の 116）。
 -- 学習も推論も「前日の版」を読むので、止まると翌日に静かに壊れる
@@ -153,6 +153,22 @@ select ok(
   (select added_at + missing_after > now()
      from public.monitored_jobs where job_name = 'build_features'),
   '足したばかりの build_features は、まだ検査の対象にならない');
+
+-- **ポートプロファイルも GitHub Actions だが、見張りには入れる**（0043。W5 プラン §6.2）。
+-- 止まると転がしの鎖が切れ、翌日は「前日の版が無い」薄い表になる
+select ok(
+  (select is_active and cron_job_name is null
+      and expected_every = interval '1 day' and missing_after = interval '30 hours'
+     from public.monitored_jobs where job_name = 'build_profiles'),
+  'build_profiles は日次で見張る（pg_cron ではないので cron_job_name は NULL）');
+-- **学習サンプルと同じ閾値。** 同じワークフローの中で続けて走るので、片方だけ緩いと
+-- 「プロファイルは止まっているのに学習サンプルだけ鳴る」という読みにくい状態になる。
+-- **`monitored_jobs_window_sane` が `missing_after > expected_every` を強いる**ので、
+-- 短くしすぎるとマイグレーションそのものが通らない（壊して確かめた）
+select is(
+  (select count(distinct (expected_every, missing_after))::int from public.monitored_jobs
+    where job_name in ('build_features', 'build_profiles')),
+  1, '学習サンプルとプロファイルは同じ閾値（同じワークフローで続けて走る）');
 
 select is(
   (select array_agg(job_name order by job_name) from public.monitored_jobs where not is_active),

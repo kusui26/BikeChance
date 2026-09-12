@@ -724,7 +724,47 @@ cd apps/ml && ./.venv/bin/python -m bikechance_ml.jobs.build_features \
 
 `--upload` を付けると Storage に置く。**`--cache` のファイルは形を確かめてから使う**（畳み直しで同じパスの中身が変わるため。W3 プラン §12 の 97）。
 
-### 7.5 配った予測（`forecast-log`）
+### 7.5 ポートプロファイル（`gbfs-parquet` の `profiles/`）
+
+```
+profiles/date=YYYY-MM-DD/daily.parquet     ← その日ぶんの素の集計
+profiles/date=YYYY-MM-DD/profile.parquet   ← 直近 28 日の累計（読むのはこちら）
+```
+
+**「このポートの、この曜日種別の、この 15 分枠は、ふだんどうか」を数えた表。** 日付は **JST の暦日**（参照スナップショットと同じ）。
+
+**これは気候値（B2）と同じ量である**（W5-01）。開発プラン §6.3 の `prof_p_bike` と §7.1 の B2 は同じセルを別の名前で呼んでいるので、**表を 1 つにして両方がそこから引く**。
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `system_id` / `station_id` | `string` | |
+| `dow_type` | `string` | `weekday` / `sat` / `sun_holiday`。**`daily` はその日の 1 種別だけ** |
+| `slot15` | `int16` | 15 分枠（0〜95）。**B2 の `slot15` と同じ切り方** |
+| `n_days` | `int16` | **`profile` にだけ在る。** セルに寄与した日数 |
+| `n` | `int16` | 数えた 5 分格子点。**`daily` は最大 3**（288 ÷ 96） |
+| `n_suspended` | `int16` | そのうち貸出も返却も止まっていた点 |
+| `n_bike_ok` / `n_dock_ok` | `int16` | `y_bike` / `y_dock` が 1 だった点（`features/labels.py` と同じ式） |
+| `sum_bikes` / `sum_bikes_sq` | `int32` | `prof_mean_bikes` / `prof_std_bikes` の材料 |
+| `sum_rentals_60` / `sum_returns_60` | `int32` | **60 分の移動窓の合計の和**。`n` で割ると `prof_rentals_per_hour` |
+
+**割らずに和で持つ。** 率にすると 28 日ぶんを足せなくなるし、**分母の取り方を先に決めてしまう**（休止した時間を分母に入れるかは読む側の判断。既定は `n_bike_ok / n`）。
+
+**読むのは基準時刻の前日の版**（`features/profile.source_day`）。開発プラン §6.2 のリーク防止で、参照スナップショットとまったく同じ規則である。
+
+**作り方**：`profile(D) = profile(D-1) + daily(D) - daily(D-28)`。**読むのは 3 ファイルだけ**で、28 日ぶんを毎日読み直さない（`capacity_daily_max` と同じ持ち回り）。
+
+**実測**（2026-09-07〜09-12、本番の毎時 Parquet から）：
+
+| | 値 |
+|---|---:|
+| 1 日のセル数 | 約 **199 万**（20,800 ポート × 96 枠、被覆 99.7%） |
+| `daily.parquet` | **1.5〜2.2 MB/日** |
+| `profile.parquet` | 1.5 MB（1 日目）→ **7.85 MB**（6 日・2 曜日種別） |
+| 28 日・3 種別での見込み | **12〜15 MB/日** |
+| 所要 | 13〜20 秒、ピーク **1.01 GB** |
+| **2 日目に下限を満たすセル** | **99.72%**（抽出した `features/` からだと 44.35%） |
+
+### 7.6 配った予測（`forecast-log`）
 
 ```
 {system_id}/date=YYYY-MM-DD/hour=HH/{base_epoch_s}_{model_version}.parquet   ← 日付・時刻は UTC

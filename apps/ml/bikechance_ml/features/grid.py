@@ -185,6 +185,18 @@ def features_path(day: date) -> str:
     return f"features/date={day:%Y-%m-%d}/part.parquet"
 
 
+def profile_path(day: date, name: str) -> str:
+    """ポートプロファイルのパス（W5 プラン §6.2）。**JST の暦日**。
+
+    `name` は `daily`（その日ぶんの素の集計）か `profile`（直近 28 日の累計）。
+    参照スナップショットと同じく `gbfs-parquet` に置く（MIME は Parquet で通る）。
+
+    **読む規則は「基準時刻の前日の版」**で、参照スナップショットと同じである
+    （開発プラン §6.2 のリーク防止：プロファイルは前日 23:59 までのデータで作る）。
+    """
+    return f"profiles/date={day:%Y-%m-%d}/{name}.parquet"
+
+
 def reference_path(day: date, name: str) -> str:
     """参照スナップショットのパス（W3 プラン §14.3）。**JST の暦日**。
 

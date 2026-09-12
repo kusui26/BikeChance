@@ -1,7 +1,14 @@
-name: 学習サンプル（日次）
+name: 学習サンプルとプロファイル（日次）
 
-# 前日ぶんの学習サンプル（`features/date=YYYY-MM-DD/part.parquet`）を作って Storage に置く。
-# W4 プラン §6.8 の PR J。
+# 前日ぶんの**学習サンプル**（`features/date=YYYY-MM-DD/part.parquet`）と
+# **ポートプロファイル**（`profiles/date=YYYY-MM-DD/`）を作って Storage に置く。
+# W4 プラン §6.8 の PR J ＋ W5 プラン §6.2 の PR B。
+#
+# **ファイル名は `build-features.yml` のままにしてある。** GitHub は `schedule` を
+# ワークフローのファイル単位で登録するので、**名前を変えると登録し直しになる**。
+# 中身を足すたびに改名すると、そのたびに「定時の回が来ない」危険を引き受けることになる
+# （止まっても 30 時間で `monitored_jobs` が鳴るが、鳴らせずに済むなら鳴らさない）。
+# Actions の画面に出るのは上の `name:` なので、**見え方は名前を変えなくても直る**。
 #
 # **Vercel Cron ではなく GitHub Actions に置く**（W4-27）。実測 41〜65 秒・ピーク 1.28 GB
 # で Vercel の枠（300 秒・2 GB）には収まるが、**5 分毎の推論と同じサービスに 3 分・1.3 GB の
@@ -39,7 +46,7 @@ concurrency:
 
 jobs:
   build:
-    name: features/date=… を作って置く
+    name: features/ と profiles/ を作って置く
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # **ここが鍵の在り処。** `training` 環境の secrets だけがこのジョブに渡る
@@ -65,10 +72,18 @@ jobs:
       # **入力は `env:` で渡す**（`${{ }}` をスクリプトに直接埋めない）。
       #
       # **3 回まで試す。** Supabase Storage は一過性の 504 を返すことがある
-      # （2026-09-11 に手元で 1 度。60 秒でタイムアウトして返ってきた）。1 日ぶんを
-      # 落とすと、**30 日後に天気が消えて作り直せなくなる**（`weather_hourly` の保持）。
-      # 失敗した回も `job_runs` に `failed` として残るので、**直ったことは隠れない**。
-      - name: 1 日ぶんを作って置く
+      # （2026-09-11 に手元で 1 度。60 秒でタイムアウトして返ってきた）。失敗した回も
+      # `job_runs` に `failed` として残るので、**直ったことは隠れない**。
+      #
+      # **学習サンプルが先。** 2 つは互いに独立である——プロファイルが読まれるのは
+      # **翌日**（`profile.source_day` は前日の版を返す）なので、同じ回の中の順序は
+      # 依存関係ではない。**順序は「取り返しがつかない順」で決めてある**：
+      #
+      #   * `features/` は `weather_hourly` の **30 日**保持を過ぎると天気付きで
+      #     作り直せない（W4 プラン §8.5.2）
+      #   * `profiles/` は毎時 Parquet（**無期限**）から何度でも作り直せる。
+      #     ただし転がしの鎖があるので、**古い日から順に**回し直す必要がある
+      - name: 学習サンプルを作って置く
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
@@ -88,4 +103,30 @@ jobs:
             fi
           done
           echo "::error::3 回とも失敗しました。job_runs の build_features を見てください"
+          exit 1
+
+      # **`always()` を付ける。** 学習サンプルが落ちてもプロファイルは試す——
+      # **片方の失敗でもう片方まで落とすと、取り返す手間が 2 倍になる**。
+      # どちらかが失敗すればジョブ全体は赤くなるので、気づけなくなるわけではない。
+      - name: プロファイルを作って置く
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          TARGET_DATE: ${{ inputs.date }}
+        run: |
+          args=(--upload)
+          if [ -n "${TARGET_DATE}" ]; then
+            args+=(--date "${TARGET_DATE}")
+          fi
+          for attempt in 1 2 3; do
+            if uv run python -m bikechance_ml.jobs.build_profiles "${args[@]}"; then
+              exit 0
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "::warning::${attempt} 回目が失敗しました。120 秒待って試し直します"
+              sleep 120
+            fi
+          done
+          echo "::error::3 回とも失敗しました。job_runs の build_profiles を見てください"
           exit 1
