@@ -5,7 +5,7 @@
 -- `tests/test_features_weather.py` が持つ。
 
 begin;
-select plan(34);
+select plan(37);
 
 delete from public.weather_hourly;
 delete from public.job_runs;
@@ -174,6 +174,33 @@ select is(
 select cmp_ok(
   (select count(*)::integer from public.weather_hourly), '=', 7,
   '残るのは 29 日前の 2 行と今日の 5 行'
+);
+
+-- ────────────────────────────────────────────────────────────────
+-- 保守 — **`job_runs` は消さない**（W4 プラン §6.8 の PR L）
+-- ────────────────────────────────────────────────────────────────
+-- 30 日で消えた発行を**生アーカイブから戻せる**のは、`v_weather_files` が
+-- `job_runs` の `archive_weather` の記録を覚えているからである（0023）。
+-- **ここを刈ると、生アーカイブ（無期限）が在っても `load_weather` が発行を
+-- 見つけられなくなる。** `job_runs` はいま誰も消していないが、行は毎日 2,100 件
+-- 増えるので、**刈りたくなる日が来る**。そのとき落ちるように、振る舞いで固定する。
+select pg_temp.archived(now() - interval '400 days', 3);
+select public.run_maintenance(60);
+
+select is(
+  (select count(*)::integer from public.job_runs
+    where job_name = 'archive_weather' and started_at < now() - interval '365 days'),
+  1, '**400 日前の archive_weather の記録は保守で消えない**（戻す入口が消える）'
+);
+select is(
+  (select count(*)::integer from public.v_weather_files
+    where forecast_hour < now() - interval '365 days'),
+  1, '保持を過ぎた発行も v_weather_files からは見える'
+);
+select is(
+  (select count(*)::integer from public.v_weather_pending
+    where issued_hour < now() - interval '365 days'),
+  1, '取り込まれていないので「未処理」に出る（load_weather --since で戻せる）'
 );
 
 -- ────────────────────────────────────────────────────────────────
