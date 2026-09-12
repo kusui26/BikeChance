@@ -269,10 +269,28 @@ export const PARQUET_BUCKET = "gbfs-parquet";
 export const COMPACT_CRON = "7 * * * *";
 
 /**
- * Parquet 化の最大実行時間（秒）。`vercel.json` の services.ml.functions に渡す。
- * 見込みは 1 回 10 秒未満（44 万行）。ネットワークの揺れを見込んで 120 秒とる。
+ * **`ml` サービス全体の**最大実行時間（秒）。`vercel.json` の services.ml.functions に渡す。
+ *
+ * **Python には route segment config が無い**ので、`maxDuration` を指定できるのは
+ * `vercel.json` の glob（`**\/*.py`）1 本だけである。**`/ml/compact` と `/ml/infer/*` に
+ * 別々の上限は付けられない**——だから定数も 1 つにしてある（以前は
+ * `COMPACT_MAX_DURATION_S` と `INFER_MAX_DURATION_S` の 2 つあり、**同じ物理量に名前が
+ * 2 つ付いている**状態だった。食い違いを検査で見張るくらいなら、名前を 1 つにする）。
+ *
+ * **240 秒にした**（2026-09-13、W5 の PR A。Pro の上限は 300 秒）。
+ *
+ * | | 実測・見込み |
+ * |---|---|
+ * | 毎時 Parquet 化 | 1 回 3.1〜3.5 秒（44 万行） |
+ * | 推論（ベースライン B3） | 1 サイクル **15〜17 秒**、p95 17 秒 |
+ * | 推論（LightGBM を配ると） | HELLO **77.7 秒**（W4 プラン §12 の 127） |
+ * | 推論（`active` と `shadow` が両方 LightGBM） | HELLO **約 144 秒**（同 §6.8 の PR N） |
+ *
+ * **上げても費用は増えない。** Vercel が課金するのは Active CPU で、`maxDuration` は
+ * 「ここまでで打ち切る」という上限にすぎない（開発プラン §4.5）。**上げ忘れると
+ * W6 の `shadow` が途中で切れる**ので、予測ログと一緒に先に上げておく。
  */
-export const COMPACT_MAX_DURATION_S = 120;
+export const ML_MAX_DURATION_S = 240;
 
 /**
  * 先回り推論の Cron（UTC。開発プラン §8.1、W3 プラン §5.10）。
@@ -302,13 +320,6 @@ export const INFER_CRON: Readonly<Record<SystemId, string>> = {
  * （毎時 :07 の Parquet 化）。
  */
 export const REFERENCE_CRON = "0 20 * * *";
-
-/**
- * 推論の最大実行時間（秒）。20,745 ポート × 10 水平 × 2 指標を作って書き戻す。
- * ベースライン（B3）は行列演算だけなので見込みは 10 秒未満だが、Storage からの
- * 成果物の取得と 6 往復の UPSERT を含めて 120 秒とる。
- */
-export const INFER_MAX_DURATION_S = 120;
 
 /**
  * 公開 API `/v1` の設定（開発プラン §8.3、W2 プラン §5.7）。

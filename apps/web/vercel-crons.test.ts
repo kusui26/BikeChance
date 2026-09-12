@@ -12,9 +12,8 @@ import { describe, expect, it } from "vitest";
 import {
   ARCHIVE_WEATHER_CRON,
   COMPACT_CRON,
-  COMPACT_MAX_DURATION_S,
   INFER_CRON,
-  INFER_MAX_DURATION_S,
+  ML_MAX_DURATION_S,
   REFERENCE_CRON,
   SYNC_STATIONS_CRON,
   SYSTEMS,
@@ -248,16 +247,19 @@ describe("vercel.json の ml サービス", () => {
     const settings = Object.values(readMlFunctions());
     expect(settings).toHaveLength(1);
     const first: unknown = settings[0];
-    expect(isRecord(first) && first["maxDuration"]).toBe(COMPACT_MAX_DURATION_S);
+    expect(isRecord(first) && first["maxDuration"]).toBe(ML_MAX_DURATION_S);
   });
 
   it("glob が Python のファイルを指す", () => {
     expect(Object.keys(readMlFunctions())).toEqual(["**/*.py"]);
   });
 
-  it("Python のルートは 1 つの maxDuration を共有する", () => {
-    // glob は `**/*.py` の 1 本しかないので、`/ml/compact` と `/ml/infer/*` に
-    // 別々の上限は付けられない。定数が食い違ったら、どちらかが効いていない
-    expect(INFER_MAX_DURATION_S).toBe(COMPACT_MAX_DURATION_S);
+  it("Pro の上限（300 秒）を超えない", () => {
+    // glob は `**/*.py` の 1 本しかないので、`/ml/compact` と `/ml/infer/*` は
+    // **同じ上限を共有する**。だから定数も 1 つしかない（ML_MAX_DURATION_S）。
+    // 上限を超えるとデプロイが拒否される
+    expect(ML_MAX_DURATION_S).toBeLessThanOrEqual(300);
+    // shadow（active と shadow の両方で LightGBM を歩く）が約 144 秒（W4 プラン §6.8）
+    expect(ML_MAX_DURATION_S).toBeGreaterThan(144);
   });
 });

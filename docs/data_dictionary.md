@@ -18,6 +18,7 @@
 | **配信** | Postgres のビュー `v1_stations_current` / `v1_feeds` | 1 行 = 1 ポート | — |
 | **原典・作り直し** | Storage `gbfs-raw` | GBFS の生 JSON（gzip） | 無期限 |
 | **天気** | Storage `weather-raw` | Open-Meteo の応答そのまま（gzip） | 無期限 |
+| **配った予測** | Storage `forecast-log` | Parquet（1 行 = 1 ポート、確率は配列） | **12 か月** |
 
 **一次ソースは生 JSON である。** Postgres の配列も Parquet も、そこから作り直せる派生物にすぎない（開発プラン D-03）。逆に言うと、**生 JSON に無いものはどこにも無い。**
 
@@ -541,14 +542,17 @@ create table public.model_versions (
 
 ## 7. アーカイブのパス規約
 
-**バケットは 4 つある。** 作り直せるかどうかが違うので、混ぜない（W3 プラン §12 の 106）。
+**バケットは 5 つある。** 作り直せるかどうかが違うので、混ぜない（W3 プラン §12 の 106）。
 
-| バケット | 中身 | Content-Type | 作り直せるか |
-|---|---|---|---|
-| `gbfs-raw` | 生 gzip JSON | `application/gzip` | **一次ソース。作り直せない** |
-| `weather-raw` | 天気予報の生 JSON | `application/gzip` | 同上（過去の予報は取り直せない） |
-| `gbfs-parquet` | 学習用 Parquet ＋ 学習サンプル | `application/vnd.apache.parquet` | 生 JSON からも Postgres からも作り直せる |
-| `models` | モデルの成果物 | `application/gzip` | **同じ版は二度と作れない**（当てはめの時点が違う） |
+| バケット | 中身 | Content-Type | 保持 | 作り直せるか |
+|---|---|---|---|---|
+| `gbfs-raw` | 生 gzip JSON | `application/gzip` | 無期限 | **一次ソース。作り直せない** |
+| `weather-raw` | 天気予報の生 JSON | `application/gzip` | 無期限 | 同上（過去の予報は取り直せない） |
+| `gbfs-parquet` | 学習用 Parquet ＋ 学習サンプル ＋ 参照スナップショット | `application/vnd.apache.parquet` | 無期限 | 生 JSON からも Postgres からも作り直せる |
+| `models` | モデルの成果物 | `application/gzip` | 無期限 | **同じ版は二度と作れない**（当てはめの時点が違う） |
+| **`forecast-log`** | **配った予測**（0042） | `application/vnd.apache.parquet` | **12 か月** | **作り直せるが高い**（決定的なモデル ＋ 保存済みの入力。**天気は 30 日で消える**） |
+
+**`forecast-log` を `gbfs-parquet` に相乗りさせていない**のは、中身が同じ Parquet でも**寿命が違う**からである。混ぜると保持期間を別々に決められない（0027 が `models` で採ったのと同じ判断）。
 
 **`allowed_mime_types` は絞ってある。** Content-Type を付けない実装を弾くためで、違う型を上げようとすると **HTTP 415** で止まる。
 
@@ -719,6 +723,36 @@ cd apps/ml && ./.venv/bin/python -m bikechance_ml.jobs.build_features \
 ```
 
 `--upload` を付けると Storage に置く。**`--cache` のファイルは形を確かめてから使う**（畳み直しで同じパスの中身が変わるため。W3 プラン §12 の 97）。
+
+### 7.5 配った予測（`forecast-log`）
+
+```
+{system_id}/date=YYYY-MM-DD/hour=HH/{base_epoch_s}_{model_version}.parquet   ← 日付・時刻は UTC
+例: hellocycling/date=2026-09-12/hour=14/1789224574_baseline-b3-v0-20260908.parquet
+```
+
+**1 サイクル 1 ファイル**（5 分毎 × 2 系統 ＝ **576 ファイル/日**）。**`features/` が JST なのに対し、ここは UTC** である——結合する相手が `gbfs-parquet` の実測だから（W4 プラン §6.8 の PR N）。
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `station_id` | `string` | **昇順に並べて書く**（並びが圧縮に効く。実測 +24.7%） |
+| `base_observed_at` | `string` | **結合の鍵。** ISO 8601・UTC。`station_forecasts` と同じ文字列 |
+| `model_version` | `string` | `active` と `shadow` が同じ日に並ぶ |
+| `horizons_min` | `list<int16>` | 配列の何番目が何分先か。**ファイル自身が言える** |
+| `p_bike_x1000` / `p_dock_x1000` | `list<int16>` | 0〜1000。`station_forecasts` と同じ表現 |
+| `confidence` | `int8` | 0〜3。信頼度で切った指標を出すために要る |
+
+**定数は覚え書きではなく列に持つ。** 1 日ぶんを `concat_tables` した瞬間に覚え書きは消えるので、**どの行がどの基準時刻のものかが分からなくなる**。覚え書きに入れるのは**結合に使わないもの**だけ——`format_version` / `system_id` / `generated_at` / `feature_set`。
+
+**実測**（2026-09-12 の 1 サイクル）：
+
+| system | ポート | 1 サイクル | 1 日 | 1 年 |
+|---|---:|---:|---:|---:|
+| hellocycling | 14,851 | 92,978 B | 26.8 MB | 9.8 GB |
+| docomo-cycle | 5,809 | 36,303 B | 10.5 MB | 3.8 GB |
+| **合計** | 20,660 | **129,281 B** | **37.2 MB** | **13.6 GB** |
+
+**書けなくても推論は落とさない**（W3-18）。成否は `inference_log.detail.forecast_log`（`"ok"` か `"failed:<例外の種類>"`）に残る。**試し打ち（`?model=`）は書かない**（W4-18）。
 
 ---
 
