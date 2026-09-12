@@ -10,7 +10,7 @@ PostgREST と Storage の REST を httpx で直に叩く。**psycopg を入れ�
 """
 
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -28,6 +28,7 @@ from bikechance_ml.features.reference import (
 from bikechance_ml.features.weather import SERIES as WEATHER_SERIES
 from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
+from bikechance_ml.jobs.weather_archive import SERIES as ARCHIVE_SERIES
 from bikechance_ml.jobs.weather_archive import PendingIssue
 from bikechance_ml.json_shape import (
     ShapeError,
@@ -461,6 +462,42 @@ class SupabaseIo:
         )
         return tuple(_to_weather_row(row) for row in rows)
 
+    def oldest_weather_issue(self) -> datetime | None:
+        """`weather_hourly` にいちばん古く残っている発行。**次に消えるもの。**
+
+        保持は 30 日なので、これが「あと何日で生アーカイブから戻すしかなくなるか」を
+        表す（W4 プラン §6.8 の PR L）。1 行も無ければ `None`。
+        """
+        rows = self._rows(
+            "/rest/v1/weather_hourly",
+            {"select": "issued_hour", "order": "issued_hour.asc", "limit": "1"},
+            "weather_hourly",
+        )
+        if not rows:
+            return None
+        fields = as_dict(rows[0], "weather_hourly")
+        return _to_datetime(as_str(field(fields, "issued_hour", "weather"), "issued_hour"))
+
+    def list_weather_issue(self, issued_hour: datetime) -> tuple[WeatherRow, ...]:
+        """1 発行ぶんを**全系列**で読む（`weather_code` も含む）。
+
+        `list_weather` が 3 系列に絞るのは読み込み量の都合だが、**生アーカイブと
+        突き合わせるときは絞ってはいけない**——絞った先だけを比べると、比べていない
+        列がずれていても「一致した」と言ってしまう（PR L）。
+        """
+        rows = self._paged(
+            "/rest/v1/weather_hourly",
+            {
+                "select": "cell_lat_idx,cell_lon_idx,issued_hour,available_at,"
+                + ",".join(ARCHIVE_SERIES),
+                "issued_hour": f"eq.{_iso_z(issued_hour)}",
+                "order": "cell_lat_idx.asc,cell_lon_idx.asc",
+            },
+            WEATHER_PAGE_SIZE,
+            "weather_hourly",
+        )
+        return tuple(_to_weather_row(row, ARCHIVE_SERIES) for row in rows)
+
     def upsert_weather_hourly(self, rows: Sequence[Mapping[str, object]]) -> int:
         """予報をまとめて書く。**同じ発行を入れ直しても結果は変わらない。**"""
         if not rows:
@@ -548,14 +585,15 @@ def _to_pending_issue(row: object) -> PendingIssue:
     )
 
 
-def _to_weather_row(row: object) -> WeatherRow:
+def _to_weather_row(row: object, names: Iterable[str] = WEATHER_SERIES) -> WeatherRow:
+    """`weather_hourly` の 1 行。**どの系列を読むかは呼ぶ側が決める。**"""
     fields = as_dict(row, "weather_hourly")
     return WeatherRow(
         cell_lat_idx=as_int(field(fields, "cell_lat_idx", "weather"), "cell_lat_idx"),
         cell_lon_idx=as_int(field(fields, "cell_lon_idx", "weather"), "cell_lon_idx"),
         issued_hour=_to_datetime(as_str(field(fields, "issued_hour", "weather"), "issued_hour")),
         available_at=_to_datetime(as_str(field(fields, "available_at", "weather"), "available_at")),
-        values={name: _nullable_floats(fields, name) for name in WEATHER_SERIES},
+        values={name: _nullable_floats(fields, name) for name in names},
     )
 
 

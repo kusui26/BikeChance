@@ -90,12 +90,46 @@ def test_the_end_log_carries_only_the_exception_type(capsys: pytest.CaptureFixtu
     assert FAKE_KEY not in printed
 
 
-def test_the_three_jobs_share_this_one_implementation() -> None:
-    """**同じ 2 つの関数が 3 か所に散っていた。** 戻さないために、使う側を数え上げる。
+#: `JOB_NAME` を持つのに `job_runs` に書かないモジュールと、その理由。
+#: **空なら「例外は無い」**——出さないと決めたものは、ここに理由を書く。
+NOT_RECORDING: Final[Mapping[str, str]] = {}
 
-    片方だけが例外の文言まで出しており、**どれが正しい形かがコードから読めなかった**。
+
+def _recording_jobs() -> list[tuple[str, object]]:
+    """`bikechance_ml.jobs` の中で `JOB_NAME` を持つモジュールを**数え上げる**。"""
+    import importlib
+    import pkgutil
+
+    from bikechance_ml import jobs
+
+    found: list[tuple[str, object]] = []
+    for info in pkgutil.iter_modules(list(jobs.__path__)):
+        module = importlib.import_module(f"{jobs.__name__}.{info.name}")
+        if hasattr(module, "JOB_NAME") and info.name not in NOT_RECORDING:
+            found.append((info.name, getattr(module, "recording", None)))
+    return found
+
+
+def test_every_job_that_records_uses_this_one_implementation() -> None:
+    """**名簿を手で持たない。** 在るものを数える。
+
+    PR J では「同じ 2 つの関数が 3 か所に散っていた」と書いたが、**4 か所だった**——
+    `load_weather` を見落としていた。そのとき書いた検査は**名簿を手で並べていた**ので、
+    **見落としをそのまま固定していた**（PR L で気づいて直した）。
+
+    数え上げにすれば、5 つめが自分の写しを持ち込んでも落ちる。
     """
-    from bikechance_ml.jobs import build_features, build_reference, compact
+    jobs = _recording_jobs()
+    assert len(jobs) >= 4, f"`JOB_NAME` を持つモジュールが少なすぎる: {jobs}"
+    for name, used in jobs:
+        assert used is recording, f"{name} が jobs/recording.py を使っていない"
 
-    for module in (build_features, build_reference, compact):
-        assert module.recording is recording, f"{module.__name__} が別の実装を持っている"
+
+def test_no_job_keeps_its_own_copy() -> None:
+    """**写しを持ち込んだら落ちる。** 見落としの形はいつも「自分のを書く」だった。"""
+    import importlib
+
+    for name, _ in _recording_jobs():
+        module = importlib.import_module(f"bikechance_ml.jobs.{name}")
+        for helper in ("_started_quietly", "_record_quietly"):
+            assert not hasattr(module, helper), f"{name} が {helper} を自分で持っている"

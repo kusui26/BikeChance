@@ -21,7 +21,6 @@
 
 import argparse
 import json
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -29,6 +28,7 @@ from typing import Final, Protocol
 
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.io.supabase import open_storage
+from bikechance_ml.jobs import recording
 from bikechance_ml.jobs.weather_archive import (
     WEATHER_BUCKET,
     CellForecast,
@@ -156,29 +156,6 @@ def load_pending(
 
 
 # ── 実行 ──────────────────────────────────────────────────────
-def _log(message: str) -> None:
-    print(message, file=sys.stderr)
-
-
-def _started_quietly(source: WeatherPort) -> int | None:
-    """記録を始められなくても取り込む（`build_reference` と同じ）。"""
-    try:
-        return source.job_started(JOB_NAME)
-    except Exception as cause:
-        _log(f"job_started に失敗した: {type(cause).__name__}")
-        return None
-
-
-def _record_quietly(
-    source: WeatherPort, run_id: int | None, status: str, detail: Mapping[str, object]
-) -> None:
-    try:
-        if run_id is not None:
-            source.job_finished(run_id, status, detail)
-    except Exception as cause:
-        _log(f"job_finished に失敗した: {type(cause).__name__}")
-
-
 def run_load(
     source: WeatherPort, now: datetime, since: datetime | None = None, max_issues: int = MAX_ISSUES
 ) -> LoadSummary:
@@ -187,14 +164,14 @@ def run_load(
     **記録は半分の目的**である。書かないと `check_jobs_missing` から見えず、
     止まっても誰も気づかない（W4 プラン §12 の 116）。
     """
-    run_id = _started_quietly(source)
+    run_id = recording.started_quietly(source, JOB_NAME)
     lower = since if since is not None else now - timedelta(hours=LOOKBACK_HOURS)
     try:
         summary = load_pending(source, lower, max_issues, now)
     except Exception as cause:
-        _record_quietly(source, run_id, "failed", {"error": type(cause).__name__})
+        recording.record_quietly(source, run_id, "failed", {"error": type(cause).__name__})
         raise
-    _record_quietly(source, run_id, "ok" if summary.ok else "failed", summary.as_dict())
+    recording.record_quietly(source, run_id, "ok" if summary.ok else "failed", summary.as_dict())
     return summary
 
 
