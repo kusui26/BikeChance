@@ -8,7 +8,7 @@
 -- 確かめられるのは記録と抑制の論理まで（0007 と同じ）。
 
 begin;
-select plan(109);
+select plan(110);
 
 -- 自分の前提を作る
 delete from public.status_snapshots;
@@ -75,6 +75,7 @@ select has_function('public', 'check_jobs_failed', 'check_jobs_failed がある'
 select has_function('public', 'check_parquet_gap', 'check_parquet_gap がある');
 select has_function('public', 'check_reference_data', 'check_reference_data がある');
 select has_function('public', 'check_inference', 'check_inference がある（0029）');
+select has_function('public', 'check_model_freshness', 'check_model_freshness がある（0048）');
 select has_function('public', 'trigger_infer', 'trigger_infer がある（0029）');
 select has_function('public', 'monitor_jobs', 'monitor_jobs がある');
 
@@ -83,16 +84,18 @@ select is(
   (select bool_and(p.prosecdef) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public'
       and p.proname in ('check_jobs_missing','check_jobs_failed','check_parquet_gap',
-                        'check_reference_data','check_inference','trigger_infer','monitor_jobs')),
-  true, '7 つとも security definer'
+                        'check_reference_data','check_inference','check_model_freshness',
+                        'trigger_infer','monitor_jobs')),
+  true, '8 つとも security definer'
 );
 select is(
   (select bool_and(p.proconfig @> array['search_path=""']) from pg_proc p
      join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public'
       and p.proname in ('check_jobs_missing','check_jobs_failed','check_parquet_gap',
-                        'check_reference_data','check_inference','trigger_infer','monitor_jobs')),
-  true, '7 つとも search_path = ''''（スキーマ付きで書く前提）'
+                        'check_reference_data','check_inference','check_model_freshness',
+                        'trigger_infer','monitor_jobs')),
+  true, '8 つとも search_path = ''''（スキーマ付きで書く前提）'
 );
 select is(
   has_function_privilege('anon', 'public.monitor_jobs()', 'execute'),
@@ -583,7 +586,7 @@ select is(
      select count(*)::int as jsonb_object_keys_count
        from jsonb_object_keys((select detail->'checks' from public.job_runs
                                 where job_name='monitor_jobs' order by id desc limit 1))) t),
-  6, '6 つの検査すべてが detail に残る（0021 で check_cron_jobs、0029 で check_inference）'
+  7, '7 つの検査すべてが detail に残る（0021 で check_cron_jobs、0029 で check_inference、0048 で check_model_freshness）'
 );
 
 -- **1 つ壊しても他は走る。** 0009 の monitor_feeds は全検査を 1 つの exception で
