@@ -463,9 +463,12 @@ def _fitting_block(outcome: Outcome) -> list[str]:
     lines = [
         "## 11. 当てはめの中身",
         "",
+        # **気候値をどこから作ったかを書く。** 同じ日でも作り方で B2 の中身が変わる
+        f"気候値（B2）の作り方：**{outcome.climate or '学習サンプル（features/）'}**",
+        "",
         "| ターゲット | B1 のセル | B1 に無かった行 | B2 のセル "
-        "| **B2 が B1 に落ちた割合** | B3 の係数 |",
-        "|---|---:|---:|---:|---:|---|",
+        "| **B2 が B1 に落ちた割合** | 混合に使った行 | B3 の係数 |",
+        "|---|---:|---:|---:|---:|---:|---|",
     ]
     lines.extend(
         _row(
@@ -474,6 +477,7 @@ def _fitting_block(outcome: Outcome) -> list[str]:
             f"{one.b1_missing:,}",
             f"{one.b2_cells:,}",
             f"{one.b2_fallback_ratio:.1%}",
+            f"{one.n_blend:,}",
             one.coefficients.describe(),
         )
         for one in outcome.fits

@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from bikechance_ml.api import build_app
 from bikechance_ml.baselines.artifact import Artifact, artifact_path, to_bytes
+from bikechance_ml.baselines.climatology import FromSamples
 from bikechance_ml.eval.dataset import to_samples
 from bikechance_ml.features.build import NowStats
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN, MAX_STALENESS_S
@@ -93,9 +94,8 @@ def scenario() -> list[dict[str, object]]:
 
 
 def artifact() -> Artifact:
-    rows = scenario()
-    ports = tuple(sorted({f"{one['system_id']}/{one['station_id']}" for one in rows}))
-    return build_artifact(to_samples(fixture.to_table(rows)), ports, fixture.DAYS)
+    samples = to_samples(fixture.to_table(scenario()))
+    return build_artifact(samples, fixture.DAYS, FromSamples())
 
 
 ARTIFACT = artifact()
@@ -393,6 +393,17 @@ def test_detail_carries_only_the_exception_name() -> None:
     detail = to_detail(run_inference(FakePort(body=None), "hellocycling", NOW))
     assert detail["error"] == "MissingArtifactError"
     assert "http" not in str(detail).lower()
+
+
+def test_a_port_with_history_gets_the_normal_confidence() -> None:
+    """**W5-06：2 の意味が変わった。** 気候値が引ければ 3（ふつうの状態）。
+
+    ここは station a（いつも 0 台）で、**気候値の率も B1 の率も 0.0** である。以前は
+    配信側が `b2.probability != b1` で「引けたか」を決めていたので、**値が一致する
+    この行は 2 になっていた**（W5 プラン §12 の 144）。プロファイルから作ると率が
+    ちょうど 0.0 や 1.0 になるセルが過半で、そこが全部 2 に落ちる。
+    """
+    assert forecasts((("a", 0, 9, OPEN),))[0].confidence == 3
 
 
 def test_unknown_port_still_gets_a_baseline() -> None:

@@ -13,6 +13,7 @@ import pytest
 
 from bikechance_ml.baselines import climatology, conditional
 from bikechance_ml.baselines.artifact import FORMAT_VERSION, Artifact, from_bytes, to_bytes
+from bikechance_ml.baselines.climatology import FromSamples
 from bikechance_ml.eval.dataset import TARGETS, to_samples
 from bikechance_ml.jobs.fit_baseline import build_artifact, model_version_for
 from tests import eval_fixture as fixture
@@ -33,10 +34,8 @@ def scenario() -> list[dict[str, object]]:
 
 
 def built() -> Artifact:
-    table = fixture.to_table(scenario())
-    samples = to_samples(table)
-    ports = tuple(sorted({f"{one['system_id']}/{one['station_id']}" for one in scenario()}))
-    return build_artifact(samples, ports, fixture.DAYS)
+    samples = to_samples(fixture.to_table(scenario()))
+    return build_artifact(samples, fixture.DAYS, FromSamples())
 
 
 ARTIFACT = built()

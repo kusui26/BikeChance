@@ -10,6 +10,11 @@
   3. 学習期間の行の上で B1・B2 を出し、それを入力に B3 を当てはめる
   4. **検証期間の同じ行**の上で B0〜B3 を出し、切り口ごとに測る
 
+**B2 の作り方は外から渡す**（`climatology.Source`。W5 プラン §6.4 の PR D）。学習
+サンプルの行から作るか、ポートプロファイルから作るかの違いで、**渡さなければ従来
+どおり**である。渡すときは「**学習の最終日の版**」でなければならない——検証日を
+含む版を渡すと、B2 が答えを見た状態で測ることになる。
+
 副作用は持たない。Parquet を読むのも Markdown を書くのも `jobs/` の仕事。
 """
 
@@ -47,6 +52,8 @@ class TargetFit:
     b2_cells: int
     b2_fallback_ratio: float
     coefficients: blend.Blend
+    #: 混合（B3）の当てはめに使った行数。**自分のぶんを引けない行は外れる**
+    n_blend: int = 0
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,8 @@ class Outcome:
     by_time_of_day: tuple[SliceScores, ...] = ()
     #: 表に並べるモデルの順。**外から足したぶんも入る**（B0〜B3 と LightGBM）
     models: tuple[str, ...] = BASELINE_MODELS
+    #: B2 をどこから作ったか（`climatology.Source.describe`）。**報告書に出す**
+    climate: str = ""
 
 
 #: 外から渡す予測。`extra["LGBM"]["bike"]` が**検証期間の行に対応する確率**。
@@ -91,17 +100,25 @@ class MisalignedPredictionError(ValueError):
     """外から渡された予測の行数が検証期間と合わない。**別の行で測らない。**"""
 
 
-def run(samples: Samples, split: DaySplit, extra: ExtraModels | None = None) -> Outcome:
+def run(
+    samples: Samples,
+    split: DaySplit,
+    extra: ExtraModels | None = None,
+    climate: climatology.Source | None = None,
+) -> Outcome:
     """分割にしたがって当てはめ、測る。
 
     `extra` は**外で当てはめたモデル**の予測（LightGBM など）。**同じ `evaluate` マスクの
     上で測る**ために、行数が一致しなければ例外にする（§4.4 の 30b）。行の並びは
     `samples.take(eval_mask)` と同じでなければならない——呼ぶ側が `mask_of` で作る。
+
+    `climate` は **B2 の作り方**。省くと学習サンプルの行から作る（W3 からのやり方）。
     """
+    source = climate if climate is not None else climatology.FromSamples()
     fit_mask = mask_of(samples, split.fit)
     eval_mask = mask_of(samples, split.evaluate)
     evaluated = samples.take(eval_mask)
-    fits = tuple(_fit_target(samples, fit_mask, eval_mask, target) for target in TARGETS)
+    fits = tuple(_fit_target(samples, fit_mask, eval_mask, target, source) for target in TARGETS)
     named = _with_extra(fits, extra, len(evaluated))
     return Outcome(
         split=split,
@@ -114,6 +131,7 @@ def run(samples: Samples, split: DaySplit, extra: ExtraModels | None = None) -> 
         by_dow_type=_score_all(evaluated, named, _cut_slices(evaluated, slices.by_dow_type)),
         by_time_of_day=_score_all(evaluated, named, _cut_slices(evaluated, slices.by_time_of_day)),
         models=(*BASELINE_MODELS, *sorted(extra or {})),
+        climate=source.describe(),
     )
 
 
@@ -137,17 +155,23 @@ def _with_extra(
     return tuple(merged)
 
 
-def _fit_target(samples: Samples, fit_mask: Bools, eval_mask: Bools, target: Target) -> TargetFit:
+def _fit_target(
+    samples: Samples,
+    fit_mask: Bools,
+    eval_mask: Bools,
+    target: Target,
+    source: climatology.Source,
+) -> TargetFit:
     """1 ターゲットを当てはめ、**検証期間の行**の予測を作る。"""
     table = conditional.fit(samples, target, fit_mask)
-    climate = climatology.fit(samples, target, fit_mask)
-    fitted = samples.take(fit_mask)
+    climate = source.table(samples, target, fit_mask)
+    fitted = samples.take(np.asarray(fit_mask & source.blend_rows(samples), dtype=np.bool_))
     evaluated = samples.take(eval_mask)
 
-    # **B3 の入力は leave-one-out で作る。** 学習期間の行にそのまま当てはめると、
+    # **B3 の入力は自分のぶんを引いて作る。** 学習期間の行にそのまま当てはめると、
     # B1 も B2 も「自分の答えを見た」推定になり、B3 が両者を信じすぎる（§12 の 101）
     fit_b1 = conditional.predict_leave_one_out(table, fitted, target)
-    fit_b2 = climatology.predict_leave_one_out(climate, fitted, target, fit_b1)
+    fit_b2 = source.leave_out(climate, fitted, target, fit_b1)
     coefficients = blend.fit(
         blend.design(fit_b1, fit_b2.probability, fitted.h_min),
         fitted.y(target),
@@ -170,6 +194,7 @@ def _fit_target(samples: Samples, fit_mask: Bools, eval_mask: Bools, target: Tar
         b2_cells=climate.cells,
         b2_fallback_ratio=b2.fallback_ratio,
         coefficients=coefficients,
+        n_blend=len(fitted),
     )
 
 
