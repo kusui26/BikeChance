@@ -22,6 +22,43 @@ enum AppEnvironment {
     static func makeClient() -> V1Client {
         V1Client(baseURL: baseURL)
     }
+
+    /// お気に入りの置き場所。
+    ///
+    /// **App Group のコンテナを先に試す**（Widget から同じファイルが読めるように。
+    /// 開発プラン §9.1）。**まだ権限を宣言していない**ので、いまは必ず 2 つ目に落ちる
+    /// ——Widget は W9 で、そのとき `.entitlements` を足せば**ここも保存の側も
+    /// 1 行も変えずに**コンテナへ移る。
+    ///
+    /// **黙って消えない置き場所を選ぶ。** `Documents` は端末のバックアップに入り、
+    /// `Caches` と違って OS に消されない——お気に入りは利用者が作ったもので、
+    /// 作り直せるキャッシュではない。
+    static var favoritesDirectory: URL {
+        if let shared = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroupID)
+        {
+            return shared
+        }
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+
+    /// Widget（W9）と共有する入れ物の名前。**宣言するのは W9。**
+    static let appGroupID = "group.app.bikechance"
+
+    /// 最後に取れた応答の置き場所。**こちらは作り直せる**ので `Caches` でよい。
+    static var favoritesCacheDirectory: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("favorites", isDirectory: true)
+    }
+
+    @MainActor
+    static func makeFavorites(client: V1Client) -> FavoritesModel {
+        FavoritesModel(
+            client: client,
+            store: FileFavoritesStore(directory: favoritesDirectory),
+            cache: FileFavoritesCache(directory: favoritesCacheDirectory)
+        )
+    }
 }
 
 /// `/v1` の口を画面に配る。

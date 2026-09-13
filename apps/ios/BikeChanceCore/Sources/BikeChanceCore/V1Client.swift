@@ -90,6 +90,26 @@ public struct V1Client: Sendable {
         return try await get(path: "/v1/trip-check", query: items)
     }
 
+    /// 1 ポートの詳細（`/v1/stations/{system}/{station_id}`。W5 の PR F）。
+    ///
+    /// **`at` を送らない。** 曲線（生の 10 点）が返るので到着時刻が要らず、送ると
+    /// 同じポートの URL が 5 分ごとに割れて CDN が効かない。
+    ///
+    /// **本文をそのまま返す口も持つ**（`stationDetailBody`）。お気に入りは**受け取った
+    /// バイトをそのまま取っておく**ので、型に写してから書き戻さない。
+    public func stationDetail(system: String, stationID: String) async throws
+        -> StationDetailResponse
+    {
+        try V1Client.makeDecoder().decode(
+            StationDetailResponse.self,
+            from: await stationDetailBody(system: system, stationID: stationID))
+    }
+
+    /// 詳細の応答の**生のバイト**。オフライン用に取っておくのに使う。
+    public func stationDetailBody(system: String, stationID: String) async throws -> Data {
+        try await getData(path: "/v1/stations/\(system)/\(stationID)", query: [])
+    }
+
     /// データの鮮度・クレジット・通知文。
     public func meta() async throws -> MetaResponse {
         try await get(path: "/v1/meta", query: [])
@@ -98,6 +118,16 @@ public struct V1Client: Sendable {
     // MARK: - 実装
 
     private func get<T: Decodable>(path: String, query: [URLQueryItem]) async throws -> T {
+        let data = try await getData(path: path, query: query)
+        do {
+            return try V1Client.makeDecoder().decode(T.self, from: data)
+        } catch {
+            throw V1Error.malformedBody(String(describing: error))
+        }
+    }
+
+    /// 応答の本文。**読み解く前のバイト**が要るところ（お気に入りのキャッシュ）から呼ぶ。
+    private func getData(path: String, query: [URLQueryItem]) async throws -> Data {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             throw V1Error.invalidBaseURL
         }
@@ -115,11 +145,7 @@ public struct V1Client: Sendable {
         guard (200..<300).contains(http.statusCode) else {
             throw V1Error.from(status: http.statusCode, body: data)
         }
-        do {
-            return try V1Client.makeDecoder().decode(T.self, from: data)
-        } catch {
-            throw V1Error.malformedBody(String(describing: error))
-        }
+        return data
     }
 
     /// `/v1` の時刻を読むデコーダ。

@@ -15,6 +15,8 @@ import SwiftUI
 /// （App Store 審査ガイドライン 5.1.2、開発プラン §9.2）。
 struct MapScreen: View {
     @State var model: StationsModel
+    /// **アプリに 1 つだけ**（`BikeChanceApp` が持つ）。詳細画面の ☆ と一覧が同じものを見る。
+    var favorites: FavoritesModel
     /// 背面に回っているあいだは取りに行かない。
     @Environment(\.scenePhase) private var scenePhase
     @State private var camera: MapCameraPosition = .region(MapScreen.initialRegion)
@@ -23,6 +25,7 @@ struct MapScreen: View {
     @State private var attributions: [String: Attribution] = [:]
     @State private var selected: StationCurrent?
     @State private var showsCredits = false
+    @State private var showsFavorites = false
     @State private var now = Date()
     /// **いま出している応答が指している到着時刻。** 端末の時計から計算し直さない
     /// （応答は CDN に留まりうる。W4 プラン §12 の 114）。
@@ -55,7 +58,8 @@ struct MapScreen: View {
                         attribution: attributions[latest.systemID],
                         intent: model.intent,
                         arrival: forecastArrival,
-                        now: now
+                        now: now,
+                        favorites: favorites
                     )
                 }
         }
@@ -86,13 +90,18 @@ struct MapScreen: View {
         .safeAreaInset(edge: .top) {
             VStack(spacing: 8) {
                 StatusBanner(state: model.state, now: now)
-                ArrivalBar(
-                    arrival: model.arrival, intent: $model.intent, now: now,
-                    select: { model.select(arrival: $0) })
+                HStack(spacing: 8) {
+                    ArrivalBar(
+                        arrival: model.arrival, intent: $model.intent, now: now,
+                        select: { model.select(arrival: $0) })
+                    Spacer(minLength: 0)
+                    favoritesButton
+                }
             }
         }
         .safeAreaInset(edge: .bottom) { CreditFooter(showsCredits: $showsCredits) }
         .sheet(isPresented: $showsCredits) { CreditsScreen() }
+        .sheet(isPresented: $showsFavorites) { FavoritesScreen(model: favorites) }
         .onChange(of: model.state) { _, state in apply(state) }
         // 最初の 1 回。カメラの位置は以降 `onMapCameraChange` が持つ
         .task { model.viewportChanged(to: Bbox(region: MapScreen.initialRegion)) }
@@ -111,6 +120,26 @@ struct MapScreen: View {
                 try? await Task.sleep(for: .seconds(Self.tickSeconds))
             }
         }
+    }
+
+    /// お気に入りへの導線（開発プラン §9.2）。**件数を出す**——0 件でも開けるようにして、
+    /// 「まだ登録していない」ことが分かる画面へ連れていく（完了条件 4）。
+    private var favoritesButton: some View {
+        Button {
+            showsFavorites = true
+        } label: {
+            Label(
+                favorites.favorites.isEmpty ? "お気に入り" : "\(favorites.favorites.count)",
+                systemImage: "star.fill"
+            )
+            .font(.footnote.weight(.medium))
+            .labelStyle(.titleAndIcon)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.regularMaterial, in: Capsule())
+        }
+        .padding(.trailing, 12)
+        .accessibilityLabel("お気に入り \(favorites.favorites.count) 件")
     }
 
     /// 応答から画面の状態を作る。**表示上限を超えたら中心に近い順に絞る。**

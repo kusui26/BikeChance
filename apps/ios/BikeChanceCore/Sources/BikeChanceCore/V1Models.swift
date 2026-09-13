@@ -222,6 +222,34 @@ public struct ForecastCurve: Decodable, Equatable, Sendable {
         guard horizonsMinutes.indices.contains(index) else { return nil }
         return generatedAt.addingTimeInterval(TimeInterval(horizonsMinutes[index] * 60))
     }
+
+    /// 要求した分数に**いちばん近い水平**の添字。**補間しない。**
+    ///
+    /// 曲線は「補間していない生の 10 点」なので（契約 16）、**在る点をそのまま読めば
+    /// 端末は補間しなくてよい**。書けば `interpolateForecast` の 2 つ目の実装ができる
+    /// （§12 の 142）。**近い点を選んだことは、その点の絶対時刻を出すことで伝わる**
+    /// ——「15 分後」ではなく「10:35 到着」と書くので、ずれは画面に現れる。
+    ///
+    /// 長さがそろっていなければ nil（欠けた表から数を作らない）。
+    public func nearestIndex(toMinutes minutes: Int) -> Int? {
+        guard !horizonsMinutes.isEmpty,
+            horizonsMinutes.count == rentProbabilities.count,
+            horizonsMinutes.count == returnProbabilities.count
+        else { return nil }
+        // 同じ距離なら**手前**を採る（到着が早いほうの確率を出す）
+        return horizonsMinutes.indices.min {
+            let left = (abs(horizonsMinutes[$0] - minutes), horizonsMinutes[$0])
+            let right = (abs(horizonsMinutes[$1] - minutes), horizonsMinutes[$1])
+            return left < right
+        }
+    }
+
+    /// 添字 `index` の確率。借りると返すは別の数なので、意図で選ぶ。
+    public func probability(for intent: RideIntent, at index: Int) -> Double? {
+        let values = intent == .borrow ? rentProbabilities : returnProbabilities
+        guard values.indices.contains(index) else { return nil }
+        return values[index]
+    }
 }
 
 /// 直近 24 時間の実績（1 時間ごと）。
