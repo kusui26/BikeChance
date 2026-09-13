@@ -1626,17 +1626,21 @@ baseline-b3-v0-20260912（学習 6 日、気候値のセル {'bike': 1980225, 'd
 **6 通りすべてが「落ちなかった」**と出た。**「1 つも落ちない」と出たら、まず測り方を疑う**
 （§12 の 138 と同じ形）。**壊す仕掛けも壊れる。**
 
-##### 本番への適用
+##### 本番への適用（2026-09-13 14:27 JST）
 
-**migration 0048 は本番にまだ当てていない**（`db push` が権限で止まった）。
-**ローカルでは `db reset` ＋ pgTAP 780 件が通っている。** 適用は次の 1 行で、
-**当ててから 5 分以内に `monitor_jobs` の `detail.checks.check_model_freshness` が
-`{"active": "baseline-b3-v0-20260912", "age_days": 1, "alerts": 0}` になること**を確かめる。
+`pnpm exec supabase db push` で `20260913042849_0048_model_freshness.sql` を当てた。
 
-```bash
-set -a; . ./.env; set +a
-pnpm exec supabase db push        # 20260913042849_0048_model_freshness.sql
-```
+| 確かめたもの | 結果 |
+|---|---|
+| 関数が在り、`security definer` ＋ `search_path = ''` | ○ |
+| **匿名から実行できない** | ○ |
+| `app_config.model_stale_days` | **8** |
+| 直に呼んだ結果 | `{"active": "baseline-b3-v0-20260912", "last_train_day": "2026-09-12", "age_days": 1, "threshold_days": 8, "alerts": 0}` |
+| **pg_cron の定時回（14:29）** | `status = ok` / **検査 7 つ** / `alerts 0` / `errors 0` |
+| `model_stale`・`model_missing`・`monitor_check_failed:*` | **1 つも出ていない** |
+
+**適用の前後で `monitor_jobs` の検査が 6 → 7 に増えたことが、定時回の `detail` で読める**
+（14:24 は 6 つ、14:29 は 7 つ）。**次に鳴るのは 09-20**（最終学習日 09-12 ＋ 8 日）。
 
 ---
 
