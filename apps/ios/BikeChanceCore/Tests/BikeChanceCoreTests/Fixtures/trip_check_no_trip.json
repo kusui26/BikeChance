@@ -1,0 +1,321 @@
+{
+    "api_version": "v1",
+    "generated_at": "2026-09-13T06:22:35.317Z",
+    "stale": false,
+    "system_id": "docomo-cycle",
+    "depart_in_min": 10,
+    "ride_min": 30,
+    "ride_min_estimated": true,
+    "arrive_in_min": 40,
+    "from": {
+        "system_id": "docomo-cycle",
+        "station_id": "4979",
+        "name": "C1-92.エステムプラザ愛宕虎ノ門レジデンス",
+        "lat": 35.665628,
+        "lon": 139.750766,
+        "capacity": null,
+        "capacity_est": 4,
+        "capacity_days": 7,
+        "bikes": 0,
+        "docks": 4,
+        "is_installed": true,
+        "is_renting": true,
+        "is_returning": true,
+        "is_present": true,
+        "observed_at": "2026-09-13T06:21:15.000Z",
+        "last_changed_at": "2026-09-12T06:17:58.000Z",
+        "forecast": {
+            "p_bike": 0.05,
+            "p_dock": 0.998,
+            "confidence": 2,
+            "base_observed_at": "2026-09-13T06:19:51.000Z",
+            "model_version": "baseline-b3-v0-20260912"
+        }
+    },
+    "to": {
+        "system_id": "docomo-cycle",
+        "station_id": "10734",
+        "name": "【一時休止】E4-15.千石4丁目",
+        "lat": 35.729153,
+        "lon": 139.741368,
+        "capacity": null,
+        "capacity_est": 5,
+        "capacity_days": 7,
+        "bikes": 0,
+        "docks": 5,
+        "is_installed": true,
+        "is_renting": false,
+        "is_returning": false,
+        "is_present": true,
+        "observed_at": "2026-09-13T06:21:15.000Z",
+        "last_changed_at": "2026-09-06T09:45:04.000Z",
+        "forecast": null
+    },
+    "trip": null,
+    "alternatives": {
+        "from": [
+            {
+                "distance_m": 203,
+                "station": {
+                    "system_id": "docomo-cycle",
+                    "station_id": "10072",
+                    "name": "C1-04.虎ノ門ヒルズ",
+                    "lat": 35.666527,
+                    "lon": 139.748804,
+                    "capacity": null,
+                    "capacity_est": 30,
+                    "capacity_days": 7,
+                    "bikes": 10,
+                    "docks": 20,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-09-13T06:21:15.000Z",
+                    "last_changed_at": "2026-09-13T06:15:40.000Z",
+                    "forecast": {
+                        "p_bike": 1,
+                        "p_dock": 1,
+                        "confidence": 2,
+                        "base_observed_at": "2026-09-13T06:19:51.000Z",
+                        "model_version": "baseline-b3-v0-20260912"
+                    }
+                }
+            },
+            {
+                "distance_m": 302,
+                "station": {
+                    "system_id": "docomo-cycle",
+                    "station_id": "10608",
+                    "name": "C1-46.新虎通りCORE",
+                    "lat": 35.665124,
+                    "lon": 139.754054,
+                    "capacity": null,
+                    "capacity_est": 37,
+                    "capacity_days": 7,
+                    "bikes": 12,
+                    "docks": 0,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-09-13T06:21:15.000Z",
+                    "last_changed_at": "2026-09-13T05:53:20.000Z",
+                    "forecast": {
+                        "p_bike": 1,
+                        "p_dock": 0.017,
+                        "confidence": 2,
+                        "base_observed_at": "2026-09-13T06:19:51.000Z",
+                        "model_version": "baseline-b3-v0-20260912"
+                    }
+                }
+            },
+            {
+                "distance_m": 80,
+                "station": {
+                    "system_id": "hellocycling",
+                    "station_id": "10429",
+                    "name": "厚木駅（オダクル厚木第３）",
+                    "lat": 35.443014338789,
+                    "lon": 139.37812357084,
+                    "capacity": 10,
+                    "capacity_est": 10,
+                    "capacity_days": 7,
+                    "bikes": 6,
+                    "docks": 4,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-09-13T06:21:15.000Z",
+                    "last_changed_at": "2026-09-13T04:11:33.000Z",
+                    "forecast": {
+                        "p_bike": 0.999,
+                        "p_dock": 0.998,
+                        "confidence": 2,
+                        "base_observed_at": "2026-09-13T06:16:36.000Z",
+                        "model_version": "baseline-b3-v0-20260912"
+                    }
+                }
+            },
+            {
+                "distance_m": 46,
+                "station": {
+                    "system_id": "hellocycling",
+                    "station_id": "10428",
+                    "name": "ローソン ビナガーデンズ店",
+                    "lat": 35.452729376,
+                    "lon": 139.389186,
+                    "capacity": 5,
+                    "capacity_est": 5,
+                    "capacity_days": 7,
+                    "bikes": 4,
+                    "docks": 1,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-09-13T06:21:15.000Z",
+                    "last_changed_at": "2026-09-13T05:41:32.000Z",
+                    "forecast": {
+                        "p_bike": 0.998,
+                        "p_dock": 0.924,
+                        "confidence": 2,
+                        "base_observed_at": "2026-09-13T06:16:36.000Z",
+                        "model_version": "baseline-b3-v0-20260912"
+                    }
+                }
+            },
+            {
+                "distance_m": 254,
+                "station": {
+                    "system_id": "docomo-cycle",
+                    "station_id": "10671",
+                    "name": "C1-50.NTT虎ノ門ビル",
+                    "lat": 35.666075,
+                    "lon": 139.748008,
+                    "capacity": null,
+                    "capacity_est": 30,
+                    "capacity_days": 7,
+                    "bikes": 3,
+                    "docks": 27,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-09-13T06:21:15.000Z",
+                    "last_changed_at": "2026-09-13T05:46:23.000Z",
+                    "forecast": {
+                        "p_bike": 0.997,
+                        "p_dock": 1,
+                        "confidence": 2,
+                        "base_observed_at": "2026-09-13T06:19:51.000Z",
+                        "model_version": "baseline-b3-v0-20260912"
+                    }
+                }
+            }
+        ],
+        "to": [
+            {
+                "distance_m": 199,
+                "station": {
+                    "system_id": "hellocycling",
+                    "station_id": "10566",
+                    "name": "ミロクジーナ",
+                    "lat": 35.3406843023,
+                    "lon": 139.4999112486,
+                    "capacity": 4,
+                    "capacity_est": 4,
+                    "capacity_days": 7,
+                    "bikes": 0,
+                    "docks": 4,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-09-13T06:21:15.000Z",
+                    "last_changed_at": "2026-09-13T06:06:35.000Z",
+                    "forecast": {
+                        "p_bike": 0.082,
+                        "p_dock": 0.993,
+                        "confidence": 2,
+                        "base_observed_at": "2026-09-13T06:16:36.000Z",
+                        "model_version": "baseline-b3-v0-20260912"
+                    }
+                }
+            },
+            {
+                "distance_m": 224,
+                "station": {
+                    "system_id": "docomo-cycle",
+                    "station_id": "10536",
+                    "name": "E4-11.プライマル千石",
+                    "lat": 35.727519,
+                    "lon": 139.742815,
+                    "capacity": null,
+                    "capacity_est": 11,
+                    "capacity_days": 7,
+                    "bikes": 7,
+                    "docks": 2,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-09-13T06:21:15.000Z",
+                    "last_changed_at": "2026-09-13T05:43:36.000Z",
+                    "forecast": {
+                        "p_bike": 0.995,
+                        "p_dock": 0.977,
+                        "confidence": 2,
+                        "base_observed_at": "2026-09-13T06:19:51.000Z",
+                        "model_version": "baseline-b3-v0-20260912"
+                    }
+                }
+            },
+            {
+                "distance_m": 330,
+                "station": {
+                    "system_id": "docomo-cycle",
+                    "station_id": "10597",
+                    "name": "E4-14.NTT東日本大塚ビル",
+                    "lat": 35.726188,
+                    "lon": 139.741375,
+                    "capacity": null,
+                    "capacity_est": 41,
+                    "capacity_days": 7,
+                    "bikes": 22,
+                    "docks": 0,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-09-13T06:21:15.000Z",
+                    "last_changed_at": "2026-09-13T04:56:19.000Z",
+                    "forecast": {
+                        "p_bike": 0.997,
+                        "p_dock": 0.039,
+                        "confidence": 2,
+                        "base_observed_at": "2026-09-13T06:19:51.000Z",
+                        "model_version": "baseline-b3-v0-20260912"
+                    }
+                }
+            }
+        ]
+    },
+    "feeds": [
+        {
+            "system_id": "hellocycling",
+            "display_name": "HELLO CYCLING",
+            "data_updated_at": "2026-09-13T06:16:36.000Z",
+            "expected_cadence_s": 300,
+            "stale_after_s": 960,
+            "stale": false,
+            "capacity_is_dynamic": false
+        },
+        {
+            "system_id": "docomo-cycle",
+            "display_name": "ドコモ・バイクシェア",
+            "data_updated_at": "2026-09-13T06:21:15.000Z",
+            "expected_cadence_s": 81,
+            "stale_after_s": 303,
+            "stale": false,
+            "capacity_is_dynamic": true
+        }
+    ],
+    "attribution": [
+        {
+            "system_id": "hellocycling",
+            "provider": "OpenStreet株式会社 / 公共交通オープンデータ協議会",
+            "dataset": "OpenStreet（ハローサイクリング） バイクシェア関連情報",
+            "license": "クリエイティブ・コモンズ・ライセンス 表示4.0国際",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/deed.ja"
+        },
+        {
+            "system_id": "docomo-cycle",
+            "provider": "株式会社ドコモ・バイクシェア / 公共交通オープンデータ協議会",
+            "dataset": "ドコモ・バイクシェア バイクシェア関連情報",
+            "license": "クリエイティブ・コモンズ・ライセンス 表示4.0国際",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/deed.ja"
+        }
+    ]
+}
