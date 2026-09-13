@@ -458,7 +458,20 @@ create table public.model_versions (
 | `lightgbm` | **62 列すべて** | **配らない。** 同じ名前で意味の違う列を見る（例外は出ず確率だけが変わる） |
 | `baseline` | 6 列（システム・ポート・日・水平・日内分・目標の曜日種別） | 配る。**v0 から v3 までこの 6 列は 1 つも変わっていない** |
 
-いま配っている `baseline-b3-v0-20260908` は **`feature_set = v0`** で、配信側は v3 である。
+いま配っている `baseline-b3-v0-20260912`（2026-09-13 11:50 JST に昇格）は **`feature_set = v3`** である。
+その前の `baseline-b3-v0-20260908` は `v0` で、配信側が v3 でも配れていた（上の表のとおり）。
+
+**古びたら鳴る**（0048、W5 の PR M）。`check_model_freshness()` が `monitor_jobs`（5 分毎）の
+7 つ目の検査として `active` な版の **`train_days` の最終日**を見て、**`model_stale_days`
+（`app_config`、既定 **8** 日）以上前なら 6 時間ごとに 1 回**通知する。`active` が 1 つも
+無いときも別の鍵（`model_missing`）で鳴る。**鳴るだけで、昇格はしない**（契約 22）——
+直し方は `fit_baseline --upload` で当てはめ直し、**測ってから** `promote_model_version()`
+を人が呼ぶ、である。
+
+| 鍵 | いつ | 抑制 |
+|---|---|---|
+| `model_stale` | `active` の `train_days` の最終日が `model_stale_days` 日以上前 | 6 時間 |
+| `model_missing` | `status = 'active'` の行が 1 つも無い | 6 時間 |
 
 **モデルの成果物**：**`models` バケット**。どちらも gzip した JSON で、**`format_version` を先頭に持つ**。
 

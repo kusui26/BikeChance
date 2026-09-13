@@ -138,3 +138,56 @@ jobs:
             exit 1
           fi
           echo "OK: 検出なし"
+
+      - name: 昇格が自動化されていないか（W5 の PR M、契約 22）
+        # 配信を切り替えるのは **人が確認して行う**（CLAUDE.md §6）。0038 は
+        # `promote_model_version` に誰にも grant していないが、**権限が止めるのは
+        # 本番で走らせた 1 回だけ**で、書いた時点では気づけない。ここで落とす。
+        #
+        # **禁じるのは名前ではなく「呼ぶ形」である。** jobs/infer.py と
+        # jobs/fit_lightgbm.py は「配信を切り替えるのは promote_model_version() の
+        # 仕事だ」と**散文で**説明していて、それは消してはいけない文である
+        # （境界がどこにあるかを読む人に伝えている）。散文は括弧が空なので当たらない。
+        #
+        #   promote_model_version('x') / ($1)  → 当たる（引数を渡して呼んでいる）
+        #   promote_model_version()            → 当たらない（散文）
+        #   rpc/promote_model_version          → 当たる（REST から呼ぶ形）
+        #
+        # 除くのは「自分では動かない」3 つ：関数を定義する migration、権限と挙動を
+        # 試す pgTAP、人が psql に打ち込む手順を書いた docs。**このファイル自身も除く**
+        # ——検査の式そのものが当たってしまうため（上の「機密情報の混入チェック」が
+        # 同じ理由で ci.yml を除いているのと同じ）。
+        run: |
+          if git grep -nIE 'promote_model_version[[:space:]]*\([[:space:]]*[^)[:space:]]|rpc/promote_model_version' \
+              -- . ':!supabase/migrations' ':!supabase/tests' ':!docs' ':!.github/workflows/ci.yml'; then
+            echo "::error::昇格を呼ぶ経路を作らないでください。promote_model_version は人が psql から呼びます（CLAUDE.md §6）"
+            exit 1
+          fi
+          echo "OK: 検出なし"
+
+      - name: 自分で走るものが昇格の名前を持たないか（W5 の PR M）
+        # 呼ぶ形に化ける一歩手前で止める。人の手を介さずに走るものだけを見る。
+        # apps/ml/bikechance_ml/io を入れているのは、Python から DB を叩く口が
+        # そこだけだから（上の「io/ に閉じているか」と同じ境界）。
+        # **このファイル自身は除く**（検査の名前そのものが当たるため）。
+        run: |
+          if git grep -nI 'promote_model_version' \
+              -- '.github/workflows' 'scripts' 'supabase/functions' 'apps/ml/bikechance_ml/io' \
+                 ':!.github/workflows/ci.yml'; then
+            echo "::error::自動で走るものに昇格の名前を持たせないでください（W5 プラン §12 の 156）"
+            exit 1
+          fi
+          echo "OK: 検出なし"
+
+      - name: 昇格の除外が生きているか（W5 の PR M）
+        # **除外そのものも検査する。** 3 つの接頭辞が呼ぶ形を持っていなければ、
+        # それは「効いていない除外」で、上の 2 つは知らないうちに何も守らなくなる
+        # （場所が動いた・書き方が変わった）。
+        run: |
+          for dir in supabase/migrations supabase/tests docs; do
+            if ! git grep -qIE 'promote_model_version[[:space:]]*\([[:space:]]*[^)[:space:]]' -- "$dir"; then
+              echo "::error::$dir に昇格を呼ぶ形がありません。除外が効いていない可能性があります"
+              exit 1
+            fi
+          done
+          echo "OK: 3 つとも生きている"
