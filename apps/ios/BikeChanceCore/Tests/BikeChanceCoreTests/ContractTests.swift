@@ -417,11 +417,46 @@ struct ContractTests {
 
     @Test("**行程の `confidence` は両端の小さいほう**（鎖は弱い環の強さしかない。W4-24）")
     func theTripConfidenceIsTheWeakerEnd() throws {
-        let response = try Self.decode(TripCheckResponse.self, "trip_check")
-        let trip = try #require(response.trip)
+        for name in ["trip_check", "trip_check_weekday"] {
+            let response = try Self.decode(TripCheckResponse.self, name)
+            let trip = try #require(response.trip)
+            let from = try #require(response.from.forecast).confidence
+            let to = try #require(response.to.forecast).confidence
+            #expect(trip.confidence == min(from, to), "\(name)")
+        }
+    }
+
+    @Test("**両端の `confidence` が違う実応答で、小さいほうが採られている**（2026-09-14）")
+    func theWeakerEndWinsOnRealData() throws {
+        // **日曜の応答（`trip_check`）では両端とも 2** で、min と max が見分けられない
+        // （成果物に `sun_holiday` のセルが無かった。§12 の 149）。平日の応答を 1 本
+        // 足して、**3 と 2 が混ざった組**で確かめる——max なら 3 になる
+        let response = try Self.decode(TripCheckResponse.self, "trip_check_weekday")
         let from = try #require(response.from.forecast).confidence
         let to = try #require(response.to.forecast).confidence
-        #expect(trip.confidence == min(from, to))
+        #expect(from == 3 && to == 2, "前提：両端の確度が違う")
+        #expect(try #require(response.trip).confidence == 2)
+    }
+
+    @Test("**平日は `confidence = 3` が出る**（9/13 の昇格が効いた。W5 §1.2）")
+    func weekdaysReachTheHighestConfidence() throws {
+        let response = try Self.decode(TripCheckResponse.self, "trip_check_weekday")
+        #expect(try #require(response.from.forecast).confidence == 3)
+        // 9/13（日）に採った応答は両端とも 2 だった——**同じポートである**
+        let sunday = try Self.decode(TripCheckResponse.self, "trip_check")
+        #expect(sunday.from.stationID == response.from.stationID)
+        #expect(try #require(sunday.from.forecast).confidence == 2)
+    }
+
+    @Test("**別系統の混入が直っている**（§12 の 158 の修正が本番に出た）")
+    func theCrossSystemBugIsFixedInProduction() throws {
+        // `trip_check.json`（09-13）は**直す前**で 5 件混ざっている。
+        // `trip_check_weekday.json`（09-14）は**直した後**——0 件でなければならない
+        let fixed = try Self.decode(TripCheckResponse.self, "trip_check_weekday")
+        let intruders = (fixed.alternatives.from + fixed.alternatives.to)
+            .filter { $0.station.systemID != fixed.systemID }
+        #expect(intruders.isEmpty)
+        #expect(fixed.alternatives.from.isEmpty == false, "候補そのものは出ている")
     }
 
     @Test("**代替候補はその端点の確率の高い順**（完了条件 3。並べ替えはサーバーの仕事）")
