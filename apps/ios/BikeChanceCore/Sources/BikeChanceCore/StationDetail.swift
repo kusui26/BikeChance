@@ -44,32 +44,17 @@ public struct StationDetail: Equatable, Sendable {
         self.name = station.name ?? "（名称未取得）"
         self.systemName = feed?.displayName ?? station.systemID
         self.freshness = freshness
-        self.availability = [
+        self.availability = RideIntent.allCases.map { intent in
             Availability(
-                title: "借りられる",
-                value: Self.count(station.bikes, enabled: station.isRenting, freshness: freshness),
-                caution: station.isRenting == false ? "貸出停止中" : nil
-            ),
-            Availability(
-                title: "返せる",
-                value: Self.count(
-                    station.docks, enabled: station.isReturning, freshness: freshness),
-                caution: station.isReturning == false ? "返却停止中" : nil
-            ),
-        ]
+                title: intent.verb,
+                value: station.countText(for: intent, freshness: freshness),
+                caution: station.stopNote(for: intent)
+            )
+        }
         self.forecast = ForecastState.make(
             station: station, feed: feed, intent: intent, arrival: arrival)
         self.facts = Self.facts(station: station, feed: feed)
         self.credit = attribution?.credit
-    }
-
-    /// 台数の表示。**鮮度が切れていれば値を出さない。停止中も出さない。**
-    ///
-    /// 停止中に「3」と出すと「3 台あるから借りられる」と読める。数を隠して
-    /// `caution` に理由を書くほうが、誤解が少ない。
-    private static func count(_ value: Int?, enabled: Bool?, freshness: Freshness) -> String {
-        guard freshness.isPresentable, enabled != false, let value else { return unknownValue }
-        return "\(value)"
     }
 
     /// 動的な容量のシステムに添える説明。**「—」の理由を言う。**
@@ -139,5 +124,33 @@ extension StationsResponse {
     /// `system_id` からクレジットを引く。詳細画面はそのポートのぶんだけを出す。
     public func attributionIndex() -> [String: Attribution] {
         Dictionary(attribution.map { ($0.systemID, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+}
+
+extension StationCurrent {
+    /// その意図に対応する実測の台数の表示（借りたいなら自転車、返したいなら空き）。
+    ///
+    /// **鮮度が切れていれば値を出さない。停止中も出さない。**
+    /// 停止中に「3」と出すと「3 台あるから借りられる」と読める。数を隠して理由
+    /// （`stopNote`）を出すほうが、誤解が少ない。
+    ///
+    /// **詳細画面と行程チェックが同じ実装を通る。** この規則（未観測を 0 と区別する・
+    /// 鮮度切れを現在値として出さない）は表示義務に直結していて、2 か所に別々に
+    /// 書くと片方だけ直したときに静かに食い違う（W5 §12 の 142 と同じ形）。
+    public func countText(for intent: RideIntent, freshness: Freshness) -> String {
+        let value = intent == .borrow ? bikes : docks
+        let enabled = intent == .borrow ? isRenting : isReturning
+        guard freshness.isPresentable, enabled != false, let value else {
+            return StationDetail.unknownValue
+        }
+        return "\(value)"
+    }
+
+    /// 止まっている理由。**数を出さない代わりに出す。** 止まっていなければ nil。
+    public func stopNote(for intent: RideIntent) -> String? {
+        switch intent {
+        case .borrow: isRenting == false ? "貸出停止中" : nil
+        case .returnBike: isReturning == false ? "返却停止中" : nil
+        }
     }
 }

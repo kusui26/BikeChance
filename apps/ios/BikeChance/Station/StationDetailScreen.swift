@@ -20,6 +20,8 @@ struct StationDetailScreen: View {
     let arrival: Date?
     let now: Date
 
+    @Environment(\.v1Client) private var client
+
     private var detail: StationDetail {
         StationDetail(
             station: station, feed: feed, attribution: attribution, intent: intent,
@@ -31,12 +33,32 @@ struct StationDetailScreen: View {
             // **確率が主、台数は従**（CLAUDE.md §2 の 7）。出せるときは先に置く
             forecastSection
             availabilitySection
+            tripSection
             factsSection
             creditSection
         }
         .listStyle(.insetGrouped)
         .navigationTitle(detail.name)
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// ここから行程を調べる（W5 の PR G）。
+    ///
+    /// **出発ポートはこのポート。** 到着は次の画面で探す——利用者が知っているのは
+    /// 「行き先」であってポート名ではない（`DestinationPicker`）。
+    ///
+    /// **座標の無いポートからは始めない。** 目的地を探す中心が決まらず、`/v1/trip-check`
+    /// も座標の無い端点を断る（`station_location_missing`）。
+    private var tripSection: some View {
+        Section {
+            NavigationLink {
+                TripCheckScreen(origin: station, client: client)
+            } label: {
+                Label("ここから行程をチェック", systemImage: "arrow.triangle.turn.up.right.diamond")
+            }
+        } footer: {
+            Text("目的地を選ぶと、**借りられる確率**と**返せる確率**の両方が出ます。")
+        }
     }
 
     /// 到着時刻の確率。**断定しない**（「借りられます」ではなく「借りられる可能性 80%」）。

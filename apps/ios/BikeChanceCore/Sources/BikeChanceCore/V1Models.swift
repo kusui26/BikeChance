@@ -310,3 +310,114 @@ public struct Problem: Decodable, Equatable, Sendable, Error {
         code == "too_many_stations" || code == "bbox_too_large"
     }
 }
+
+/// 行程が成立する確率（`/v1/trip-check`。W4-24）。
+///
+/// **注記は数と同じ構造体に入っている。** 別の型に分けると、数だけ取り出して注記を
+/// 落とせてしまう——`p_trip` は 2 つの確率を**独立とみなして掛けた**値なので、
+/// その仮定を伏せて出すと根拠のない断定になる。
+public struct TripOutcome: Decodable, Equatable, Sendable {
+    /// 出発で借りられ、到着で返せる確率（0〜1）。
+    public let probability: Double
+    /// 0〜3。**両端の小さいほう**（鎖は弱い環の強さしかない）。サーバーが決める。
+    public let confidence: Int
+    /// **独立仮定の注記。** 空にはならない（サーバーのスキーマが `min(1)`）。
+    public let notice: String
+
+    private enum CodingKeys: String, CodingKey {
+        case probability = "p_trip"
+        case confidence
+        case notice
+    }
+}
+
+/// 代替のポート候補（W4-25）。**同一システム・400 m 以内**。
+///
+/// `station.forecast` は**その端点と同じ時刻**で出してある（出発側なら借りる時刻、
+/// 到着側なら返す時刻）。**並びはサーバーが決める**（確率の高い順）ので、端末は
+/// 並べ替えない——同じ順序の実装を 2 つ持つと、丸めた後の値で並べ替えたときに
+/// サーバーと食い違う。
+public struct TripAlternative: Decodable, Equatable, Sendable, Identifiable {
+    /// 端点からの距離（m）。**徒歩で歩く距離**。
+    public let distanceMeters: Int
+    public let station: StationCurrent
+
+    public var id: String { station.id }
+
+    private enum CodingKeys: String, CodingKey {
+        case distanceMeters = "distance_m"
+        case station
+    }
+}
+
+/// 両端ぶんの代替候補。
+public struct TripAlternatives: Decodable, Equatable, Sendable {
+    public let from: [TripAlternative]
+    public let to: [TripAlternative]
+}
+
+/// `/v1/trip-check` の応答（W4 プラン §6.7、W5 の PR G）。
+///
+/// **確率が指す時刻は 2 つある。** どちらも `generatedAt` からの相対で、**端末が
+/// 受け取った時刻からではない**（W4 プラン §12 の 114）。応答は CDN に最大 3 分
+/// 留まりうるので、**表示は `departure` / `arrival` を通して絶対時刻で行う**。
+///
+/// **`feeds` は 2 系統ぶん来る**（地図と同じ形）。行程は 1 系統で完結するので、
+/// 使うのは `systemID` のぶんだけ——`feeds.first` を取ると別の系統の鮮度で
+/// 判定してしまう。
+public struct TripCheckResponse: Decodable, Equatable, Sendable {
+    public let apiVersion: String
+    /// **水平の起点。** `departInMinutes` / `arriveInMinutes` はここからの分数。
+    public let generatedAt: Date
+    public let isStale: Bool
+    /// **行程は 1 つの系統の中で完結する**（W4-21）。事業者をまたぐ行程は成立しない。
+    public let systemID: String
+    /// 出発ポートに着く時刻（**5 分に丸めた後**）。
+    public let departInMinutes: Int
+    /// 実際に使った乗車時間（分）。
+    public let rideMinutes: Int
+    /// **サーバーが概算したか。** true なら直線距離 ÷ 14 km/h で、**実際の経路より短い**。
+    public let rideMinutesEstimated: Bool
+    /// 到着ポートに着く時刻。`departInMinutes ＋ rideMinutes`。
+    public let arriveInMinutes: Int
+    public let from: StationCurrent
+    public let to: StationCurrent
+    /// **片側でも予測が欠けたら nil**（契約 10）。掛け算の片側が欠けた値を作らない。
+    public let trip: TripOutcome?
+    public let alternatives: TripAlternatives
+    public let feeds: [FeedStatus]
+    public let attribution: [Attribution]
+
+    private enum CodingKeys: String, CodingKey {
+        case apiVersion = "api_version"
+        case generatedAt = "generated_at"
+        case isStale = "stale"
+        case systemID = "system_id"
+        case departInMinutes = "depart_in_min"
+        case rideMinutes = "ride_min"
+        case rideMinutesEstimated = "ride_min_estimated"
+        case arriveInMinutes = "arrive_in_min"
+        case from
+        case to
+        case trip
+        case alternatives
+        case feeds
+        case attribution
+    }
+
+    /// 出発ポートに着く**絶対時刻**。「約 N 分後」と書かないための口。
+    public var departure: Date {
+        generatedAt.addingTimeInterval(TimeInterval(departInMinutes * 60))
+    }
+
+    /// 到着ポートに着く**絶対時刻**。
+    public var arrival: Date {
+        generatedAt.addingTimeInterval(TimeInterval(arriveInMinutes * 60))
+    }
+
+    /// **この行程の系統の**鮮度。`feeds.first` ではない（2 系統ぶん来る）。
+    public var feed: FeedStatus? { feeds.first { $0.systemID == systemID } }
+
+    /// **この行程の系統の**クレジット。
+    public var credit: Attribution? { attribution.first { $0.systemID == systemID } }
+}

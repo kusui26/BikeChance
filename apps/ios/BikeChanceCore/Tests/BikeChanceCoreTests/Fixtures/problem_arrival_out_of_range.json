@@ -1,0 +1,7 @@
+{
+    "type": "/v1/problems/arrival-out-of-range",
+    "title": "到着時刻が予測できる範囲の外です",
+    "status": 400,
+    "detail": "到着（出発 175 分後 ＋ 乗車 20 分 ＝ 195 分後）が、予測できる範囲（180 分先まで）を超えています。",
+    "code": "arrival_out_of_range"
+}

@@ -380,4 +380,109 @@ struct ContractTests {
         let response = try Self.decode(StationsResponse.self, "stations")
         #expect(response.stations.allSatisfy { $0.capacityEstimate == nil })
     }
+
+    // MARK: - /v1/trip-check（2026-09-13 の実応答。W5 の PR G）
+
+    @Test("/v1/trip-check をデコードできる")
+    func decodesTripCheck() throws {
+        let response = try Self.decode(TripCheckResponse.self, "trip_check")
+        #expect(response.apiVersion == "v1")
+        #expect(response.systemID == "docomo-cycle")
+        #expect(response.trip != nil)
+        #expect(response.alternatives.from.count == 5)
+        #expect(response.alternatives.to.count == 5)
+    }
+
+    @Test("**到着 ＝ 出発 ＋ 乗車**（サーバーが足し算を返している）")
+    func arrivalIsDeparturePlusRide() throws {
+        for name in ["trip_check", "trip_check_no_trip"] {
+            let response = try Self.decode(TripCheckResponse.self, name)
+            #expect(response.arriveInMinutes == response.departInMinutes + response.rideMinutes)
+            #expect(response.arriveInMinutes <= Arrival.maxMinutes, "水平の内側")
+            #expect(response.departInMinutes >= Arrival.minMinutes)
+        }
+    }
+
+    @Test("**`p_trip` が非 null ⟺ 両端の予測が非 null**（契約 10）")
+    func theTripExistsExactlyWhenBothEndsDo() throws {
+        let both = try Self.decode(TripCheckResponse.self, "trip_check")
+        #expect(both.trip != nil)
+        #expect(both.from.forecast != nil && both.to.forecast != nil)
+
+        let missing = try Self.decode(TripCheckResponse.self, "trip_check_no_trip")
+        #expect(missing.trip == nil)
+        #expect(missing.to.forecast == nil, "到着側が欠けている")
+        #expect(missing.from.forecast != nil, "出発側は在る（片側だけ欠けた形）")
+    }
+
+    @Test("**行程の `confidence` は両端の小さいほう**（鎖は弱い環の強さしかない。W4-24）")
+    func theTripConfidenceIsTheWeakerEnd() throws {
+        let response = try Self.decode(TripCheckResponse.self, "trip_check")
+        let trip = try #require(response.trip)
+        let from = try #require(response.from.forecast).confidence
+        let to = try #require(response.to.forecast).confidence
+        #expect(trip.confidence == min(from, to))
+    }
+
+    @Test("**代替候補はその端点の確率の高い順**（完了条件 3。並べ替えはサーバーの仕事）")
+    func alternativesComeSortedByProbability() throws {
+        let response = try Self.decode(TripCheckResponse.self, "trip_check")
+        let borrowing = response.alternatives.from.compactMap {
+            $0.station.forecast?.rentProbability
+        }
+        #expect(borrowing.count == response.alternatives.from.count, "候補は必ず予測を持つ")
+        #expect(borrowing == borrowing.sorted(by: >))
+
+        let returning = response.alternatives.to.compactMap {
+            $0.station.forecast?.returnProbability
+        }
+        #expect(returning.count == response.alternatives.to.count)
+        #expect(returning == returning.sorted(by: >))
+    }
+
+    @Test("**代替候補は 1 端点 5 件・400 m 以内**（W4-25）")
+    func alternativesAreNearbyAndCapped() throws {
+        let response = try Self.decode(TripCheckResponse.self, "trip_check")
+        for side in [response.alternatives.from, response.alternatives.to] {
+            #expect(side.count <= 5, "1 端点あたり 5 件まで")
+            #expect(side.allSatisfy { $0.distanceMeters <= 400 })
+        }
+    }
+
+    @Test("**この応答には別系統が混ざっている**（2026-09-13 の本番のバグ。§12 の 158）")
+    func thisFixtureRecordsTheCrossSystemBug() throws {
+        // **わざと直さずに残してある。** 虎ノ門の行程に、厚木（約 40 km）・新横浜・蘇我の
+        // ポートが「80〜362 m 先」として入っていた——`station_id` の衝突で、近傍の索引が
+        // 別系統の行に上書きされていた（原因はサーバー側で直した）。
+        //
+        // **壊れた実データを持っておくと、端末側の防御が本物で検査できる**
+        // （`TripCheckTests` の「別事業者のポートは候補にしない」）。
+        let response = try Self.decode(TripCheckResponse.self, "trip_check")
+        let intruders = (response.alternatives.from + response.alternatives.to)
+            .filter { $0.station.systemID != response.systemID }
+        #expect(intruders.count == 5)
+        #expect(intruders.allSatisfy { $0.station.systemID == "hellocycling" })
+        // 距離だけが正しく、中身が別のポートに差し替わる形で壊れている
+        #expect(intruders.allSatisfy { $0.distanceMeters <= 400 })
+        #expect(intruders.contains { ($0.station.name ?? "").contains("厚木") })
+    }
+
+    @Test("**`feeds` は 2 系統ぶん来る**（行程は 1 系統でも、形は地図と同じ）")
+    func tripCheckCarriesBothFeeds() throws {
+        let response = try Self.decode(TripCheckResponse.self, "trip_check")
+        #expect(response.feeds.count == 2)
+        #expect(response.attribution.count == 2)
+        #expect(response.feed?.systemID == response.systemID)
+        #expect(response.credit?.systemID == response.systemID)
+    }
+
+    @Test("**範囲外は 400 で理由が返る**（完了条件 4）")
+    func outOfRangeIsARefusalWithAReason() throws {
+        let problem = try Self.decode(Problem.self, "problem_arrival_out_of_range")
+        #expect(problem.status == 400)
+        #expect(problem.code == "arrival_out_of_range")
+        #expect(problem.detail.contains("180 分先まで"), "直し方が読める文面である")
+        // **地図を拡大しても直らない。** 「拡大してください」の側に流さない
+        #expect(!problem.needsNarrowerBbox)
+    }
 }

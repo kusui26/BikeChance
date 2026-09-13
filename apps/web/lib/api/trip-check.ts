@@ -285,6 +285,7 @@ const mapEndpoint = (params: {
   readonly row: LocatedRow;
   readonly neighbors: readonly NeighborRow[];
   readonly neighborRows: readonly StationRow[];
+  readonly system_id: SystemId;
   readonly observed_at: string | null;
   readonly in_min: number;
   readonly side: Side;
@@ -292,10 +293,23 @@ const mapEndpoint = (params: {
 }): Mapped => {
   const toCurrent = (row: LocatedRow): StationCurrent =>
     toStation(row, params.observed_at, toForecast(row, params.in_min, params.now));
+  // **系統で絞ってから索引を作る**（W5 プラン §12 の 158）。`listStationsByIds` は
+  // **わざと系統で絞らない**——`station_id` はシステムをまたいで衝突するので、
+  // 選り分けるのは呼ぶ側の仕事である（W4-21）。端点は `pickStation` が選り分けて
+  // いたが、**近傍の索引だけが `station_id` をそのまま鍵にしていた**。衝突した ID では
+  // 後から入った行が前の行を上書きするので、**別系統のポートが候補として出る**。
+  //
+  // 実測（2026-09-13、本番）：虎ノ門の行程に、**厚木（約 40 km）のポートが
+  // 「80 m 先」として**返っていた。近傍の行（`station_neighbors`）は同一系統に
+  // 絞れているので、距離だけが正しく、中身が別のポートに差し替わる形で壊れる。
+  //
   // **座標の無い近傍は候補にしない。** 歩いて向かう先なので、地図に出せない候補は
   // 出しても行けない（端点と同じ理由で外す）
   const stations = new Map(
-    params.neighborRows.filter(hasLocation).map((row) => [row.station_id, toCurrent(row)]),
+    params.neighborRows
+      .filter((row) => row.system_id === params.system_id)
+      .filter(hasLocation)
+      .map((row) => [row.station_id, toCurrent(row)]),
   );
   return {
     station: toCurrent(params.row),
@@ -319,7 +333,12 @@ export const buildTripResponse = (params: {
     feeds.find((feed) => feed.system_id === params.asked.system_id)?.data_updated_at ?? null;
   const side = (station_id: string): readonly NeighborRow[] =>
     params.neighbors.filter((neighbor) => neighbor.station_id === station_id);
-  const shared = { neighborRows: params.neighborRows, observed_at, now: params.now };
+  const shared = {
+    neighborRows: params.neighborRows,
+    system_id: params.asked.system_id,
+    observed_at,
+    now: params.now,
+  };
   const from = mapEndpoint({
     ...shared,
     row: params.from,

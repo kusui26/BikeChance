@@ -30,6 +30,20 @@ public enum Arrival {
         return Date(timeIntervalSince1970: seconds)
     }
 
+    /// 「30 分後」「1 時間 30 分後」。**選ぶときの目盛り**にだけ使う。
+    ///
+    /// **出した後の表示には使わない。** 応答が指している時刻は `clockText` で絶対に
+    /// 書く（W4 プラン §12 の 114）——相対で書くと、CDN に留まった応答では
+    /// 指している時刻とずれる。
+    public static func relativeText(minutes: Int) -> String {
+        let (hours, rest) = (minutes / 60, minutes % 60)
+        switch (hours, rest) {
+        case (0, let rest): return "\(rest) 分後"
+        case (let hours, 0): return "\(hours) 時間後"
+        case (let hours, let rest): return "\(hours) 時間 \(rest) 分後"
+        }
+    }
+
     /// 到着時刻の表示。**「約 30 分後」ではなく時刻で書く**（W4 プラン §12 の 114）。
     ///
     /// 端末の設定に従う（24 時間表記かどうかは利用者の設定）。検査では固定の暦を渡す。
@@ -79,12 +93,7 @@ public enum ArrivalChoice: Equatable, Hashable, Sendable, Identifiable {
     /// ピッカーに出す短い名前。
     public var pickerLabel: String {
         guard case .later(let minutes) = self else { return "いま" }
-        let (hours, rest) = (minutes / 60, minutes % 60)
-        switch (hours, rest) {
-        case (0, let rest): return "\(rest) 分後"
-        case (let hours, 0): return "\(hours) 時間後"
-        case (let hours, let rest): return "\(hours) 時間 \(rest) 分後"
-        }
+        return Arrival.relativeText(minutes: minutes)
     }
 
     /// 選択中に画面へ出す 1 行。**時刻で書く**（丸めた後の到着が分かる）。
