@@ -17,7 +17,7 @@
 """
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import Final
 
 import pyarrow as pa
@@ -265,6 +265,38 @@ def _require(table: pa.Table, schema: pa.Schema) -> None:
 
 
 type Row = Mapping[str, object]
+
+
+def capacity_rows(stations: pa.Table, day: date) -> tuple[Row, ...]:
+    """`station_capacity_est` に写す行（W5 の PR F、migration 0045）。
+
+    **`/v1` はこの数を DB からしか読めない。** 参照スナップショットは Storage に在り、
+    公開 API（Next.js）に Storage を読ませない（CLAUDE.md §5）。**同じ数を SQL で
+    数え直すと実装が 2 つになる**ので（W5-01 が閉じたのと同じ誤り）、ここで作った表を
+    そのまま写す（W5 プラン §12 の 150）。
+
+    **`capacity_est` の無い（None の）ポートは行を作らない。** 7 日のあいだ 1 度も
+    観測できなかったポートである。**0 は行を作る**——「7 日とも 1 台も 1 枠も並ばなかった」
+    という観測であって「分からない」ではない（実測 37 件。W5 プラン §12 の 152）。
+    """
+    _require(stations, STATIONS_SCHEMA)
+    return tuple(
+        {
+            "system_id": str(system),
+            "station_id": str(station),
+            "capacity_est": int(est),
+            "capacity_days": int(days),
+            "as_of_date": day.isoformat(),
+        }
+        for system, station, est, days in zip(
+            stations.column("system_id").to_pylist(),
+            stations.column("station_id").to_pylist(),
+            stations.column("capacity_est").to_pylist(),
+            stations.column("capacity_days").to_pylist(),
+            strict=True,
+        )
+        if est is not None
+    )
 
 
 def _by_system[T](

@@ -174,7 +174,9 @@ create function pg_temp.rest_called() returns text[] language sql immutable as $
     -- 天気の取り込み（apps/ml の /ml/weather）
     'upsert_weather_hourly',
     -- モデルの登録（apps/ml の学習ジョブ）
-    'register_model_version'
+    'register_model_version',
+    -- ポートの大きさ（apps/ml の build_reference。0045）
+    'upsert_capacity_est'
   ];
 $$;
 
@@ -187,6 +189,7 @@ create function pg_temp.cron_only() returns text[] language sql immutable as $$
     'check_jobs_missing', 'check_jobs_failed', 'check_cron_jobs', 'check_parquet_gap',
     'check_reference_data', 'check_inference',
     'rebuild_geo', 'rebuild_station_geo', 'rebuild_station_neighbors',
+    'rollup_station_hourly',
     -- 他の関数の中からだけ呼ぶ補助
     'send_alert', 'config_int', 'jsonb_boolean', 'jsonb_number', 'failure_reason',
     -- Supabase が作る（こちらの管理外）

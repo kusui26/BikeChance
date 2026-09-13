@@ -1,0 +1,185 @@
+{
+    "api_version": "v1",
+    "generated_at": "2026-09-13T03:45:10.920Z",
+    "stale": false,
+    "station": {
+        "system_id": "docomo-cycle",
+        "station_id": "10734",
+        "name": "【一時休止】E4-15.千石4丁目",
+        "lat": 35.729153,
+        "lon": 139.741368,
+        "capacity": null,
+        "capacity_est": 5,
+        "capacity_days": 7,
+        "bikes": 0,
+        "docks": 5,
+        "is_installed": true,
+        "is_renting": false,
+        "is_returning": false,
+        "is_present": true,
+        "observed_at": "2026-09-13T03:44:06.000Z",
+        "last_changed_at": "2026-09-06T09:45:04.000Z",
+        "forecast": null
+    },
+    "forecast_curve": null,
+    "recent": [
+        {
+            "hour_start": "2026-09-12T04:00:00.000Z",
+            "n": 41,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T05:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T06:00:00.000Z",
+            "n": 42,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T07:00:00.000Z",
+            "n": 40,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T08:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T09:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T10:00:00.000Z",
+            "n": 42,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T11:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T12:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T13:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T14:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T15:00:00.000Z",
+            "n": 45,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T16:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T17:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T18:00:00.000Z",
+            "n": 46,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T19:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T20:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T21:00:00.000Z",
+            "n": 46,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T22:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-12T23:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-13T00:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-13T01:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        },
+        {
+            "hour_start": "2026-09-13T02:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 5
+        }
+    ],
+    "feeds": [
+        {
+            "system_id": "docomo-cycle",
+            "display_name": "ドコモ・バイクシェア",
+            "data_updated_at": "2026-09-13T03:44:06.000Z",
+            "expected_cadence_s": 81,
+            "stale_after_s": 303,
+            "stale": false,
+            "capacity_is_dynamic": true
+        }
+    ],
+    "attribution": [
+        {
+            "system_id": "docomo-cycle",
+            "provider": "株式会社ドコモ・バイクシェア / 公共交通オープンデータ協議会",
+            "dataset": "ドコモ・バイクシェア バイクシェア関連情報",
+            "license": "クリエイティブ・コモンズ・ライセンス 表示4.0国際",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/deed.ja"
+        }
+    ]
+}

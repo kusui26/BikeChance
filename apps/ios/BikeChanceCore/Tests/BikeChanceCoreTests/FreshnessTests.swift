@@ -38,6 +38,8 @@ struct FreshnessTests {
             latitude: 35.68,
             longitude: 139.77,
             capacity: 10,
+            capacityEstimate: 12,
+            capacityDays: 7,
             bikes: bikes,
             docks: docks,
             isInstalled: true,

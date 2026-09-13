@@ -13,10 +13,13 @@ import {
   forecastHorizon,
   interpolateForecast,
   isForecastFresh,
+  toProbabilityList,
+  type ForecastCurve,
+  type RecentHour,
   type StationCurrent,
   type StationForecast,
 } from "@bikechance/shared";
-import type { StationRow } from "./read-port";
+import type { HourlyRow, StationRow } from "./read-port";
 
 /**
  * 1 ポートぶんの予測を組み立てる（W4 プラン §4 の W4-01・W4-02）。
@@ -124,6 +127,9 @@ export const toStation = (
   lat: row.lat,
   lon: row.lon,
   capacity: row.capacity,
+  // **`capacity` とは別の数**（0045）。混ぜない——片方は宣言、片方は実測である
+  capacity_est: row.capacity_est,
+  capacity_days: row.capacity_days,
   bikes: row.bikes,
   docks: row.docks,
   is_installed: row.is_installed,
@@ -134,3 +140,61 @@ export const toStation = (
   last_changed_at: new Date(row.last_changed_at).toISOString(),
   forecast,
 });
+
+/**
+ * 予測の曲線を組み立てる（`/v1/stations/{system}/{station_id}`。W5-13）。
+ *
+ * **補間しない。** `station_forecasts` の生の 10 点をそのまま返す——地図が返すのは
+ * 「その到着時刻の 1 点」で、正はどちらも `station_forecasts` にある（契約 4・16）。
+ * **同じ確率を 2 つの形で配らない**ための切り分けなので、ここで補間したら意味が消える。
+ *
+ * **null になる道は `toForecast` と同じ 3 つ**（予測が無い・鮮度切れ・配列が欠けている）。
+ * 違うのは「到着の指定が無い」道が無いことだけで、**詳細は `at` を受けない**（曲線を
+ * 返すので要らず、受けると同じポートの URL が 5 分ごとに割れて CDN が効かない）。
+ *
+ * **長さがそろっていなければ返さない。** 欠けた表から数を作らない（`interpolateForecast`
+ * が長さを見るのと同じ規律）。
+ */
+export const toForecastCurve = (row: StationRow, now: Date): ForecastCurve | null => {
+  const base = row.forecast_base_observed_at;
+  const generated = row.forecast_generated_at;
+  const horizons = row.forecast_horizons_min;
+  const bike = row.forecast_p_bike_x1000;
+  const dock = row.forecast_p_dock_x1000;
+  if (base === null || generated === null || row.forecast_model_version === null) {
+    return null;
+  }
+  if (row.forecast_confidence === null || horizons === null || bike === null || dock === null) {
+    return null;
+  }
+  const base_observed_at = new Date(base);
+  if (!isForecastFresh({ base_observed_at, now })) {
+    return null;
+  }
+  if (horizons.length === 0 || horizons.length !== bike.length || horizons.length !== dock.length) {
+    return null;
+  }
+  return {
+    base_observed_at: base_observed_at.toISOString(),
+    generated_at: new Date(generated).toISOString(),
+    model_version: row.forecast_model_version,
+    confidence: row.forecast_confidence,
+    horizons_min: [...horizons],
+    p_bike: [...toProbabilityList(bike)],
+    p_dock: [...toProbabilityList(dock)],
+  };
+};
+
+/**
+ * 直近の実績を応答の形に写す（0046）。
+ *
+ * **行を作らない時間帯はそのまま欠ける。** 観測の無かった時間に 0 を入れると
+ * 「0 台だった」に見える（CLAUDE.md §6 の「補間しない」と同じ規律）。
+ */
+export const toRecentHours = (rows: readonly HourlyRow[]): readonly RecentHour[] =>
+  rows.map((row) => ({
+    hour_start: new Date(row.hour_start).toISOString(),
+    n: row.n,
+    bikes_mean: row.bikes_mean,
+    docks_mean: row.docks_mean,
+  }));

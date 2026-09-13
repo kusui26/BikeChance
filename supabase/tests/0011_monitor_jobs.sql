@@ -129,7 +129,7 @@ select is(
 );
 
 -- 0020 で 9 本、0021・0022・0025・0029・0036・0037・0040・0043 が 1 本ずつ足して 17 本
-select is((select count(*)::int from public.monitored_jobs), 17, '監視対象は 17 ジョブ');
+select is((select count(*)::int from public.monitored_jobs), 18, '監視対象は 18 ジョブ（0046 で rollup_station_hourly を足した）');
 
 -- **参照スナップショットは Vercel Cron だが、見張りには入れる**（0036。§12 の 116）。
 -- 学習も推論も「前日の版」を読むので、止まると翌日に静かに壊れる

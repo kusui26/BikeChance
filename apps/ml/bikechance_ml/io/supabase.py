@@ -513,6 +513,19 @@ class SupabaseIo:
         )
         return as_int(response.json(), "upsert_weather_hourly")
 
+    def upsert_capacity_est(self, rows: Sequence[Mapping[str, object]]) -> int:
+        """ポートの大きさをまとめて書く（0045）。**同じ日を入れ直しても結果は変わらない。**
+
+        `/v1` はこの数を DB からしか読めない（Storage を読ませない。CLAUDE.md §5）。
+        **数えるのは `features/reference_snapshot.py` の 1 か所**で、ここは写すだけである。
+        """
+        if not rows:
+            return 0
+        response = self._request(
+            "POST", "/rest/v1/rpc/upsert_capacity_est", "rest", json={"p_rows": list(rows)}
+        )
+        return as_int(response.json(), "upsert_capacity_est")
+
     # ── 書き込み ────────────────────────────────────────────────
     def upload_parquet(self, path: str, body: bytes) -> None:
         """同じパスに上書きする。同じ時間帯を 2 回処理しても結果が変わらない。"""

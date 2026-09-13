@@ -31,6 +31,12 @@ export const PROBLEM_CODES = [
   "ride_malformed",
   "ride_out_of_range",
   "station_location_missing",
+  // `/v1/stations/{system}/{station_id}`（W5 プラン §6.6 の PR F）
+  //
+  // **`unknown_station` とは別にする。** あちらは `/v1/trip-check` の**引数**が指す先が
+  // 無いときの 400 で、こちらは**経路そのもの**が指す先が無いときの 404 である。
+  // 同じ言葉で 2 つの状態を指すと、クライアントが再試行してよいかを決められない
+  "station_not_found",
   "upstream_unavailable",
 ] as const;
 
@@ -54,6 +60,7 @@ const TITLES: Readonly<Record<ProblemCode, string>> = {
   ride_malformed: "乗車時間の形式が正しくありません",
   ride_out_of_range: "乗車時間が範囲外です",
   station_location_missing: "ポートの座標がありません",
+  station_not_found: "そのポートはありません",
   upstream_unavailable: "データベースに接続できません",
 };
 

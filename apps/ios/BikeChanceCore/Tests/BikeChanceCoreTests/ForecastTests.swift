@@ -34,7 +34,8 @@ struct ForecastTests {
     func station(forecast: StationForecast?) -> StationCurrent {
         StationCurrent(
             systemID: "hellocycling", stationID: "10139", name: "丸の内", latitude: 35.68,
-            longitude: 139.77, capacity: 10, bikes: 3, docks: 7, isInstalled: true,
+            longitude: 139.77, capacity: 10, capacityEstimate: 12, capacityDays: 7,
+            bikes: 3, docks: 7, isInstalled: true,
             isRenting: true, isReturning: true, isPresent: true, observedAt: now,
             lastChangedAt: now, forecast: forecast
         )

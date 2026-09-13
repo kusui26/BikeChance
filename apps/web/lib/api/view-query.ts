@@ -13,6 +13,8 @@ export const FEEDS_VIEW = "v1_feeds";
 export const STATIONS_VIEW = "v1_stations_current";
 /** 代替候補（`/v1/trip-check`。migration 0039、W4-26）。 */
 export const NEIGHBORS_VIEW = "v1_station_neighbors";
+/** 直近 24 時間の実績（`/v1/stations/{system}/{id}`。migration 0046）。 */
+export const HOURLY_VIEW = "v1_station_hourly";
 
 /** `v1_feeds` から読む列。`select("*")` にしないのは、列が増えたときに気づけるようにするため。 */
 export const FEED_COLUMNS =
@@ -20,16 +22,22 @@ export const FEED_COLUMNS =
   "forecast_model_version,forecast_generated_at";
 
 export const STATION_COLUMNS =
-  "system_id,station_id,name,lat,lon,capacity,bikes,docks,is_installed,is_renting,is_returning," +
+  "system_id,station_id,name,lat,lon,capacity,capacity_est,capacity_days," +
+  "bikes,docks,is_installed,is_renting,is_returning," +
   "is_present,last_changed_at," +
   "forecast_horizons_min,forecast_p_bike_x1000,forecast_p_dock_x1000,forecast_confidence," +
   "forecast_base_observed_at,forecast_model_version,forecast_generated_at";
 
 export const NEIGHBOR_COLUMNS = "station_id,nb_station_id,distance_m";
 
+/** `v1_station_hourly` から読む列（0046）。`system_id` は絞り込みで分かっているので読まない。 */
+export const HOURLY_COLUMNS = "station_id,hour_start,n,bikes_mean,docks_mean";
+
 /** 絞り込み 1 つ。`op` は supabase-js の同名メソッドに対応する。 */
 export type Filter =
   | { readonly op: "gte" | "lte"; readonly column: string; readonly value: number }
+  // 時刻の下限。**数と混ぜない**——`gte` は数のための口で、型で取り違えを止める
+  | { readonly op: "gte_text"; readonly column: string; readonly value: string }
   | { readonly op: "eq"; readonly column: string; readonly value: string }
   | { readonly op: "is"; readonly column: string; readonly value: boolean }
   | { readonly op: "in"; readonly column: string; readonly values: readonly string[] };
@@ -80,6 +88,39 @@ export const neighborFilters = (params: {
   { op: "lte", column: "distance_m", value: params.radius_m },
 ];
 
+/**
+ * 1 ポートを名指しで引く（`/v1/stations/{system}/{station_id}`）。
+ *
+ * **ここは `system_id` でも絞る。** `/v1/trip-check` が絞らないのは「その ID は別の
+ * システムのものです」と答えるためだが（W4-21）、詳細は**経路そのものが系統を含む**
+ * ので、別系統の同じ ID が出てきたら URL と食い違う。
+ */
+export const oneStationFilters = (params: {
+  readonly system_id: SystemId;
+  readonly station_id: string;
+}): readonly Filter[] => [
+  { op: "eq", column: "system_id", value: params.system_id },
+  { op: "eq", column: "station_id", value: params.station_id },
+];
+
+/**
+ * 直近の実績の絞り込み（0046）。**時間の下限は呼ぶ側が決める。**
+ *
+ * ビューは 26 時間ぶん持っている（集計の遅れ 2 時間ぶんの余白）。**24 時間で切るのは
+ * 読む側の判断**で、ビューに焼き付けない（`neighborFilters` が半径を焼き付けないのと
+ * 同じ。W4-26）。
+ */
+export const hourlyFilters = (params: {
+  readonly system_id: SystemId;
+  readonly station_id: string;
+  /** この時刻以降の行だけ。ISO 8601。 */
+  readonly since: string;
+}): readonly Filter[] => [
+  { op: "eq", column: "system_id", value: params.system_id },
+  { op: "eq", column: "station_id", value: params.station_id },
+  { op: "gte_text", column: "hour_start", value: params.since },
+];
+
 /** 並びは固定する。同じ要求が同じ応答になり、差分も追える。 */
 export const STATION_ORDER = ["system_id", "station_id"] as const;
 
@@ -118,6 +159,9 @@ export const stationRowSchema = z.object({
   lon: z.number().nullable(),
   /** **固定のラック数のみ**。動的な系統は NULL（0035）。 */
   capacity: z.number().int().nullable(),
+  /** **実測からの大きさ**（0045）。まだ写していなければ NULL。`capacity` とは別の数。 */
+  capacity_est: z.number().int().nullable(),
+  capacity_days: z.number().int().nullable(),
   bikes: z.number().int().nullable(),
   docks: z.number().int().nullable(),
   is_installed: z.boolean().nullable(),
@@ -157,6 +201,21 @@ export const neighborRowSchema = z.object({
   distance_m: z.number().int().nonnegative(),
 });
 
+/**
+ * `v1_station_hourly` の 1 行（0046）。
+ *
+ * **`system_id` は読まない**（絞り込みで分かっている）。`NEIGHBOR_COLUMNS` と同じ方針で、
+ * 読まない列は並べない。
+ */
+export const hourlyRowSchema = z.object({
+  station_id: z.string().min(1),
+  hour_start: z.string(),
+  n: z.number().int().positive(),
+  bikes_mean: z.number().nonnegative(),
+  docks_mean: z.number().nonnegative(),
+});
+
 export type FeedRow = z.infer<typeof feedRowSchema>;
 export type StationRow = z.infer<typeof stationRowSchema>;
 export type NeighborRow = z.infer<typeof neighborRowSchema>;
+export type HourlyRow = z.infer<typeof hourlyRowSchema>;

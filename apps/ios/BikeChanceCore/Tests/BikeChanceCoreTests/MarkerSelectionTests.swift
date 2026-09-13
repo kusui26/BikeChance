@@ -12,7 +12,8 @@ struct MarkerSelectionTests {
     func station(_ id: String, lat: Double, lon: Double) -> StationCurrent {
         StationCurrent(
             systemID: "t", stationID: id, name: id, latitude: lat, longitude: lon,
-            capacity: 10, bikes: 1, docks: 1, isInstalled: true, isRenting: true,
+            capacity: 10, capacityEstimate: 12, capacityDays: 7,
+            bikes: 1, docks: 1, isInstalled: true, isRenting: true,
             isReturning: true, isPresent: true, observedAt: nil,
             lastChangedAt: Date(timeIntervalSince1970: 0), forecast: nil
         )

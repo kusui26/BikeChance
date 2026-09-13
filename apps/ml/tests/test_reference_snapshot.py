@@ -8,7 +8,7 @@
 """
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pyarrow as pa
 import pytest
@@ -25,6 +25,7 @@ from bikechance_ml.features.reference_snapshot import (
     STATIONS_SCHEMA,
     SnapshotShapeError,
     capacity_estimates,
+    capacity_rows,
     daily_capacity_max,
     to_daily_max,
     to_neighbors_table,
@@ -194,6 +195,36 @@ def test_capacity_est_is_the_max_over_the_kept_days() -> None:
     assert capacity_estimates(stations) == {("hellocycling", "a"): 12}
     assert stations.column("capacity_days").to_pylist() == [3]
     assert stations.column("capacity_daily_max").to_pylist() == [8]
+
+
+def test_capacity_rows_carry_the_day_and_skip_the_unknown() -> None:
+    """DB に写す行（migration 0045）。**`/v1` はこの経路でしか大きさを読めない。**"""
+    rows = capacity_rows(_stations_with(8, [12, 5]), date(2026, 9, 12))
+    assert rows == (
+        {
+            "system_id": "hellocycling",
+            "station_id": "a",
+            "capacity_est": 12,
+            "capacity_days": 3,
+            "as_of_date": "2026-09-12",
+        },
+    )
+
+
+def test_capacity_rows_keep_zero_but_drop_none() -> None:
+    """**0 と「分からない」を分ける**（W5 プラン §12 の 152、migration 0047）。
+
+    0 は「7 日とも 1 台も 1 枠も並ばなかった」という観測である（実測 37 件）。
+    1 度も観測できなかったポートだけが `capacity_est` を持たず、そこは行ごと作らない。
+    """
+    assert capacity_rows(_stations_with(0, [0]), date(2026, 9, 12))[0]["capacity_est"] == 0
+    assert capacity_rows(_stations_with(None, [None]), date(2026, 9, 12)) == ()
+
+
+def test_capacity_rows_refuse_a_table_with_other_columns() -> None:
+    """**ファイル自身の列**を確かめる（§12 の 97 と同じ理由）。"""
+    with pytest.raises(SnapshotShapeError):
+        capacity_rows(_stations_with(8, []).drop_columns(["capacity_days"]), date(2026, 9, 12))
 
 
 def test_days_without_a_value_are_not_counted() -> None:

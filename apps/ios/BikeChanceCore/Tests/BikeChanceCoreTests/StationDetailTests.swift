@@ -43,6 +43,8 @@ struct StationDetailTests {
             latitude: 35.681236,
             longitude: 139.767125,
             capacity: capacity,
+            capacityEstimate: 12,
+            capacityDays: 7,
             bikes: bikes,
             docks: docks,
             isInstalled: isInstalled,

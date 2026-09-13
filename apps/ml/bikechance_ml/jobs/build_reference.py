@@ -43,6 +43,7 @@ from bikechance_ml.features.reference_snapshot import (
     NEIGHBORS_NAME,
     STATIONS_NAME,
     STATIONS_SCHEMA,
+    capacity_rows,
     daily_capacity_max,
     to_daily_max,
     to_neighbors_table,
@@ -67,6 +68,7 @@ class ReferencePort(Protocol):
     def list_neighbors(self, system_id: str) -> tuple[NeighborRow, ...]: ...
     def download(self, bucket: str, path: str) -> bytes | None: ...
     def upload_parquet(self, path: str, body: bytes) -> None: ...
+    def upsert_capacity_est(self, rows: Sequence[Mapping[str, object]]) -> int: ...
     def job_started(self, job_name: str) -> int: ...
     def job_finished(self, run_id: int, status: str, detail: Mapping[str, object]) -> None: ...
 
@@ -185,6 +187,9 @@ def build_and_upload(source: ReferencePort, day: date, now: datetime) -> dict[st
         }
         for name, body in bodies.items():
             source.upload_parquet(reference_path(day, name), body)
+        # **Storage に置いたあとで DB にも写す**（0045）。`/v1` は Storage を読まないので、
+        # ポートの大きさ（`capacity_est`）はこの経路でしか公開に届かない（§12 の 150）
+        written = source.upsert_capacity_est(capacity_rows(stations, day))
     except Exception as cause:
         recording.record_quietly(
             source, run_id, "failed", {"date": day.isoformat(), "error": type(cause).__name__}
@@ -194,6 +199,8 @@ def build_and_upload(source: ReferencePort, day: date, now: datetime) -> dict[st
         "ok": True,
         "date": day.isoformat(),
         **to_summary(stations, neighbors, missing, {k: len(v) for k, v in bodies.items()}),
+        # **DB に写した行数。** Storage と DB が食い違ったときに、どちらが古いか分かる
+        "capacity_est_rows": written,
     }
     recording.record_quietly(source, run_id, "ok", summary)
     return summary
