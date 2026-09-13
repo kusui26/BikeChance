@@ -19,6 +19,8 @@ struct StationDetailScreen: View {
     /// **応答が指している到着時刻**（`StationsResponse.forecastArrival`）。nil なら予測を出さない。
     let arrival: Date?
     let now: Date
+    /// **アプリに 1 つだけ**（`BikeChanceApp` が持つ）。☆ の状態と一覧が同じものを見る。
+    var favorites: FavoritesModel
 
     @Environment(\.v1Client) private var client
 
@@ -40,6 +42,23 @@ struct StationDetailScreen: View {
         .listStyle(.insetGrouped)
         .navigationTitle(detail.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .primaryAction) { favoriteButton } }
+    }
+
+    /// ☆。**上限に達していたら押せなくする**（押せるのに何も起きない、を作らない）。
+    private var favoriteButton: some View {
+        let saved = favorites.contains(station)
+        return Button {
+            if saved {
+                favorites.remove(station.id)
+            } else {
+                favorites.add(station)
+            }
+        } label: {
+            Image(systemName: saved ? "star.fill" : "star")
+        }
+        .disabled(!saved && favorites.isFull)
+        .accessibilityLabel(saved ? "お気に入りから外す" : "お気に入りに登録")
     }
 
     /// ここから行程を調べる（W5 の PR G）。
