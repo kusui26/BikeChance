@@ -109,3 +109,36 @@ extension Double {
         return (self * factor).rounded() / factor
     }
 }
+
+/// 緯度経度の 1 点。**MapKit を `BikeChanceCore` に持ち込まないため**の、最小の座標型。
+///
+/// `CLLocationCoordinate2D` を使うと Core が CoreLocation に依存し、判断の置き場が
+/// 「地図を立ち上げないとテストできないもの」に寄っていく。アプリ側で詰め替える。
+public struct Coordinate: Equatable, Sendable {
+    public let latitude: Double
+    public let longitude: Double
+
+    public init(latitude: Double, longitude: Double) {
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+
+    /// この点を中心にした正方形の矩形（1 辺 `spanDegrees` 度）。
+    ///
+    /// 目的地の周りのポートを引くのに使う。**要求する前に量子化されるので**（`V1Client`）、
+    /// 中心の細かい位置はそのままサーバーへは行かない（CLAUDE.md §5）。
+    public func square(spanDegrees: Double) -> Bbox {
+        let half = spanDegrees / 2
+        return Bbox(
+            west: longitude - half, south: latitude - half,
+            east: longitude + half, north: latitude + half
+        )
+    }
+}
+
+extension StationCurrent {
+    /// このポートの座標。
+    public var coordinate: Coordinate {
+        Coordinate(latitude: latitude, longitude: longitude)
+    }
+}

@@ -410,6 +410,41 @@ describe("代替候補", () => {
     expect(outcome.response.alternatives.to[0]?.station.station_id).toBe("dock-rich");
   });
 
+  it("**衝突した ID で別系統のポートを候補にしない**（W5 プラン §12 の 158）", async () => {
+    // `listStationsByIds` は**わざと系統で絞らない**（W4-21）ので、同じ `station_id` を
+    // 持つ別系統の行が一緒に返る。**索引を `station_id` だけで作ると後勝ちで上書きされ、
+    // 遠くのポートが「50 m 先」として出る**——本番では虎ノ門の行程に厚木（約 40 km）の
+    // ポートが出ていた
+    const outcome = await ask(BASIC, {
+      rows: [
+        station(),
+        station({ station_id: "to-1" }),
+        alt("collide", 900, 100),
+        // **同じ ID・別系統・遠くの座標。** 本番の 313 件の衝突と同じ形
+        { ...alt("collide", 100, 900), system_id: "docomo-cycle", lat: 35.44, lon: 139.37 },
+      ],
+      neighbors: [neighbor("collide", 50)],
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const found = outcome.response.alternatives.from;
+    expect(found).toHaveLength(1);
+    expect(found[0]?.station.system_id).toBe("hellocycling");
+    expect(found[0]?.station.lat).toBe(35.68);
+  });
+
+  it("**衝突した ID しか無ければ、候補に出さない**（黙って別系統を出さない）", async () => {
+    const outcome = await ask(BASIC, {
+      rows: [
+        station(),
+        station({ station_id: "to-1" }),
+        { ...alt("only-other", 900, 100), system_id: "docomo-cycle", lat: 35.44, lon: 139.37 },
+      ],
+      neighbors: [neighbor("only-other", 50)],
+    });
+    expect(outcome.ok && outcome.response.alternatives.from).toHaveLength(0);
+  });
+
   it(`上限は ${TRIP_ALTERNATIVES_MAX} 件`, async () => {
     const many = Array.from({ length: 9 }, (_, index) => alt(`n${index}`, 100 + index, 100));
     const outcome = await ask(BASIC, {

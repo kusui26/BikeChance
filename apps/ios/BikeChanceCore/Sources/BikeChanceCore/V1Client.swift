@@ -54,6 +54,42 @@ public struct V1Client: Sendable {
         date.formatted(.iso8601)
     }
 
+    /// 行程が成立するかを調べる（`/v1/trip-check`。W4 プラン §6.7）。
+    ///
+    /// **系統は 1 つだけ。** 事業者をまたぐ行程は成立しないので、引数でも 1 つしか
+    /// 受けない（W4-21）。
+    ///
+    /// **出発は絶対の `depart_at` で送る**（`stations(at:)` と同じ理由）。応答は CDN に
+    /// 最大 3 分留まりうるので、相対で頼むと指している出発が読むたびにずれる
+    /// （W4 プラン §12 の 114）。呼ぶ側が 5 分の格子に丸めてから渡す（`Arrival.gridded`）。
+    ///
+    /// - Parameter rideMinutes: 乗車時間。**省略するとサーバーが概算する**
+    ///   （直線距離 ÷ 14 km/h。`ride_min_estimated` が true で返る）。端末が
+    ///   `MKDirections` で出せたときだけ渡す。
+    ///
+    /// **範囲の検査はここでしない。** 「出発 ＋ 乗車」が水平（180 分）に収まるかは
+    /// サーバーが見て 400 を返す。端末でも見ると**同じ範囲の実装が 2 つ**になり、
+    /// 片方だけ直したときに食い違う（`packages/shared/src/trip.ts` が同じ理由で
+    /// `parseRideMinutes` に上限を書いていない）。
+    public func tripCheck(
+        system: String,
+        from: String,
+        to: String,
+        departAt: Date,
+        rideMinutes: Int? = nil
+    ) async throws -> TripCheckResponse {
+        var items = [
+            URLQueryItem(name: "system", value: system),
+            URLQueryItem(name: "from", value: from),
+            URLQueryItem(name: "to", value: to),
+            URLQueryItem(name: "depart_at", value: V1Client.timestamp(departAt)),
+        ]
+        if let rideMinutes {
+            items.append(URLQueryItem(name: "ride_min", value: String(rideMinutes)))
+        }
+        return try await get(path: "/v1/trip-check", query: items)
+    }
+
     /// データの鮮度・クレジット・通知文。
     public func meta() async throws -> MetaResponse {
         try await get(path: "/v1/meta", query: [])

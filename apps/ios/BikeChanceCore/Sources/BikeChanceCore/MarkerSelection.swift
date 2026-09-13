@@ -10,6 +10,10 @@ public enum MarkerSelection {
     public static let displayLimit = 300
 
     /// 中心に近い順に `limit` 件を返す。**並びは安定**（同じ入力なら同じ結果）。
+    ///
+    /// **上限を超えていなければ、そのまま返す。** 地図は全部描くので並べ替える意味が無く、
+    /// 入力の順（サーバーが決めた `system_id, station_id`）のほうが再描画も少ない。
+    /// **近い順に並んでいてほしいときは `closest` を使う。**
     public static func nearest(
         _ stations: [StationCurrent],
         toLatitude latitude: Double,
@@ -17,9 +21,21 @@ public enum MarkerSelection {
         limit: Int = displayLimit
     ) -> [StationCurrent] {
         guard stations.count > limit else { return stations }
-        return
-            stations
-            .map { (station: $0, distance: squaredDistance($0, latitude, longitude)) }
+        return closest(
+            stations, to: Coordinate(latitude: latitude, longitude: longitude), limit: limit)
+    }
+
+    /// 近い順に並べて `limit` 件。**必ず並べ替える。**
+    ///
+    /// 目的地の最寄りポートを選ばせるときに使う——**そこでは並びそのものが答え**なので、
+    /// `nearest` の「上限を超えていなければそのまま」では足りない。
+    public static func closest(
+        _ stations: [StationCurrent], to point: Coordinate, limit: Int
+    ) -> [StationCurrent] {
+        stations
+            .map {
+                (station: $0, distance: squaredDistance($0, point.latitude, point.longitude))
+            }
             // 距離が同じときは id で決める。並びが揺れると再描画が起きる
             .sorted { ($0.distance, $0.station.id) < ($1.distance, $1.station.id) }
             .prefix(limit)
