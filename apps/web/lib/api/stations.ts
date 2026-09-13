@@ -11,21 +11,29 @@
  */
 import {
   ATTRIBUTIONS,
+  FORECAST_STALE_AFTER_S,
+  HORIZONS_MIN,
   STATIONS_MAX_RESULTS,
   SYSTEM_IDS,
   isStale,
   parseArrival,
   parseBbox,
+  planCells,
   quantizeBbox,
   staleAfterSeconds,
+  stationCellsResponseSchema,
   stationsResponseSchema,
   type Bbox,
+  type CellPlan,
   type FeedStatus,
+  type StationCellsResponse,
+  type StationsEndpointResponse,
   type StationsResponse,
   type SystemId,
 } from "@bikechance/shared";
 import type { ProblemCode } from "./problem";
-import type { FeedRow, ReadPort, StationRow } from "./read-port";
+import type { CellRow, FeedRow, ReadPort, StationRow } from "./read-port";
+import { toCell } from "./station-cell";
 import { hasLocation, toForecast, toStation } from "./station-row";
 
 export type StationsFailure = {
@@ -35,7 +43,7 @@ export type StationsFailure = {
 };
 
 export type StationsOutcome =
-  | { readonly ok: true; readonly response: StationsResponse }
+  | { readonly ok: true; readonly response: StationsEndpointResponse }
   | { readonly ok: false; readonly failure: StationsFailure };
 
 const badRequest = (code: ProblemCode, detail: string): StationsOutcome => ({
@@ -102,6 +110,7 @@ export const buildStationsResponse = (params: {
   return stationsResponseSchema.parse({
     api_version: "v1",
     generated_at: params.now.toISOString(),
+    aggregation: "station",
     bbox: params.bbox,
     count: stations.length,
     stale: feeds.some((feed) => feed.stale),
@@ -110,6 +119,120 @@ export const buildStationsResponse = (params: {
     stations,
     attribution: ATTRIBUTIONS,
   });
+};
+
+/**
+ * 低ズームの応答を組み立てる（W5 の PR E）。
+ *
+ * **`stations` は入らない。** 同じ応答に 2 つの粒度を混ぜると、読む側が「どちらを
+ * 信じるか」を決めることになる（W5-12）。
+ */
+export const buildCellsResponse = (params: {
+  readonly bbox: Bbox;
+  readonly cell_deg: number;
+  readonly feeds: readonly FeedRow[];
+  readonly rows: readonly CellRow[];
+  readonly in_min: number | null;
+  readonly now: Date;
+}): StationCellsResponse => {
+  const feeds = params.feeds.map((feed) => toFeedStatus(feed, params.now));
+  const cells = params.rows.map((row) => toCell(row, params.in_min, params.now));
+  return stationCellsResponseSchema.parse({
+    api_version: "v1",
+    generated_at: params.now.toISOString(),
+    aggregation: "cell",
+    bbox: params.bbox,
+    cell_deg: params.cell_deg,
+    count: cells.length,
+    // **フィードの鮮度はポートのときと同じ**。セルごとの `stale` とは別の話で、
+    // あちらは「値をいつのものと言えないポートが混ざっている」を指す
+    stale: feeds.some((feed) => feed.stale),
+    forecast_in_min: params.in_min,
+    feeds,
+    cells,
+    attribution: ATTRIBUTIONS,
+  });
+};
+
+/** 上限を超えたら切り捨てずに 400。**穴の開いた地図を黙って返さない。** */
+const tooMany = (total: number): StationsOutcome =>
+  badRequest(
+    "too_many_stations",
+    `${total} 件が該当しました（上限 ${STATIONS_MAX_RESULTS} 件）。bbox を狭めてください。`,
+  );
+
+/**
+ * セルを引いて組み立てる。
+ *
+ * **上限の判定はここにも置く。** 刻みの決め方（`planCells`）からは、0.25 度で
+ * 25 × 25 ＝ 625、0.5 度で 10 × 10 ＝ 100 が最大で、**1,000 を超える道は無い**。
+ * それでも消さないのは、**刻みの表を変えたときに黙って超えないようにする**ため——
+ * 規則を「いまは起きないから」で外すと、次に起きたときに誰も気づかない。
+ */
+const queryCells = async (params: {
+  readonly port: ReadPort;
+  readonly bbox: Bbox;
+  readonly plan: Extract<CellPlan, { aggregation: "cell" }>;
+  readonly system_id: SystemId | null;
+  readonly in_min: number | null;
+  readonly now: Date;
+}): Promise<StationsOutcome> => {
+  const [feeds, rows] = await Promise.all([
+    params.port.listFeeds(),
+    params.port.listCells({
+      bbox: params.bbox,
+      cell_deg: params.plan.cell_deg,
+      system_id: params.system_id,
+      // **鮮度の閾値はここで作る。** 規則の正は `packages/shared` で、SQL は比較するだけ
+      fresh_after: new Date(params.now.getTime() - FORECAST_STALE_AFTER_S * 1000),
+      horizons_min: HORIZONS_MIN,
+    }),
+  ]);
+  if (rows.length > STATIONS_MAX_RESULTS) {
+    return tooMany(rows.length);
+  }
+  return {
+    ok: true,
+    response: buildCellsResponse({
+      bbox: params.bbox,
+      cell_deg: params.plan.cell_deg,
+      feeds,
+      rows,
+      in_min: params.in_min,
+      now: params.now,
+    }),
+  };
+};
+
+/** ポートをそのまま引いて組み立てる（いままでどおり）。 */
+const queryPorts = async (params: {
+  readonly port: ReadPort;
+  readonly bbox: Bbox;
+  readonly system_id: SystemId | null;
+  readonly in_min: number | null;
+  readonly now: Date;
+}): Promise<StationsOutcome> => {
+  const [feeds, page] = await Promise.all([
+    params.port.listFeeds(),
+    params.port.listStationsInBbox({
+      bbox: params.bbox,
+      system_id: params.system_id,
+      limit: STATIONS_MAX_RESULTS,
+    }),
+  ]);
+  if (page.total > STATIONS_MAX_RESULTS) {
+    return tooMany(page.total);
+  }
+  return {
+    ok: true,
+    response: buildStationsResponse({
+      bbox: params.bbox,
+      feeds,
+      rows: page.rows,
+      in_min: params.in_min,
+      now: params.now,
+    }),
+  };
 };
 
 /**
@@ -143,32 +266,15 @@ export const queryStations = async (params: {
 
   // 格子に外側へ丸めてから問い合わせる。細かい位置は問い合わせにも記録にも残らない
   const bbox = quantizeBbox(parsed.bbox);
+  // **丸めた後の辺で決める。** 要求の辺で決めると、丸めで広がったぶんだけ
+  // 「セルにすべき矩形をポートで返す」ことが起きる（`planCells` は実効矩形の話）
+  const plan = planCells(bbox);
+  const shared = { bbox, system_id: system.system_id, in_min: arrival.in_min, now: params.now };
   try {
     const port = params.makePort();
-    const [feeds, page] = await Promise.all([
-      port.listFeeds(),
-      port.listStationsInBbox({
-        bbox,
-        system_id: system.system_id,
-        limit: STATIONS_MAX_RESULTS,
-      }),
-    ]);
-    if (page.total > STATIONS_MAX_RESULTS) {
-      return badRequest(
-        "too_many_stations",
-        `${page.total} 件が該当しました（上限 ${STATIONS_MAX_RESULTS} 件）。bbox を狭めてください。`,
-      );
-    }
-    return {
-      ok: true,
-      response: buildStationsResponse({
-        bbox,
-        feeds,
-        rows: page.rows,
-        in_min: arrival.in_min,
-        now: params.now,
-      }),
-    };
+    return plan.aggregation === "cell"
+      ? await queryCells({ ...shared, port, plan })
+      : await queryPorts({ ...shared, port });
     // 設定の欠落（環境変数）も DB の不調も、呼び出し側から見れば「いま応えられない」。
     // 理由は応答に載せない（設定の内容が漏れる経路を作らない）
   } catch {

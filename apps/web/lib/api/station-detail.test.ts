@@ -84,6 +84,7 @@ const fakePort = (options: PortOptions = {}) => {
       asked.station_id = station_id;
       return options.row === undefined ? station() : options.row;
     },
+    listCells: async () => [],
     listRecentHours: async ({ since }) => {
       if (options.throwOn === "recent") throw new Error("db down");
       asked.since = since;

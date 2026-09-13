@@ -143,6 +143,15 @@ export const stationsResponseSchema = z.object({
   api_version: z.literal("v1"),
   generated_at: z.iso.datetime(),
   /**
+   * **ポートを返した**（W5 の PR E）。低ズームでは `"cell"` になり、`stations` の代わりに
+   * `cells` が入る——**同じ応答に両方は入れない**（W5-12）。
+   *
+   * **どちらを返したかを応答に書く。** `zoom` を受けず矩形の辺で決めるので、
+   * クライアントは要求からは分からない。「`cells` が無ければポート」という
+   * 暗黙の約束にしない。
+   */
+  aggregation: z.literal("station"),
+  /**
    * 実際に検索した矩形。要求された bbox を格子に**外側へ**丸めたもの。
    * 応答には要求範囲の外のポートも混じるので、必要なら利用者側で絞り込む。
    */
@@ -165,6 +174,78 @@ export const stationsResponseSchema = z.object({
   /** CC BY 4.0 の表示に要る。応答だけで表示を完結できるようにする（開発プラン §3.7）。 */
   attribution: z.array(attributionSchema),
 });
+
+/**
+ * 格子の 1 セル（W5 プラン §6.5、W5-12）。低ズームで**ポートの代わりに**返す。
+ *
+ * **代表値は平均ではなく最大**である。利用者の問いは「このあたりで借りられるか」で、
+ * **1 台でもあれば答えは「借りられる」**。平均は「どのポートも五分五分」と
+ * 「1 つは確実で残りは駄目」を同じ色にしてしまう。
+ */
+export const stationCellSchema = z.object({
+  /** セルの矩形。**境界は `BBOX_QUANTUM_DEG` の倍数**（`quantizeBbox` と同じ格子）。 */
+  cell: bboxSchema,
+  /** そのセルのポート数。**座標があり、停止していない系統のもの**（ビューが絞る）。 */
+  n_stations: z.number().int().positive(),
+  /**
+   * 台数の合計。**観測のあるポートだけ**を足す（`is_present` でないポートは、値が
+   * いつのものか分からないので数に入れない）。1 つも観測できていなければ null。
+   */
+  bikes: z.number().int().nonnegative().nullable(),
+  docks: z.number().int().nonnegative().nullable(),
+  /** **セルの中に 1 つでも「値をいつのものと言えないポート」があれば true。** */
+  stale: z.boolean(),
+  /**
+   * **そのセルの最良のポートに賭けたときの確率**（0〜1）。`at` / `in_min` が無ければ null。
+   *
+   * **上限である。** 実装は「10 点それぞれの最大を取った曲線」を、ポートと同じ
+   * `interpolateForecast` で読む——`max` と補間は交換しないので、**隣り合う水平で
+   * 別のポートが最大になるセルでだけ、真の最大よりわずかに大きく出る**。
+   */
+  p_bike: z.number().min(0).max(1).nullable(),
+  p_dock: z.number().min(0).max(1).nullable(),
+  /** 0〜3。**セルの最大**（値も最大なので、確度も最良のポートに揃える）。 */
+  confidence: z.number().int().min(0).max(3).nullable(),
+  /**
+   * 確率に寄与したポート数。**`n_stations` より小さいことがある**——予測の無いポート、
+   * 観測が古くて出せないポートは入らない。**0 なら `p_bike` / `p_dock` は null。**
+   */
+  n_forecast: z.number().int().nonnegative(),
+});
+
+/**
+ * `/v1/stations` が**低ズームで**返すもの（W5 の PR E）。
+ *
+ * **`stations` は入らない。** 同じ応答に 2 つの粒度を混ぜると、読む側が「どちらを
+ * 信じるか」を決めることになる（§5.5）。
+ */
+export const stationCellsResponseSchema = z.object({
+  api_version: z.literal("v1"),
+  generated_at: z.iso.datetime(),
+  /** **セルを返した。** `stations` の代わりに `cells` が入る。 */
+  aggregation: z.literal("cell"),
+  bbox: bboxSchema,
+  /** セルの刻み（度）。**矩形の辺で決まる**（`planCells`）。 */
+  cell_deg: z.number().positive(),
+  /** セルの数。**ポート数ではない。** */
+  count: z.number().int().nonnegative(),
+  stale: z.boolean(),
+  forecast_in_min: z.number().int().positive().nullable(),
+  feeds: z.array(feedStatusSchema),
+  cells: z.array(stationCellSchema),
+  attribution: z.array(attributionSchema),
+});
+
+/**
+ * `/v1/stations` の応答。**`aggregation` で 2 つに割れる。**
+ *
+ * 判別子を**両方に置く**のは、「`cells` が無ければポート」という**暗黙の約束**を
+ * 作らないため。読む側は 1 つの欄だけを見れば、どちらが来たか分かる。
+ */
+export const stationsEndpointResponseSchema = z.discriminatedUnion("aggregation", [
+  stationsResponseSchema,
+  stationCellsResponseSchema,
+]);
 
 /**
  * 行程が成立する確率（W4 プラン §6.7、W4-24）。
@@ -330,6 +411,9 @@ export type FeedStatus = z.infer<typeof feedStatusSchema>;
 export type StationForecast = z.infer<typeof stationForecastSchema>;
 export type StationCurrent = z.infer<typeof stationCurrentSchema>;
 export type StationsResponse = z.infer<typeof stationsResponseSchema>;
+export type StationCell = z.infer<typeof stationCellSchema>;
+export type StationCellsResponse = z.infer<typeof stationCellsResponseSchema>;
+export type StationsEndpointResponse = z.infer<typeof stationsEndpointResponseSchema>;
 export type TripOutcome = z.infer<typeof tripOutcomeSchema>;
 export type TripAlternative = z.infer<typeof tripAlternativeSchema>;
 export type TripCheckResponse = z.infer<typeof tripCheckResponseSchema>;

@@ -2,6 +2,7 @@ export * from "./api";
 export * from "./attribution";
 export * from "./bbox";
 export * from "./calendar";
+export * from "./cells";
 export * from "./constants";
 export * from "./forecast";
 export * from "./freshness";
