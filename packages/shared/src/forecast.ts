@@ -186,6 +186,16 @@ const toPoints = (
 const toProbability = (value_x1000: number): number => Math.round(value_x1000) / PROBABILITY_SCALE;
 
 /**
+ * 1/1000 刻みの整数の並びを、0〜1 の確率の並びにする。**補間しない。**
+ *
+ * 詳細（`/v1/stations/{system}/{station_id}`）が**生の 10 点**を返すときに通る
+ * （W5-13）。地図が通るのは `interpolateForecast` で、**刻みの直し方はこの 1 か所**に
+ * ある——2 か所で割ると、片方だけ丸めを変えたときに同じポートが 2 つの確率を持つ。
+ */
+export const toProbabilityList = (values_x1000: readonly number[]): readonly number[] =>
+  values_x1000.map(toProbability);
+
+/**
  * `horizon_min` を挟む 2 点から線形に補間する。呼ぶのは両端の外を除いたあとだけ。
  *
  * 水平が重複していれば割れない。**0 除算で NaN を作らず、手前の値を使う**。

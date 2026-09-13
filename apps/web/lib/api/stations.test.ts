@@ -51,6 +51,8 @@ const station = (overrides: Partial<StationRow> = {}): StationRow => ({
   lat: 35.68,
   lon: 139.77,
   capacity: 10,
+  capacity_est: 12,
+  capacity_days: 7,
   bikes: 3,
   docks: 7,
   is_installed: true,
@@ -93,6 +95,8 @@ const fakePort = (options: PortOptions = {}) => {
     // `/v1/stations` は使わない。`ReadPort` を満たすためだけに置く
     listStationsByIds: async () => [],
     listNeighbors: async () => [],
+    findStation: async () => null,
+    listRecentHours: async () => [],
   };
   return { port, calls };
 };

@@ -10,7 +10,7 @@
 -- **行単位の検査は必ず `system_id` で絞る。** 他のデータが混ざっていても結果が変わらないように。
 
 begin;
-select plan(44);
+select plan(51);
 
 -- ────────────────────────────────────────────────────────────────
 -- 権限
@@ -36,15 +36,15 @@ select is(
      from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'v'
       and has_table_privilege('anon', c.oid, 'select')),
-  3, 'anon が select できる「ビュー」はちょうど 3 つ（0039 で v1_station_neighbors を足した）');
+  4, 'anon が select できる「ビュー」はちょうど 4 つ（0046 で v1_station_hourly を足した）');
 
 select is(
   (select string_agg(c.relname, ',' order by c.relname)
      from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'v'
       and has_table_privilege('anon', c.oid, 'select')),
-  'v1_feeds,v1_station_neighbors,v1_stations_current',
-  '公開しているのはこの 3 枚（名前も固定する）');
+  'v1_feeds,v1_station_hourly,v1_station_neighbors,v1_stations_current',
+  '公開しているのはこの 4 枚（名前も固定する）');
 
 select ok(not has_table_privilege('anon', 'public.station_status_latest', 'select'),
           'anon は station_status_latest を読めない');
@@ -230,13 +230,47 @@ select ok(
 -- 公開側は `select *` をせず列を並べて読む（`apps/web/lib/api/view-query.ts` の
 -- `STATION_COLUMNS` / `FEED_COLUMNS`）。**片方だけ変えると実行時まで気づけない**ので、
 -- ビューの側でも列を固定する。増やすときは両方を直すことになる。
+-- **並びは契約に入っていない。** `columns_are` は集合で比べ、読む側も名前で並べる
+-- （0045 は `create or replace view` の制約で `capacity_est` を末尾に足した）。
 select columns_are('public'::name, 'v1_stations_current'::name, array[
-  'system_id', 'station_id', 'name', 'lat', 'lon', 'capacity', 'bikes', 'docks',
+  'system_id', 'station_id', 'name', 'lat', 'lon', 'capacity',
+  -- **実測からの大きさ**（0045）。`capacity`（宣言されたラック数）とは別の欄
+  'capacity_est', 'capacity_days',
+  'bikes', 'docks',
   'is_installed', 'is_renting', 'is_returning', 'is_present', 'last_changed_at',
   'forecast_horizons_min', 'forecast_p_bike_x1000', 'forecast_p_dock_x1000',
   'forecast_confidence', 'forecast_base_observed_at', 'forecast_model_version',
   'forecast_generated_at'
 ]::name[], 'v1_stations_current の列は view-query.ts の STATION_COLUMNS と同じ');
+
+select columns_are('public'::name, 'v1_station_hourly'::name, array[
+  'system_id', 'station_id', 'hour_start', 'n', 'bikes_mean', 'docks_mean'
+]::name[], 'v1_station_hourly の列は view-query.ts の HOURLY_COLUMNS と同じ');
+
+select ok(not has_table_privilege('anon', 'public.station_hourly', 'select'),
+          'anon は station_hourly（基底表）を読めない');
+select ok(not has_table_privilege('anon', 'public.station_capacity_est', 'select'),
+          'anon は station_capacity_est を読めない');
+
+-- **`capacity_est = 0` は通る**（0047）。「7 日とも 1 台も並ばなかった」という観測で、
+-- 「分からない」ではない（実測 37 件）。**0 と NULL を分ける約束をここで固定する**
+select lives_ok(
+  $$insert into public.stations (system_id, station_id, idx) values ('t-active', 'cap-zero', 9)$$,
+  '検査用のポートを足す');
+select lives_ok(
+  $$select public.upsert_capacity_est(
+      '[{"system_id":"t-active","station_id":"cap-zero","capacity_est":0,
+         "capacity_days":7,"as_of_date":"2026-09-12"}]'::jsonb)$$,
+  '**capacity_est = 0 を入れられる**（0047 で制約を緩めた）');
+select is(
+  (select capacity_est::int from public.v1_stations_current
+    where system_id = 't-active' and station_id = 'cap-zero'),
+  null, 'ただし現在値が無いポートはビューに出ない（station_status_latest に行が無い）');
+select throws_ok(
+  $$select public.upsert_capacity_est(
+      '[{"system_id":"t-active","station_id":"cap-zero","capacity_est":-1,
+         "capacity_days":7,"as_of_date":"2026-09-12"}]'::jsonb)$$,
+  '23514', null, '負の大きさは弾く');
 
 select columns_are('public'::name, 'v1_feeds'::name, array[
   'system_id', 'display_name', 'expected_cadence_s', 'poll_interval_s',

@@ -92,9 +92,31 @@ export const stationCurrentSchema = z.object({
    *
    * ドコモの公開値は日次同期の瞬間の `bikes + docks` が凍結されたもので、ラック数では
    * ない。渡すと「容量 5・借りられる 12」という矛盾が画面に出る（W4 プラン §12 の 115）。
-   * **ポートの大きさは W5 に `capacity_est` を別の欄として足して答える。**
+   * **ポートの大きさは `capacity_est` が答える**（2026-09-13 に足した。W5-14）。
    */
   capacity: z.number().int().nonnegative().nullable(),
+  /**
+   * **実測からのポートの大きさ**（前日までの 7 日の `max(bikes + docks)`。W5-14、
+   * migration 0045）。**`capacity` とは別の数**で、混ぜない——前者は「事業者が
+   * 宣言したラック数」、こちらは「7 日のあいだに実際に並んだ最大」である。
+   *
+   * **どちらのシステムでも出る**のがこの欄の値打ちで、`capacity` が NULL になる
+   * ドコモの 5,837 ポートにも大きさが付く（W4-09 の宿題）。
+   *
+   * NULL は「まだ分からない」：7 日のあいだ 1 度も観測できなかったポートと、
+   * 参照スナップショットをまだ写していないポート。
+   *
+   * **0 は入る**（実測 37 件・0.18%）。「7 日のあいだ 1 台も 1 枠も並ばなかった」という
+   * 観測であって、「分からない」ではない——`bikes = 0` と `bikes = null` を分けているのと
+   * 同じ約束である（W5 プラン §12 の 152）。
+   */
+  capacity_est: z.number().int().nonnegative().nullable(),
+  /**
+   * `capacity_est` に寄与した日数（1〜7）。**足りないことを隠さない**ための組で、
+   * 7 未満なら「まだその日数ぶんしか見ていない」と読む。`capacity_est` が NULL なら
+   * こちらも NULL。
+   */
+  capacity_days: z.number().int().min(1).max(7).nullable(),
   bikes: z.number().int().nonnegative().nullable(),
   docks: z.number().int().nonnegative().nullable(),
   is_installed: z.boolean().nullable(),
@@ -223,6 +245,72 @@ export const tripCheckResponseSchema = z.object({
 });
 
 /**
+ * ポート詳細の予測曲線（`/v1/stations/{system}/{station_id}`。W5-13）。
+ *
+ * **補間しない。** `station_forecasts` の**生の 10 点**をそのまま返す。地図
+ * （`/v1/stations`）が返すのは「その到着時刻の 1 点」で、**正はどちらも
+ * `station_forecasts`**——同じ確率を 2 つの形で配らないための切り分けである（契約 4・16）。
+ *
+ * **`horizons_min` と `p_bike` / `p_dock` は同じ長さ**で、添字が対応する。
+ * `generated_at` からの分数なので、**読んだ時刻からではない**（W4 プラン §12 の 114）。
+ */
+export const forecastCurveSchema = z.object({
+  /** **鮮度はこれで測る。** どの観測に基づくか。 */
+  base_observed_at: z.iso.datetime(),
+  /** **水平の起点。** `horizons_min[i]` はここからの分数。 */
+  generated_at: z.iso.datetime(),
+  model_version: z.string().min(1),
+  /** 0〜3。3 が最も確か（履歴が過半の水平で効いた）。 */
+  confidence: z.number().int().min(0).max(3),
+  horizons_min: z.array(z.number().int().positive()).min(1),
+  /** 借りられる確率（0〜1）。`horizons_min` と同じ長さ。 */
+  p_bike: z.array(z.number().min(0).max(1)).min(1),
+  /** 返せる確率（0〜1）。 */
+  p_dock: z.array(z.number().min(0).max(1)).min(1),
+});
+
+/**
+ * 直近 24 時間の実績（1 時間ごと。migration 0046）。
+ *
+ * **観測の無かった時間帯は行ごと出さない。** 0 を入れると「0 台だった」に見える
+ * （CLAUDE.md §6 の「補間しない」と同じ規律）。だから**最大 24 件で、それより少ない**。
+ *
+ * `n` は**貸出と返却の両方が観測できた**回数で、2 つの平均は同じ母数の上にある。
+ */
+export const recentHourSchema = z.object({
+  /** その時間の始まり（UTC）。 */
+  hour_start: z.iso.datetime(),
+  /** 両方が観測できたスナップショットの数。 */
+  n: z.number().int().positive(),
+  bikes_mean: z.number().nonnegative(),
+  docks_mean: z.number().nonnegative(),
+});
+
+/**
+ * `/v1/stations/{system}/{station_id}` の応答（開発プラン §8.3 の 2 行目、W5 の PR F）。
+ *
+ * **`at` を受けない。** 曲線を返すので到着時刻が要らず、**受けると同じポートの URL が
+ * 5 分ごとに割れて CDN が効かない**。
+ *
+ * **欄ごとに optional**（契約 2）。予測がまだ無いポートは `forecast_curve` が null に
+ * なるだけで、200 を返す。
+ */
+export const stationDetailResponseSchema = z.object({
+  api_version: z.literal("v1"),
+  generated_at: z.iso.datetime(),
+  /** そのポートのフィードの観測が途切れている。 */
+  stale: z.boolean(),
+  station: stationCurrentSchema,
+  /** **生の 10 点**（補間しない。W5-13）。予測が無い・古ければ null。 */
+  forecast_curve: forecastCurveSchema.nullable(),
+  /** 直近 24 時間の実績（**最大 24 件**。観測の無い時間帯は出さない）。 */
+  recent: z.array(recentHourSchema).max(24),
+  /** **そのポートのシステムだけ**。地図と違い 1 系統しか関係しない。 */
+  feeds: z.array(feedStatusSchema),
+  attribution: z.array(attributionSchema),
+});
+
+/**
  * エラー応答（RFC 9457 Problem Details）。開発プラン §8.3。
  *
  * `type` は相対 URI にする。ドメインを決め打ちにせず、`about:blank` のように
@@ -245,4 +333,7 @@ export type StationsResponse = z.infer<typeof stationsResponseSchema>;
 export type TripOutcome = z.infer<typeof tripOutcomeSchema>;
 export type TripAlternative = z.infer<typeof tripAlternativeSchema>;
 export type TripCheckResponse = z.infer<typeof tripCheckResponseSchema>;
+export type ForecastCurve = z.infer<typeof forecastCurveSchema>;
+export type RecentHour = z.infer<typeof recentHourSchema>;
+export type StationDetailResponse = z.infer<typeof stationDetailResponseSchema>;
 export type Problem = z.infer<typeof problemSchema>;

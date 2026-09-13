@@ -18,6 +18,8 @@ import {
   STATION_ORDER,
   bboxFilters,
   feedRowSchema,
+  hourlyFilters,
+  oneStationFilters,
   stationRowSchema,
   systemFilters,
   type Filter,
@@ -32,6 +34,8 @@ const stationRow = {
   lat: 35.68,
   lon: 139.77,
   capacity: 10,
+  capacity_est: 12,
+  capacity_days: 7,
   bikes: 3,
   docks: 7,
   is_installed: true,
@@ -133,6 +137,36 @@ describe("systemFilters", () => {
     expect(systemFilters("docomo-cycle")).toEqual([
       { op: "eq", column: "system_id", value: "docomo-cycle" },
     ]);
+  });
+});
+
+describe("oneStationFilters（詳細。0045）", () => {
+  it("**`system_id` でも絞る**（経路が系統を含むので、別系統の同じ ID を返さない）", () => {
+    const filters = oneStationFilters({ system_id: "hellocycling", station_id: "10139" });
+    expect(filters).toEqual([
+      { op: "eq", column: "system_id", value: "hellocycling" },
+      { op: "eq", column: "station_id", value: "10139" },
+    ]);
+  });
+});
+
+describe("hourlyFilters（直近の実績。0046）", () => {
+  it("**時間の下限は呼ぶ側が決める**（ビューは 26 時間持っている）", () => {
+    const since = "2026-09-12T00:00:00.000Z";
+    expect(hourlyFilters({ system_id: "docomo-cycle", station_id: "1", since })).toEqual([
+      { op: "eq", column: "system_id", value: "docomo-cycle" },
+      { op: "eq", column: "station_id", value: "1" },
+      { op: "gte_text", column: "hour_start", value: since },
+    ]);
+  });
+
+  it("**時刻は `gte` と分けた口で送る**（数と取り違えたまま通さない）", () => {
+    const filters = hourlyFilters({
+      system_id: "docomo-cycle",
+      station_id: "1",
+      since: "2026-09-12T00:00:00.000Z",
+    });
+    expect(filters.some((one) => one.op === "gte")).toBe(false);
   });
 });
 

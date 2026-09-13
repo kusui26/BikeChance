@@ -8,7 +8,7 @@
   * **失敗は投げ直す**（入口の 500 と、記録の `failed` の両方を残す）
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 
 import pytest
@@ -30,6 +30,7 @@ class FakePort:
         self.uploads: list[tuple[str, int]] = []
         self.started: list[str] = []
         self.finished: list[tuple[int, str, Mapping[str, object]]] = []
+        self.capacity_rows: list[Mapping[str, object]] = []
         self.fail_upload = False
         self.fail_job_started = False
         self.fail_job_finished = False
@@ -51,6 +52,11 @@ class FakePort:
 
     def list_neighbors(self, system_id: str) -> tuple[NeighborRow, ...]:
         return ()
+
+    def upsert_capacity_est(self, rows: Sequence[Mapping[str, object]]) -> int:
+        """ポートの大きさを DB に写す（0045）。**Storage に置いたあとで呼ばれる。**"""
+        self.capacity_rows.extend(rows)
+        return len(rows)
 
     def download(self, bucket: str, path: str) -> bytes | None:
         """その日のスナップショットも前の版も無い日。**欠けたまま進む**（補間しない）。"""
@@ -146,6 +152,9 @@ def test_a_day_without_snapshots_is_reported_not_invented() -> None:
     assert summary["missing_hours"] == 48
     assert summary["capacity_days_max"] == 0
     assert summary["with_capacity_est"] == 0
+    # **観測が無ければ DB にも 1 行も写さない**（0 を「大きさ 0」として入れない。0045）
+    assert summary["capacity_est_rows"] == 0
+    assert port.capacity_rows == []
 
 
 def test_yesterday_is_the_jst_day_before() -> None:

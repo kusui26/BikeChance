@@ -471,9 +471,69 @@ create table public.model_versions (
 
 **読むときに列の並びと語彙を照合し、違えば配らない。**
 
+### 4.15 `station_capacity_est` — ポートの大きさ（0045）
+
+```sql
+create table public.station_capacity_est (
+  system_id text, station_id text,
+  capacity_est smallint,     -- 前日までの 7 日の max(bikes + docks)
+  capacity_days smallint,    -- その値に寄与した日数（1〜7）
+  as_of_date date,           -- 写した参照スナップショットの JST 暦日
+  updated_at timestamptz,
+  primary key (system_id, station_id)
+);
+```
+
+**`capacity`（宣言されたラック数）とは別の数である。** 前者は事業者の申告で、ドコモでは
+日次同期の瞬間の `bikes + docks` が凍結されたものなのでビューが NULL にしている（§5.1）。
+こちらは**7 日のあいだに実際に並んだ最大**で、**どちらのシステムでも出る**——
+ドコモの 5,837 ポートに大きさを表す数が 1 つも無い状態を閉じるための列である（W4-09）。
+
+**定義は 1 か所にしかない。** 数えるのは `apps/ml/bikechance_ml/features/reference_snapshot.py`
+の `daily_capacity_max` で、`build_reference`（毎日 05:00 JST）が Storage の参照スナップ
+ショットに書き、**同じジョブがこの表にも写す**。`/v1`（Next.js）は Storage を読む経路を
+持たないので（生 JSON への入口を増やさない。CLAUDE.md §5）、**DB へ写す道がこれ 1 本**である。
+`status_snapshots` から SQL で数え直す案は採らない——900 万行の unnest になり、しかも
+**同じ量を 2 つの実装が持つ**ことになる（W5 プラン §12 の 150）。
+
+**止まっても静かには壊れない。** 7 日の最大なので 1 日欠けても値はほとんど動かず、
+`as_of_date` に「いつの版か」が残る。**消さない**：7 日の観測が途切れたポートの行は残り、
+古さは `as_of_date` で読む。
+
+### 4.16 `station_hourly` — ポート別・1 時間ごとの実績（0046）
+
+```sql
+create table public.station_hourly (
+  system_id text, station_id text, hour_start timestamptz,
+  n smallint,            -- 貸出と返却の**両方が観測できた**スナップショットの数
+  bikes_mean real, docks_mean real,
+  primary key (system_id, station_id, hour_start)
+);
+```
+
+詳細画面の「直近 24 時間」が読む。**保持は 26 時間**（24 ＋ 集計の遅れ 2）で、
+**書く側と同じ毎時の仕事（`rollup_station_hourly`、pg_cron :12）が掃除する**——
+`run_maintenance`（日次）に置くと最大 48 時間ぶん溜まる。
+
+| | 実測（2026-09-13） |
+|---|---|
+| 行 | 20,700 ポート × 26 時間 ＝ 約 54 万 |
+| 大きさ | 後述（§4.16 の実測） |
+| 集計 1 時間ぶん | **3.5 秒**（両システム・約 43 万行の unnest） |
+
+**なぜ表なのか。** 素直なビュー（要求のたびに `status_snapshots` の配列を開く）を本番で
+測ると **1 ポート 1 日ぶんで 616 ms** だった。行数は少ない（24 時間で HELLO 288 行・
+ドコモ 1,040 行）が、**1 行が 4 本 × 約 15,000 要素の配列を抱えていて TOAST の展開が
+効く**。お気に入り（W5 の PR H）は詳細を 20 件まとめて叩くので、1 画面で 12 秒の DB
+時間になる（W5 プラン §12 の 151）。
+
+**数え方**：**貸出と返却の両方が観測できた格子点だけ**を数える（`features/profile.py` の
+`usable_points` と同じ規律）。片方だけの点を数えると 2 つの平均が別の母数に乗る。
+**観測が 1 度も無かった時間帯は行を作らない**（0 を入れると「0 台だった」に見える）。
+
 ## 5. 公開ビュー（`/v1` が読む唯一の面）
 
-匿名ロールに権限があるのは**この 3 つだけ**。基底テーブルには一切手が届かない（pgTAP `0010_public_views.sql` が固定する。**数だけでなく名前も**——1 枚消して 1 枚足したときに素通りしないため）。**列の一覧も pgTAP が固定している**（`columns_are`）。読む側は `select *` をせず列を並べるので（`apps/web/lib/api/view-query.ts`）、片方だけ変えると実行時まで気づけない。
+匿名ロールに権限があるのは**この 4 つだけ**（0046 で `v1_station_hourly` を足した）。基底テーブルには一切手が届かない（pgTAP `0010_public_views.sql` が固定する。**数だけでなく名前も**——1 枚消して 1 枚足したときに素通りしないため）。**列の一覧も pgTAP が固定している**（`columns_are`）。読む側は `select *` をせず列を並べるので（`apps/web/lib/api/view-query.ts`）、片方だけ変えると実行時まで気づけない。
 
 ### 5.1 `v1_stations_current`
 
@@ -485,12 +545,13 @@ create table public.model_versions (
 | `is_installed` / `is_renting` / `is_returning` | `flags` | ビット和を真偽値 3 つに開く。**`flags < 0` なら NULL** |
 | `name` / `lat` / `lon` | `station_attributes`（`valid_to is null`） | **`left join`。属性が無ければ NULL で返す**（新しいポートは最大 1 日属性を持たない） |
 | `capacity` | 同上 | **固定のラック数を持つシステムだけ返す。`capacity_is_dynamic` の系統は NULL**（0035） |
+| `capacity_est` / `capacity_days` | `station_capacity_est`（§4.15） | **`left join`。まだ写していなければ NULL**（0045）。**`capacity` と混ぜない**——片方は宣言、片方は実測である |
 | `is_present` / `last_changed_at` | `station_status_latest` | そのまま |
 | `forecast_horizons_min` / `forecast_p_bike_x1000` / `forecast_p_dock_x1000` / `forecast_confidence` / `forecast_base_observed_at` / `forecast_model_version` / `forecast_generated_at` | `station_forecasts` | **`left join`。予測が無ければ 7 列とも NULL**（0033・0034） |
 
 除外：`geo_suspect` のポート、`is_active = false` のシステム。
 
-**`capacity` は「固定のラック数」を意味する列である**（0035。W4 プラン §12 の 115）。ドコモの公開値は日次同期の瞬間の `bikes + docks` が凍結されたもので（§4.3）、そのまま渡すと「容量 5・借りられる 12」という矛盾が画面に出る（実測で 628 ポート・ドコモの 10.8%）。**ビューが NULL にして外に出さない**。`-1` を NULL に、`flags` を真偽値に開いているのと同じ理由である。**基底テーブル（`station_attributes.capacity`）の値は消していない**ので、学習側はそちらを読む。ポートの大きさは `capacity_est`（前日までの 7 日の `max(bikes + docks)`。§7.4 の参照スナップショット）で推定する。
+**`capacity` は「固定のラック数」を意味する列である**（0035。W4 プラン §12 の 115）。ドコモの公開値は日次同期の瞬間の `bikes + docks` が凍結されたもので（§4.3）、そのまま渡すと「容量 5・借りられる 12」という矛盾が画面に出る（実測で 628 ポート・ドコモの 10.8%）。**ビューが NULL にして外に出さない**。`-1` を NULL に、`flags` を真偽値に開いているのと同じ理由である。**基底テーブル（`station_attributes.capacity`）の値は消していない**ので、学習側はそちらを読む。ポートの大きさは **`capacity_est`** が答える（前日までの 7 日の `max(bikes + docks)`。**2026-09-13 からビューに載っている**。§4.15・W5-14）。
 
 **予測の鮮度はビューで切らない**（0033）。「何秒より古ければ出さないか」は `packages/shared/src/constants.ts` の `FORECAST_STALE_AFTER_S`（900 秒）が持っており、SQL にも 900 を書くと正が 2 つになる。現在値の `stale` 判定も TypeScript 側（`freshness.ts`）にあって iOS と共有しているので、揃えてある。**ビューは `base_observed_at` をそのまま渡し、切るかどうかは読む側が決める。**
 
@@ -513,7 +574,16 @@ create table public.model_versions (
 
 **`forecast_model_version` / `forecast_generated_at` は `inference_log` から引く**（0033）。`station_forecasts` から取ると版を知るのに 2 万行を走査することになるが、`inference_log` なら `id` の降順に 1 行見るだけで済む。**`status = 'ok'` の最新行**を使い、失敗した回と実行中の回は数えない。1 度も成功していなければ NULL（W2 からの意味を変えない）。
 
-### 5.3 `v1_station_neighbors`
+### 5.3 `v1_station_hourly`
+
+`system_id` / `station_id` / `hour_start` / `n` / `bikes_mean` / `docks_mean`。**稼働中の
+システムのみ**（`v1_stations_current` と同じ約束）。`station_hourly`（§4.16）を素直に
+写したもので、**直近 26 時間**しか持たない。
+
+**観測の無かった時間帯は行が無い。** 読む側（`/v1/stations/{system}/{station_id}`）は
+24 時間で切って最大 24 件を返し、**穴はそのまま穴として渡す**。
+
+### 5.4 `v1_station_neighbors`
 
 `system_id` / `station_id` / `nb_system_id` / `nb_station_id` / `distance_m` / `same_system`。**稼働中のシステムどうしの組だけ**（どちら側が停止していても落とす）。`station_neighbors` を素直に写したもので、日次の `rebuild_station_neighbors` が全置換する。
 

@@ -17,6 +17,8 @@ import { z } from "zod";
 import {
   FEEDS_VIEW,
   FEED_COLUMNS,
+  HOURLY_COLUMNS,
+  HOURLY_VIEW,
   NEIGHBORS_VIEW,
   NEIGHBOR_COLUMNS,
   STATIONS_VIEW,
@@ -24,18 +26,22 @@ import {
   STATION_ORDER,
   bboxFilters,
   feedRowSchema,
+  hourlyFilters,
+  hourlyRowSchema,
   neighborFilters,
   neighborRowSchema,
+  oneStationFilters,
   stationIdFilters,
   stationRowSchema,
   systemFilters,
   type FeedRow,
   type Filter,
+  type HourlyRow,
   type NeighborRow,
   type StationRow,
 } from "./view-query";
 
-export type { FeedRow, NeighborRow, StationRow } from "./view-query";
+export type { FeedRow, HourlyRow, NeighborRow, StationRow } from "./view-query";
 
 export type StationsPage = {
   readonly rows: readonly StationRow[];
@@ -63,6 +69,22 @@ export type ReadPort = {
     readonly station_ids: readonly string[];
     readonly radius_m: number;
   }) => Promise<readonly NeighborRow[]>;
+  /**
+   * 1 ポートを名指しで引く（`/v1/stations/{system}/{station_id}`）。
+   *
+   * **無ければ null。** 「知らないポート」と「いま応えられない」を呼ぶ側が区別できる
+   * ように、例外にしない（例外は `ReadError` で 503 に写る）。
+   */
+  readonly findStation: (params: {
+    readonly system_id: SystemId;
+    readonly station_id: string;
+  }) => Promise<StationRow | null>;
+  /** 直近の実績（1 時間ごと）。**古い順**で返す。 */
+  readonly listRecentHours: (params: {
+    readonly system_id: SystemId;
+    readonly station_id: string;
+    readonly since: Date;
+  }) => Promise<readonly HourlyRow[]>;
 };
 
 /** DB に届かなかった／応答の形が違った。上位はこれを 503 に写す。 */
@@ -75,7 +97,9 @@ export class ReadError extends Error {
 
 /** 絞り込みを順に適用する。どのメソッドも同じビルダを返す。 */
 type Filterable<T> = {
-  readonly gte: (column: string, value: number) => T;
+  // 時刻の下限も同じメソッドに写る。**分けているのは組み立てる側の型だけ**で、
+  // 数と時刻を取り違えたまま通ることを `Filter` の側で止めている
+  readonly gte: (column: string, value: number | string) => T;
   readonly lte: (column: string, value: number) => T;
   readonly eq: (column: string, value: string) => T;
   readonly is: (column: string, value: boolean) => T;
@@ -86,6 +110,7 @@ const applyFilters = <T extends Filterable<T>>(builder: T, filters: readonly Fil
   filters.reduce<T>((acc, filter) => {
     switch (filter.op) {
       case "gte":
+      case "gte_text":
         return acc.gte(filter.column, filter.value);
       case "lte":
         return acc.lte(filter.column, filter.value);
@@ -156,6 +181,38 @@ export const createSupabaseReadPort = (client: SupabaseClient): ReadPort => ({
       throw toReadError(STATIONS_VIEW, error);
     }
     return parseRows(STATIONS_VIEW, stationRowSchema, data);
+  },
+
+  findStation: async ({ system_id, station_id }) => {
+    const selected = client.from(STATIONS_VIEW).select(STATION_COLUMNS);
+    const { data, error } = await applyFilters(
+      selected,
+      oneStationFilters({ system_id, station_id }),
+    )
+      // **2 行返ることは無い**（ビューの元は 1 ポート 1 行）が、上限を置いておけば
+      // 万一そうなっても応答が膨らまない
+      .limit(2)
+      .abortSignal(AbortSignal.timeout(V1_QUERY_TIMEOUT_MS));
+    if (error !== null) {
+      throw toReadError(STATIONS_VIEW, error);
+    }
+    const rows = parseRows(STATIONS_VIEW, stationRowSchema, data);
+    return rows[0] ?? null;
+  },
+
+  listRecentHours: async ({ system_id, station_id, since }) => {
+    const selected = client.from(HOURLY_VIEW).select(HOURLY_COLUMNS);
+    const { data, error } = await applyFilters(
+      selected,
+      hourlyFilters({ system_id, station_id, since: since.toISOString() }),
+    )
+      // **古い順。** グラフは左から右に時間が流れる
+      .order("hour_start", { ascending: true })
+      .abortSignal(AbortSignal.timeout(V1_QUERY_TIMEOUT_MS));
+    if (error !== null) {
+      throw toReadError(HOURLY_VIEW, error);
+    }
+    return parseRows(HOURLY_VIEW, hourlyRowSchema, data);
   },
 
   listNeighbors: async ({ system_id, station_ids, radius_m }) => {

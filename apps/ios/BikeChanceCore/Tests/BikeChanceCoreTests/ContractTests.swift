@@ -307,4 +307,77 @@ struct ContractTests {
         // 「どれだけ狭めればよいか」が本文に入っている
         #expect(tooMany.detail.contains("6649"))
     }
+    // ────────────────────────────────────────────────────────────
+    // ポート詳細（W5 の PR F。2026-09-13 に本番から取った）
+    // ────────────────────────────────────────────────────────────
+    @Test("/v1/stations/{system}/{station_id} をデコードできる")
+    func decodesStationDetail() throws {
+        let response = try Self.decode(StationDetailResponse.self, "station_detail")
+        #expect(response.apiVersion == "v1")
+        // **そのポートのシステムだけ。** 地図と違い 1 系統しか関係しない
+        #expect(response.feeds.count == 1)
+        #expect(response.attribution.count == 1)
+        #expect(response.station.systemID == "docomo-cycle")
+    }
+
+    @Test("**`capacity_est` はドコモにも付く**（`capacity` は nil のまま。W5-14）")
+    func capacityEstimateComesEvenWhenCapacityIsNil() throws {
+        let response = try Self.decode(StationDetailResponse.self, "station_detail")
+        // ドコモの公開する `capacity` は動的値なのでビューが nil にしている（0035）
+        #expect(response.station.capacity == nil)
+        // **実測からの大きさは出る。** これが W4-09 の宿題の答え
+        #expect(response.station.capacityEstimate == 35)
+        #expect(response.station.capacityDays == 7)
+    }
+
+    @Test("**曲線は補間されていない生の 10 点**（W5-13）")
+    func theCurveIsRaw() throws {
+        let curve = try #require(
+            Self.decode(StationDetailResponse.self, "station_detail").forecastCurve)
+        #expect(curve.horizonsMinutes == [5, 10, 15, 20, 30, 45, 60, 90, 120, 180])
+        #expect(curve.rentProbabilities.count == curve.horizonsMinutes.count)
+        #expect(curve.returnProbabilities.count == curve.horizonsMinutes.count)
+        #expect(curve.modelVersion.isEmpty == false)
+    }
+
+    @Test("**水平は `generatedAt` からの分数**（端末が受け取った時刻からではない）")
+    func theCurveIsAnchoredAtGeneratedAt() throws {
+        let curve = try #require(
+            Self.decode(StationDetailResponse.self, "station_detail").forecastCurve)
+        let first = try #require(curve.arrival(at: 0))
+        #expect(first == curve.generatedAt.addingTimeInterval(5 * 60))
+        #expect(curve.arrival(at: curve.horizonsMinutes.count) == nil)
+    }
+
+    @Test("**直近 24 時間は 24 件を超えない**（進行中の時間は入らない）")
+    func recentFitsInADay() throws {
+        let response = try Self.decode(StationDetailResponse.self, "station_detail")
+        #expect(response.recent.count <= 24)
+        #expect(response.recent.isEmpty == false)
+        // 古い順。グラフは左から右に時間が流れる
+        #expect(response.recent == response.recent.sorted { $0.hourStart < $1.hourStart })
+        #expect(response.recent.allSatisfy { $0.count > 0 })
+    }
+
+    @Test("**予測の無いポートでも 200 でデコードできる**（欄ごと nil。契約 2）")
+    func decodesAStationWithoutAForecast() throws {
+        let response = try Self.decode(StationDetailResponse.self, "station_detail_no_forecast")
+        #expect(response.forecastCurve == nil)
+        // 予測が無くても現在値と実績は返る
+        #expect(response.station.capacityEstimate != nil)
+        #expect(response.recent.isEmpty == false)
+    }
+
+    @Test("**地図の応答にも `capacity_est` が載る**（0045）")
+    func stationsCarryTheCapacityEstimate() throws {
+        let response = try Self.decode(StationsResponse.self, "stations_capacity")
+        #expect(response.count > 0)
+        #expect(response.stations.allSatisfy { $0.capacityEstimate != nil })
+    }
+
+    @Test("**古い応答も読める**（`capacity_est` が無い 2026-09-08 の実応答）")
+    func oldResponsesStillDecode() throws {
+        let response = try Self.decode(StationsResponse.self, "stations")
+        #expect(response.stations.allSatisfy { $0.capacityEstimate == nil })
+    }
 }
