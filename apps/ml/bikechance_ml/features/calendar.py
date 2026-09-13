@@ -33,6 +33,33 @@ DAY_TYPES: Final[tuple[DayType, ...]] = (
 )
 DOW_TYPES: Final[tuple[DowType, ...]] = ("weekday", "sat", "sun_holiday")
 
+#: 曜日種別を**番号で持つときの並び**。**`DOW_TYPES` の並びではない。**
+#:
+#: | 名前 | 番号 |
+#: |---|---:|
+#: | `sat` | 0 |
+#: | `sun_holiday` | 1 |
+#: | **`weekday`** | **2** |
+#:
+#: 気候値の成果物（`baselines/artifact.py`）も学習サンプルの読み込み（`eval/dataset.py`）も
+#: 配信（`models/predictor.py`）も、**歴史的に `sorted()` を通した番号**で書かれている。
+#: **`DOW_TYPES` の順に「直す」と、Storage に在る成果物が別のセルを指す**——例外は出ず、
+#: 確率だけが静かに変わる（W5 プラン §2.3f、§12 の 132）。
+#:
+#: **直すべきなのは値ではなく、規約が 2 か所に無名で書かれていたこと**だった。番号を
+#: 使う側はここを見る。名前に戻すのは `dow_type_name`。
+DOW_TYPE_ORDER: Final[tuple[DowType, ...]] = tuple(sorted(DOW_TYPES))
+
+
+def dow_type_name(index: int) -> DowType:
+    """番号 → 名前。**報告書と診断はここを通す。**
+
+    `DOW_TYPES[index]` と書くと 1 つずれた名前が出る（`weekday` が「日祝」になる）。
+    実際に W5 プランを書くとき、成果物のセルを数えて最初に出した表がそうなっていた。
+    """
+    return DOW_TYPE_ORDER[index]
+
+
 #: `dow_type` で日曜と同じ扱いにする種別。
 _SUN_LIKE: Final[frozenset[str]] = frozenset({"sun", "holiday", "newyear", "obon"})
 

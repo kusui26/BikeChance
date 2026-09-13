@@ -13,7 +13,7 @@
 副作用は持たない。Parquet を読むのも Markdown を書くのも `jobs/` の仕事。
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -72,12 +72,19 @@ class Outcome:
     overall: tuple[SliceScores, ...]
     by_horizon: tuple[SliceScores, ...]
     by_bucket: tuple[SliceScores, ...]
+    #: system × **曜日種別**（水平はまとめる）。**W5 の PR D の効果はここに出る**
+    by_dow_type: tuple[SliceScores, ...] = ()
+    #: system × **到着時刻の時間帯**（水平はまとめる）
+    by_time_of_day: tuple[SliceScores, ...] = ()
     #: 表に並べるモデルの順。**外から足したぶんも入る**（B0〜B3 と LightGBM）
     models: tuple[str, ...] = BASELINE_MODELS
 
 
 #: 外から渡す予測。`extra["LGBM"]["bike"]` が**検証期間の行に対応する確率**。
 type ExtraModels = Mapping[str, Mapping[str, Float64]]
+
+#: 軸を 1 つ作る関数（`slices.by_dow_type` など）。**足すときはここに通す。**
+type SliceMaker = Callable[[Samples, Target], Iterator[slices.Slice]]
 
 
 class MisalignedPredictionError(ValueError):
@@ -104,6 +111,8 @@ def run(samples: Samples, split: DaySplit, extra: ExtraModels | None = None) -> 
         overall=_score_all(evaluated, named, _overall_slices(evaluated)),
         by_horizon=_score_all(evaluated, named, _horizon_slices(evaluated)),
         by_bucket=_score_all(evaluated, named, _bucket_slices(evaluated)),
+        by_dow_type=_score_all(evaluated, named, _cut_slices(evaluated, slices.by_dow_type)),
+        by_time_of_day=_score_all(evaluated, named, _cut_slices(evaluated, slices.by_time_of_day)),
         models=(*BASELINE_MODELS, *sorted(extra or {})),
     )
 
@@ -170,6 +179,11 @@ def _overall_slices(samples: Samples) -> list[slices.Slice]:
 
 def _horizon_slices(samples: Samples) -> list[slices.Slice]:
     return [one for target in TARGETS for one in slices.by_horizon(samples, target)]
+
+
+def _cut_slices(samples: Samples, make: SliceMaker) -> list[slices.Slice]:
+    """軸を 1 つ足すときの定型。**両ターゲットぶんを並べる。**"""
+    return [one for target in TARGETS for one in make(samples, target)]
 
 
 def _bucket_slices(samples: Samples) -> list[slices.Slice]:

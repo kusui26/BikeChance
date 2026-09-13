@@ -27,7 +27,7 @@ import numpy as np
 
 from bikechance_ml.eval.dataset import Samples, Target
 from bikechance_ml.features.arrays import Bools, Float64, Int32, Int64
-from bikechance_ml.features.calendar import DOW_TYPES
+from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 
 #: 1 日を 15 分で割った枠の数。
 SLOTS_PER_DAY: Final[int] = 24 * 60 // 15
@@ -89,7 +89,7 @@ def fit(
     """学習期間の行からセルを作る。**下限に満たないセルは使えない印を付ける。**"""
     fitted = samples.take(keep)
     key = _key(fitted)
-    size = samples.n_ports * len(DOW_TYPES) * SLOTS_PER_DAY
+    size = samples.n_ports * len(DOW_TYPE_ORDER) * SLOTS_PER_DAY
     weight = fitted.weight.astype(np.float64)
     total = np.bincount(key, weights=weight, minlength=size)
     positive = np.bincount(key, weights=weight * fitted.y(target), minlength=size)
@@ -182,7 +182,7 @@ def _key(samples: Samples) -> Int64:
     **表に無いポートの番号は負になる。** 引く前に `_lookup` を通すこと。
     """
     return np.asarray(
-        (samples.port.astype(np.int64) * len(DOW_TYPES) + samples.dow_type) * SLOTS_PER_DAY
+        (samples.port.astype(np.int64) * len(DOW_TYPE_ORDER) + samples.dow_type) * SLOTS_PER_DAY
         + slot15(samples),
         dtype=np.int64,
     )

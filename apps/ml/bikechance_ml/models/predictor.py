@@ -20,7 +20,7 @@ from bikechance_ml.baselines import blend, climatology, conditional
 from bikechance_ml.baselines.artifact import Artifact
 from bikechance_ml.eval.dataset import TARGETS, Samples, Target
 from bikechance_ml.features.arrays import Bools, Float64, Int8, Int16
-from bikechance_ml.features.calendar import DOW_TYPES
+from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 from bikechance_ml.features.constants import HORIZONS_MIN
 from bikechance_ml.features.grid import JST
 
@@ -146,7 +146,14 @@ def _int16(table: pa.Table, name: str) -> Int16:
 
 
 def _dow_type_index(table: pa.Table) -> Int8:
-    """目標時刻の曜日種別を、成果物と同じ並びの番号にする。"""
-    order = tuple(sorted(DOW_TYPES))
+    """目標時刻の曜日種別を、**成果物と同じ並び**の番号にする。
+
+    並びの正は `features/calendar.py` の `DOW_TYPE_ORDER` 1 つ。**学習側
+    （`eval/dataset.py`）も同じ定数を読む**——以前は両方が別々に `sorted()` を
+    呼んでいて、片方を「直す」と成果物が別のセルを指す状態だった
+    （W5 プラン §12 の 132）。
+    """
     values = table.column("target_dow_type").to_pylist()
-    return np.fromiter((order.index(one) for one in values), dtype=np.int8, count=len(values))
+    return np.fromiter(
+        (DOW_TYPE_ORDER.index(one) for one in values), dtype=np.int8, count=len(values)
+    )

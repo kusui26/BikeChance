@@ -40,6 +40,11 @@ MODEL_COLUMNS: Final[tuple[str, ...]] = (SYSTEM_COLUMN, *feature_columns())
 VOCABULARIES: Final[Mapping[str, tuple[str, ...]]] = {
     SYSTEM_COLUMN: ("docomo-cycle", "hellocycling"),
     "day_type": tuple(DAY_TYPES),
+    # **これは LightGBM のカテゴリ番号で、`DOW_TYPE_ORDER` とは別物である。**
+    # 語彙は成果物に焼き込まれ、読むときに照合する（`models/artifact.py`）ので、
+    # 並びが `DOW_TYPE_ORDER` と違っていても構わない——**揃えようとしない**。
+    # 揃えると「1 つの並びを直せば全部直る」ように見えて、実際には
+    # 過去の成果物が別の意味になる（W5 プラン §12 の 132）
     "dow_type": tuple(DOW_TYPES),
     "target_dow_type": tuple(DOW_TYPES),
 }

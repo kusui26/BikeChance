@@ -21,8 +21,19 @@ from bikechance_ml.features.arrays import Float32, Float64, Int8
 #: 外した行が無限大になる。**丸める前提を明示しておく**（log loss の解釈に効く）。
 LOG_LOSS_EPSILON: Final[float] = 1e-15
 
-#: 信頼度図とキャリブレーション誤差の区間の数。
+#: **信頼度図**の区間の数（**等幅**）。図として読むための刻みで、合否には使わない。
 CALIBRATION_BINS: Final[int] = 20
+
+#: **判定に使う ECE** の区間の数（**等頻度**。開発プラン §7.3 の「15 等頻度ビン」）。
+#:
+#: **等幅では上の端が潰れる。** 配信中の確率は 20 等幅のうち 4 区間にしか入らず、
+#: **66.7% が最上位（0.95〜1.00）に集まる**（W5 プラン §2.3e）。その中は 0.962 から
+#: 0.999 まで分かれているのに、等幅の ECE はそれを 1 点として平均してしまう——
+#: **アプリの約束（85% 以上＝「ほぼ大丈夫」。開発プラン §9.3）がいちばん潰れている帯**である。
+#:
+#: **同じ値は同じ区間に入れる**（`reliability_quantile`）。相異なる値が区間の数より
+#: 少なければ、**値ごとに 1 区間**になる——それが分解能の上限で、いちばん細かい見方になる。
+ECE_QUANTILE_BINS: Final[int] = 15
 
 
 @dataclass(frozen=True)
@@ -47,9 +58,15 @@ class Scores:
     positives: float
     brier: float
     log_loss: float
+    #: **判定に使う ECE**（等頻度 15。開発プラン §7.3）。合否はこれで決める
     ece: float
-    #: 信頼度図。**ECE の内訳**でもあるので、同じ計算から取っておく
+    #: **等幅 20 の ECE**。図（`bins`）と同じ区切りで、**過去の数字と比べるため**に残す
+    #: （2026-09-13 より前の記録はすべてこちら。W5 プラン §12 の 133）
+    ece_uniform: float
+    #: 信頼度図（**等幅 20**）。`ece_uniform` の内訳でもあるので、同じ計算から取っておく
     bins: tuple[ReliabilityBin, ...]
+    #: 判定に使った側の区間（**等頻度**）。**なぜその ECE になったかを読むため**
+    quantile_bins: tuple[ReliabilityBin, ...]
 
 
 def brier(y: Int8, p: Float64, w: Float32 | None = None) -> float:
@@ -64,10 +81,21 @@ def log_loss(y: Int8, p: Float64, w: Float32 | None = None) -> float:
     return -_mean(np.asarray(terms, dtype=np.float64), w)
 
 
-def ece(y: Int8, p: Float64, w: Float32 | None = None, bins: int = CALIBRATION_BINS) -> float:
+def ece(y: Int8, p: Float64, w: Float32 | None = None, bins: int = ECE_QUANTILE_BINS) -> float:
     """キャリブレーション誤差。**「70% と言った日の 7 割で降る」からのずれ。**
 
-    予測確率で等幅に区切り、区間ごとの |実測 − 予測| を重みで平均する。
+    **等頻度で区切る**（開発プラン §7.3）。区間ごとの |実測 − 予測| を重みで平均する。
+    等幅の値が要るときは `ece_uniform`。
+    """
+    return gap_of(reliability_quantile(y, p, w, bins), _total(w, len(y)))
+
+
+def ece_uniform(
+    y: Int8, p: Float64, w: Float32 | None = None, bins: int = CALIBRATION_BINS
+) -> float:
+    """**等幅**で区切った ECE。**2026-09-13 より前に記録した数字はこちら。**
+
+    残してあるのは**比べるため**だけで、合否には使わない（W5-07）。
     """
     return gap_of(reliability(y, p, w, bins), _total(w, len(y)))
 
@@ -95,6 +123,57 @@ def reliability(
     )
 
 
+def reliability_quantile(
+    y: Int8, p: Float64, w: Float32 | None = None, bins: int = ECE_QUANTILE_BINS
+) -> tuple[ReliabilityBin, ...]:
+    """**等頻度**（分位）で区切った信頼度図。**判定に使う ECE はここから出す。**
+
+    **同じ値は必ず同じ区間に入る。** 分位の境目で同じ予測値を 2 つに割ると、片方が
+    「当たった行」もう片方が「外した行」になって、**実在しないずれが出る**——モデルは
+    何も間違っていないのに ECE が立つ。**それを防いでいるのは `searchsorted` そのもの**
+    である：同じ値は必ず同じ添字になる。
+
+    **境目に等しい値は下の区間に入れる**（`side="left"`）。境目は「重みの半分を
+    使い切った行の値」なので、**その行を含めて下**にするのが素直である。上に送ると、
+    重い行が 1 つあるだけで下の区間が空になる（壊して確かめた。W5 プラン §12 の 140）。
+
+    **区間の数は要求より少なくなることがある。** 相異なる値が要求より少なければ
+    **値ごとに 1 区間**になり、それが分解能の上限である——配信中のベースラインは
+    1 水平あたり 4〜6 個の値しか取らないので（W5 プラン §2.3a）、15 は上限として働く。
+
+    `low` / `high` は**その区間に実際に入った値の最小と最大**である（名目の境目では
+    ない）。値が 1 つしかない区間では `low == high` になり、そのほうが読める。
+    """
+    weights = np.ones(len(y), dtype=np.float64) if w is None else w.astype(np.float64)
+    if len(y) == 0:
+        return ()
+    index = np.searchsorted(_quantile_edges(p, weights, bins), p, side="left")
+    return tuple(
+        _quantile_bin(y[index == slot], p[index == slot], weights[index == slot])
+        for slot in np.unique(index)
+    )
+
+
+def _quantile_edges(p: Float64, w: Float64, bins: int) -> Float64:
+    """重みで等分した境目。**昇順で、重複しうる。**
+
+    **重複を落とす必要は無い。** 同じ境目が 2 つ並んでも `searchsorted` は同じ値に
+    同じ添字を返すので、区切り方は変わらない（空の添字が増えるだけで、それは
+    `np.unique(index)` が飛ばす）。**落とすコードを書いていたが、壊しても検査が 1 つも
+    落ちなかったので外した**（W5 プラン §12 の 140）。
+    """
+    order = np.argsort(p, kind="stable")
+    cumulative = np.cumsum(w[order])
+    wanted = np.linspace(0.0, 1.0, bins + 1)[1:-1] * float(cumulative[-1])
+    positions = np.clip(np.searchsorted(cumulative, wanted, side="left"), 0, len(p) - 1)
+    return np.asarray(p[order][positions], dtype=np.float64)
+
+
+def _quantile_bin(y: Int8, p: Float64, w: Float64) -> ReliabilityBin:
+    """1 区間ぶん。**境目ではなく、実際に入った値の幅**を持たせる。"""
+    return _bin(float(p.min()), float(p.max()), y, p, w)
+
+
 def _bin(low: float, high: float, y: Int8, p: Float64, w: Float64) -> ReliabilityBin:
     total = float(w.sum())
     return ReliabilityBin(
@@ -108,8 +187,13 @@ def _bin(low: float, high: float, y: Int8, p: Float64, w: Float64) -> Reliabilit
 
 
 def score(y: Int8, p: Float64, w: Float32 | None = None) -> Scores:
-    """1 つのモデルの成績をまとめる。"""
+    """1 つのモデルの成績をまとめる。**ECE は 2 つ出す**（W5-07）。
+
+    判定に使うのは等頻度のほうだが、**等幅も残す**——過去の記録はすべて等幅で、
+    片方だけにすると「悪くなった」のか「見えるようになった」のかが分からなくなる。
+    """
     bins = reliability(y, p, w)
+    quantile = reliability_quantile(y, p, w)
     total = _total(w, len(y))
     return Scores(
         n=len(y),
@@ -117,8 +201,10 @@ def score(y: Int8, p: Float64, w: Float32 | None = None) -> Scores:
         positives=_mean(np.asarray(y, dtype=np.float64), w),
         brier=brier(y, p, w),
         log_loss=log_loss(y, p, w),
-        ece=gap_of(bins, total),
+        ece=gap_of(quantile, total),
+        ece_uniform=gap_of(bins, total),
         bins=bins,
+        quantile_bins=quantile,
     )
 
 
