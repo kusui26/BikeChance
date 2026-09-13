@@ -15,6 +15,8 @@ export const STATIONS_VIEW = "v1_stations_current";
 export const NEIGHBORS_VIEW = "v1_station_neighbors";
 /** 直近 24 時間の実績（`/v1/stations/{system}/{id}`。migration 0046）。 */
 export const HOURLY_VIEW = "v1_station_hourly";
+/** 低ズームの格子集約（migration 0049）。**ビューではなく関数**（刻みを引数で受ける）。 */
+export const CELLS_FUNCTION = "v1_station_cells";
 
 /** `v1_feeds` から読む列。`select("*")` にしないのは、列が増えたときに気づけるようにするため。 */
 export const FEED_COLUMNS =
@@ -202,6 +204,34 @@ export const neighborRowSchema = z.object({
 });
 
 /**
+ * `v1_station_cells` の 1 行（0049、W5 の PR E）。
+ *
+ * **確率は「水平ごとの最大を取った曲線」**で、補間はしていない——地図のポートと同じ
+ * `interpolateForecast` を通す（補間の実装を 2 つ持たない）。
+ *
+ * **予測が 1 つも無いセルでは、確率まわりが全部 null になる。** `n_forecast` が 0 かどうかで
+ * 判断できるが、**型でも null を受ける**（どちらか一方を信じない）。
+ */
+export const cellRowSchema = z.object({
+  west: z.number(),
+  south: z.number(),
+  east: z.number(),
+  north: z.number(),
+  n_stations: z.number().int().positive(),
+  /** **観測のあるポートだけ**の合計。1 つも観測できていなければ null。 */
+  bikes: z.number().int().nullable(),
+  docks: z.number().int().nullable(),
+  /** セルの中に 1 つでも「値をいつのものと言えないポート」があれば true。 */
+  stale: z.boolean(),
+  p_bike_x1000: z.array(z.number().int()).nullable(),
+  p_dock_x1000: z.array(z.number().int()).nullable(),
+  confidence: z.number().int().nullable(),
+  /** **水平の起点**（セルの中で最も古いもの）。補間する位置は `in_min ＋（いま − これ）`。 */
+  generated_at: z.string().nullable(),
+  n_forecast: z.number().int().nonnegative(),
+});
+
+/**
  * `v1_station_hourly` の 1 行（0046）。
  *
  * **`system_id` は読まない**（絞り込みで分かっている）。`NEIGHBOR_COLUMNS` と同じ方針で、
@@ -215,6 +245,7 @@ export const hourlyRowSchema = z.object({
   docks_mean: z.number().nonnegative(),
 });
 
+export type CellRow = z.infer<typeof cellRowSchema>;
 export type FeedRow = z.infer<typeof feedRowSchema>;
 export type StationRow = z.infer<typeof stationRowSchema>;
 export type NeighborRow = z.infer<typeof neighborRowSchema>;

@@ -176,7 +176,9 @@ create function pg_temp.rest_called() returns text[] language sql immutable as $
     -- モデルの登録（apps/ml の学習ジョブ）
     'register_model_version',
     -- ポートの大きさ（apps/ml の build_reference。0045）
-    'upsert_capacity_est'
+    'upsert_capacity_est',
+    -- 低ズームの格子集約（apps/web の /v1/stations。0049）
+    'v1_station_cells'
   ];
 $$;
 

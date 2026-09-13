@@ -4,6 +4,10 @@
  * 手順そのものは `lib/api/stations.ts` にある。ここは依存の組み立てと、
  * 状態コード・ヘッダの割り当てだけを行う（`/api/jobs/*` と同じ形）。
  *
+ * **矩形が広ければ、ポートではなく格子のセルを返す**（W5 の PR E、W5-12）。どちらを返したかは
+ * 応答の `aggregation` に書く。`zoom` は受けない——同じ矩形に 2 つの答えができて CDN の
+ * 鍵が割れる。
+ *
  * **予測は `?at=` か `?in_min=` があるときだけ返す**（W4 の PR A）。「いまの確率」は現在値
  * そのものであって予測ではないので、指定が無ければ `forecast` は null になる。実測値には
  * 観測時刻を、予測には基準になった観測時刻（`base_observed_at`）を必ず添える
@@ -15,7 +19,7 @@
 import {
   ATTRIBUTION_HEADER_VALUE,
   V1_CACHE_CONTROL,
-  type StationsResponse,
+  type StationsEndpointResponse,
 } from "@bikechance/shared";
 import { problemResponse, toProblem } from "@/lib/api/problem";
 import { createSupabaseReadPort } from "@/lib/api/read-port";
@@ -40,7 +44,11 @@ const HEADERS = {
   "X-Data-Attribution": ATTRIBUTION_HEADER_VALUE,
 } as const;
 
-const okResponse = (response: StationsResponse): Response =>
+/**
+ * **低ズームではセルが返る**（W5 の PR E）。どちらを返したかは `aggregation` に入っており、
+ * ここは形を選ばずにそのまま JSON にする——分岐は `queryStations` の中で済んでいる。
+ */
+const okResponse = (response: StationsEndpointResponse): Response =>
   Response.json(response, { headers: HEADERS });
 
 /** 入力の検証が済んでから呼ばれる。設定が足りなければここで例外になり 503 に写る。 */

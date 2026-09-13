@@ -15,6 +15,7 @@ import { V1_QUERY_TIMEOUT_MS, type Bbox, type SystemId } from "@bikechance/share
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import {
+  CELLS_FUNCTION,
   FEEDS_VIEW,
   FEED_COLUMNS,
   HOURLY_COLUMNS,
@@ -27,6 +28,7 @@ import {
   bboxFilters,
   feedRowSchema,
   hourlyFilters,
+  cellRowSchema,
   hourlyRowSchema,
   neighborFilters,
   neighborRowSchema,
@@ -34,6 +36,7 @@ import {
   stationIdFilters,
   stationRowSchema,
   systemFilters,
+  type CellRow,
   type FeedRow,
   type Filter,
   type HourlyRow,
@@ -41,7 +44,7 @@ import {
   type StationRow,
 } from "./view-query";
 
-export type { FeedRow, HourlyRow, NeighborRow, StationRow } from "./view-query";
+export type { CellRow, FeedRow, HourlyRow, NeighborRow, StationRow } from "./view-query";
 
 export type StationsPage = {
   readonly rows: readonly StationRow[];
@@ -79,6 +82,24 @@ export type ReadPort = {
     readonly system_id: SystemId;
     readonly station_id: string;
   }) => Promise<StationRow | null>;
+  /**
+   * 低ズームの格子集約（0049、W5 の PR E）。
+   *
+   * **集約は DB でやる。** 1,000 件の上限を超えた行をここまで持ってくると、上限を
+   * 置いた意味が無い（0.5 度の矩形は 8,805 ポート）。
+   *
+   * **鮮度の閾値と水平の並びは呼ぶ側が渡す。** どちらも規則の正が `packages/shared`
+   * にあり、SQL で書き直すと 2 か所になる。
+   */
+  readonly listCells: (params: {
+    readonly bbox: Bbox;
+    readonly cell_deg: number;
+    readonly system_id: SystemId | null;
+    /** これより古い観測に基づく予測は、確率の集約に入れない。 */
+    readonly fresh_after: Date;
+    /** この並びと一致する行だけが確率に寄与する（添字のずれを作らない）。 */
+    readonly horizons_min: readonly number[];
+  }) => Promise<readonly CellRow[]>;
   /** 直近の実績（1 時間ごと）。**古い順**で返す。 */
   readonly listRecentHours: (params: {
     readonly system_id: SystemId;
@@ -198,6 +219,27 @@ export const createSupabaseReadPort = (client: SupabaseClient): ReadPort => ({
     }
     const rows = parseRows(STATIONS_VIEW, stationRowSchema, data);
     return rows[0] ?? null;
+  },
+
+  listCells: async ({ bbox, cell_deg, system_id, fresh_after, horizons_min }) => {
+    // **関数を呼ぶ。** ビューでは刻みを受けられない（同じビューに 2 つの粒度を持たせると、
+    // 呼ぶ側がどちらを読んでいるか分からなくなる）
+    const { data, error } = await client
+      .rpc(CELLS_FUNCTION, {
+        p_west: bbox.west,
+        p_south: bbox.south,
+        p_east: bbox.east,
+        p_north: bbox.north,
+        p_cell_deg: cell_deg,
+        p_system: system_id,
+        p_fresh_after: fresh_after.toISOString(),
+        p_horizons: [...horizons_min],
+      })
+      .abortSignal(AbortSignal.timeout(V1_QUERY_TIMEOUT_MS));
+    if (error !== null) {
+      throw toReadError(CELLS_FUNCTION, error);
+    }
+    return parseRows(CELLS_FUNCTION, cellRowSchema, data);
   },
 
   listRecentHours: async ({ system_id, station_id, since }) => {

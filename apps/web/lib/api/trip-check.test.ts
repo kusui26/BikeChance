@@ -105,6 +105,7 @@ const fakePort = (options: PortOptions = {}): ReadPort => {
     },
     // `/v1/trip-check` は使わない。`ReadPort` を満たすためだけに置く
     findStation: async () => null,
+    listCells: async () => [],
     listRecentHours: async () => [],
   };
 };

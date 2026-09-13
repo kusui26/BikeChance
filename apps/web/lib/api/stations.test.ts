@@ -16,7 +16,7 @@ import {
   stationsResponseSchema,
 } from "@bikechance/shared";
 import { buildStationsResponse, queryStations } from "./stations";
-import type { FeedRow, ReadPort, StationRow } from "./read-port";
+import type { CellRow, FeedRow, ReadPort, StationRow } from "./read-port";
 
 const NOW = new Date("2026-09-08T00:00:00.000Z");
 
@@ -72,16 +72,26 @@ const station = (overrides: Partial<StationRow> = {}): StationRow => ({
   ...overrides,
 });
 
+type CellCall = {
+  readonly bbox: unknown;
+  readonly cell_deg: number;
+  readonly system_id: string | null;
+  readonly fresh_after: Date;
+  readonly horizons_min: readonly number[];
+};
+
 type PortOptions = {
   readonly rows?: readonly StationRow[];
   readonly total?: number;
   readonly feeds?: readonly FeedRow[];
-  readonly throwOn?: "feeds" | "stations";
+  readonly cells?: readonly CellRow[];
+  readonly throwOn?: "feeds" | "stations" | "cells";
 };
 
 const fakePort = (options: PortOptions = {}) => {
   const rows = options.rows ?? [station()];
   const calls: { bbox: unknown; system_id: string | null; limit: number }[] = [];
+  const cellCalls: CellCall[] = [];
   const port: ReadPort = {
     listFeeds: async () => {
       if (options.throwOn === "feeds") throw new Error("db down");
@@ -92,22 +102,46 @@ const fakePort = (options: PortOptions = {}) => {
       calls.push({ bbox: params.bbox, system_id: params.system_id, limit: params.limit });
       return { rows, total: options.total ?? rows.length };
     },
+    listCells: async (params) => {
+      if (options.throwOn === "cells") throw new Error("db down");
+      cellCalls.push({
+        bbox: params.bbox,
+        cell_deg: params.cell_deg,
+        system_id: params.system_id,
+        fresh_after: params.fresh_after,
+        horizons_min: [...params.horizons_min],
+      });
+      return options.cells ?? [];
+    },
     // `/v1/stations` は使わない。`ReadPort` を満たすためだけに置く
     listStationsByIds: async () => [],
     listNeighbors: async () => [],
     findStation: async () => null,
     listRecentHours: async () => [],
   };
-  return { port, calls };
+  return { port, calls, cellCalls };
 };
 
 const run = (query: string, options: PortOptions = {}) => {
-  const { port, calls } = fakePort(options);
+  const { port, calls, cellCalls } = fakePort(options);
   return queryStations({
     makePort: () => port,
     search: new URLSearchParams(query),
     now: NOW,
-  }).then((outcome) => ({ outcome, calls }));
+  }).then((outcome) => ({ outcome, calls, cellCalls }));
+};
+
+/**
+ * ポートを返した応答だけを取り出す。**セルが返っていたら落とす**——
+ * 「`stations` が空だった」と「セルが返っていた」を取り違えない。
+ */
+const stationsOf = async (query: string, options: PortOptions = {}) => {
+  const { outcome } = await run(query, options);
+  expect(outcome.ok).toBe(true);
+  if (!outcome.ok) throw new Error("unreachable");
+  expect(outcome.response.aggregation).toBe("station");
+  if (outcome.response.aggregation !== "station") throw new Error("unreachable");
+  return outcome.response;
 };
 
 const BBOX = "bbox=139.76,35.67,139.78,35.69";
@@ -357,14 +391,11 @@ describe("予測（W4 の PR A）", () => {
   });
 
   it("**丸めた後の分を応答に書く**（何分の予測を見ているかが応答から読める）", async () => {
-    const { outcome } = await run(`${BBOX}&in_min=37`);
-    expect(outcome.ok).toBe(true);
-    if (outcome.ok) {
-      expect(outcome.response.forecast_in_min).toBe(35);
-      // 35 分 ＋ 行の年齢 1.5 分 = 36.5 分。30 分（800）と 45 分（750）の 0.433 →
-      // 778.33 → 1/1000 に丸めて 778
-      expect(outcome.response.stations[0]?.forecast?.p_bike).toBe(0.778);
-    }
+    const response = await stationsOf(`${BBOX}&in_min=37`);
+    expect(response.forecast_in_min).toBe(35);
+    // 35 分 ＋ 行の年齢 1.5 分 = 36.5 分。30 分（800）と 45 分（750）の 0.433 →
+    // 778.33 → 1/1000 に丸めて 778
+    expect(response.stations[0]?.forecast?.p_bike).toBe(0.778);
   });
 
   it("confidence と model_version はそのまま渡す", () => {
@@ -443,22 +474,16 @@ describe("到着の指定の検証", () => {
   });
 
   it("at でも予測が付く", async () => {
-    const { outcome } = await run(`${BBOX}&at=2026-09-08T00:30:00Z`);
-    expect(outcome.ok).toBe(true);
-    if (outcome.ok) {
-      expect(outcome.response.forecast_in_min).toBe(30);
-      // 30 分 ＋ 行の年齢 1.5 分 = 31.5 分の位置（水平ちょうどの 0.8 ではない）
-      expect(outcome.response.stations[0]?.forecast?.p_bike).toBe(0.795);
-    }
+    const response = await stationsOf(`${BBOX}&at=2026-09-08T00:30:00Z`);
+    expect(response.forecast_in_min).toBe(30);
+    // 30 分 ＋ 行の年齢 1.5 分 = 31.5 分の位置（水平ちょうどの 0.8 ではない）
+    expect(response.stations[0]?.forecast?.p_bike).toBe(0.795);
   });
 
   it("指定が無ければ予測は付かない（既定の応答）", async () => {
-    const { outcome } = await run(BBOX);
-    expect(outcome.ok).toBe(true);
-    if (outcome.ok) {
-      expect(outcome.response.forecast_in_min).toBeNull();
-      expect(outcome.response.stations[0]?.forecast).toBeNull();
-    }
+    const response = await stationsOf(BBOX);
+    expect(response.forecast_in_min).toBeNull();
+    expect(response.stations[0]?.forecast).toBeNull();
   });
 });
 
@@ -513,5 +538,177 @@ describe("水平の起点（W4 プラン §12 の 114）", () => {
     // 応答の generated_at は呼び出し時刻。利用者はこの 2 つで到着の時刻を復元できる
     expect(response.generated_at).toBe(NOW.toISOString());
     expect(response.forecast_in_min).toBe(30);
+  });
+});
+
+// ── 低ズームの格子集約（W5 の PR E） ─────────────────────────
+describe("低ズームはセルを返す", () => {
+  /** 東京駅中心 0.10 度。**丸めた後も 0.08 度を越える**ので、セルになる。 */
+  const WIDE = "bbox=139.717,35.631,139.817,35.731";
+
+  const cell = (overrides: Partial<CellRow> = {}): CellRow => ({
+    west: 139.76,
+    south: 35.68,
+    east: 139.77,
+    north: 35.69,
+    n_stations: 4,
+    bikes: 12,
+    docks: 20,
+    stale: false,
+    // 地図のポートと同じ表。補間の結果を暗算で確かめられる
+    p_bike_x1000: [900, 880, 860, 840, 800, 750, 700, 600, 500, 300],
+    p_dock_x1000: [100, 120, 140, 160, 200, 250, 300, 400, 500, 700],
+    confidence: 3,
+    generated_at: "2026-09-07T23:58:30.000Z",
+    n_forecast: 3,
+    ...overrides,
+  });
+
+  const cellsOf = async (query: string, options: PortOptions = {}) => {
+    const { outcome, cellCalls } = await run(query, options);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("unreachable");
+    expect(outcome.response.aggregation).toBe("cell");
+    if (outcome.response.aggregation !== "cell") throw new Error("unreachable");
+    return { response: outcome.response, cellCalls };
+  };
+
+  it("**広い矩形ではポートを引かない**（1,000 件の上限を超えた行を運ばない）", async () => {
+    const { outcome, calls } = await run(WIDE, { cells: [cell()] });
+    expect(outcome.ok).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("**`aggregation` でどちらを返したかが分かる**（`cells` の有無に頼らせない）", async () => {
+    const { response } = await cellsOf(WIDE, { cells: [cell()] });
+    expect(response.aggregation).toBe("cell");
+    expect(response.cell_deg).toBe(0.01);
+    expect(response.count).toBe(1);
+    expect("stations" in response).toBe(false);
+  });
+
+  it("**狭い矩形はいままでどおりポート**（`aggregation` は station）", async () => {
+    const response = await stationsOf(BBOX);
+    expect(response.aggregation).toBe("station");
+    expect("cells" in response).toBe(false);
+  });
+
+  it("セルの矩形・台数・stale をそのまま写す", async () => {
+    const { response } = await cellsOf(WIDE, { cells: [cell({ stale: true })] });
+    const one = response.cells[0];
+    expect(one?.cell).toEqual({ west: 139.76, south: 35.68, east: 139.77, north: 35.69 });
+    expect(one?.n_stations).toBe(4);
+    expect(one?.bikes).toBe(12);
+    expect(one?.docks).toBe(20);
+    expect(one?.stale).toBe(true);
+  });
+
+  it("**観測が 1 つも無ければ台数は null**（0 台と区別する）", async () => {
+    const { response } = await cellsOf(WIDE, { cells: [cell({ bikes: null, docks: null })] });
+    expect(response.cells[0]?.bikes).toBeNull();
+    expect(response.cells[0]?.docks).toBeNull();
+  });
+
+  it("**`at` が無ければ確率は付かない**（契約 1。地図のポートと同じ）", async () => {
+    const { response } = await cellsOf(WIDE, { cells: [cell()] });
+    expect(response.forecast_in_min).toBeNull();
+    expect(response.cells[0]?.p_bike).toBeNull();
+    expect(response.cells[0]?.p_dock).toBeNull();
+    expect(response.cells[0]?.confidence).toBeNull();
+  });
+
+  it("**補間はポートと同じ 1 つの実装を通る**（SQL 側で補間しない）", async () => {
+    const { response } = await cellsOf(`${WIDE}&in_min=37`, { cells: [cell()] });
+    expect(response.forecast_in_min).toBe(35);
+    // 35 分 ＋ 行の年齢 1.5 分 = 36.5 分。ポートの表と同じ値になる（`stationsOf` の 0.778）
+    expect(response.cells[0]?.p_bike).toBe(0.778);
+    expect(response.cells[0]?.confidence).toBe(3);
+  });
+
+  it("**予測を持つポートが無ければ確率は null**（`n_forecast` が 0）", async () => {
+    const empty = cell({
+      p_bike_x1000: null,
+      p_dock_x1000: null,
+      confidence: null,
+      generated_at: null,
+      n_forecast: 0,
+    });
+    const { response } = await cellsOf(`${WIDE}&in_min=30`, { cells: [empty] });
+    expect(response.cells[0]?.n_forecast).toBe(0);
+    expect(response.cells[0]?.p_bike).toBeNull();
+    // **台数は出る。** 予測が無いことと、ポートが無いことは違う
+    expect(response.cells[0]?.n_stations).toBe(4);
+  });
+
+  it("**片方だけの確率は返さない**（借りると返すはどちらも要る）", async () => {
+    const broken = cell({ p_dock_x1000: [] });
+    const { response } = await cellsOf(`${WIDE}&in_min=30`, { cells: [broken] });
+    expect(response.cells[0]?.p_bike).toBeNull();
+    expect(response.cells[0]?.p_dock).toBeNull();
+  });
+
+  it("**鮮度の閾値と水平の並びを DB に渡す**（規則の正は shared のまま）", async () => {
+    const { cellCalls } = await cellsOf(`${WIDE}&in_min=30`, { cells: [cell()] });
+    const asked = cellCalls[0];
+    expect(asked?.cell_deg).toBe(0.01);
+    expect(asked?.horizons_min).toEqual([...HORIZONS_MIN]);
+    expect(asked?.fresh_after?.toISOString()).toBe("2026-09-07T23:45:00.000Z");
+  });
+
+  it("**丸めた後の辺で決める**（丸めで広がったぶんを見落とさない）", async () => {
+    // 要求の辺は 0.079 度（境目の内側）だが、格子に丸めると 0.09 度になる。
+    // **丸める前の辺で決めると、ポートを 1,000 件超えて引きにいく**
+    const { outcome, calls, cellCalls } = await run("bbox=139.7275,35.6415,139.8065,35.7205", {
+      cells: [cell()],
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("unreachable");
+    expect(outcome.response.aggregation).toBe("cell");
+    expect(calls).toHaveLength(0);
+    expect(cellCalls).toHaveLength(1);
+  });
+
+  it("**丸めた後の矩形を渡す**（細かい位置は問い合わせに残らない）", async () => {
+    const { cellCalls, response } = await cellsOf(WIDE, { cells: [cell()] });
+    expect(cellCalls[0]?.bbox).toEqual(response.bbox);
+    expect(response.bbox).toEqual({ west: 139.71, south: 35.63, east: 139.82, north: 35.74 });
+  });
+
+  it("system はそのまま渡る", async () => {
+    const { cellCalls } = await cellsOf(`${WIDE}&system=docomo-cycle`, { cells: [cell()] });
+    expect(cellCalls[0]?.system_id).toBe("docomo-cycle");
+  });
+
+  it("**0.5 度では粗い刻みになる**", async () => {
+    const widest = "bbox=139.517,35.431,140.017,35.931";
+    const { response } = await cellsOf(widest, { cells: [cell()] });
+    expect(response.cell_deg).toBe(0.05);
+  });
+
+  it("**上限の規則は残っている**（セルが 1,000 を超えたら 400）", async () => {
+    const many = Array.from({ length: STATIONS_MAX_RESULTS + 1 }, (_, index) =>
+      cell({ south: 35.68 + index / 10_000 }),
+    );
+    const { outcome } = await run(WIDE, { cells: many });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.failure.code).toBe("too_many_stations");
+      expect(outcome.failure.status).toBe(400);
+    }
+  });
+
+  it("DB に届かなければ 503（ポートのときと同じ）", async () => {
+    const { outcome } = await run(WIDE, { throwOn: "cells" });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.failure.code).toBe("upstream_unavailable");
+      expect(outcome.failure.status).toBe(503);
+    }
+  });
+
+  it("入力の誤りはセルの前に 400（DB に触らない）", async () => {
+    const { outcome, cellCalls } = await run(`${WIDE}&in_min=999`);
+    expect(outcome.ok).toBe(false);
+    expect(cellCalls).toHaveLength(0);
   });
 });
