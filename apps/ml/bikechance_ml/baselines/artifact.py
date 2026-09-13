@@ -22,6 +22,7 @@ import numpy as np
 
 from bikechance_ml.baselines import blend, climatology, conditional
 from bikechance_ml.features.arrays import Bools, Float64, Int64
+from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 
 #: 成果物の書式の版。**読み方を変えたら上げる。**
 FORMAT_VERSION: Final[int] = 1
@@ -148,9 +149,11 @@ def _target_from_json(document: object, n_ports: int) -> TargetModel:
         b2=climatology.Table(
             n_ports=n_ports,
             rate=rate,
+            # 分子・分母・件数・日数は配信では読まない（引き算は学習側だけ）
             total=np.zeros(0, dtype=np.float64),
             positive=np.zeros(0, dtype=np.float64),
             counted=np.zeros(0, dtype=np.int64),
+            days=np.zeros(0, dtype=np.int64),
             usable=usable,
             min_samples=int(str(fields["b2_min_samples"])),
             min_days=int(str(fields["b2_min_days"])),
@@ -164,8 +167,8 @@ def _target_from_json(document: object, n_ports: int) -> TargetModel:
     )
 
 
-#: 1 ポートあたりの気候値のセル数（曜日種別 × 15 分枠）。`climatology._key` と同じ形。
-_CLIMATOLOGY_CELLS_PER_PORT: Final[int] = 3 * climatology.SLOTS_PER_DAY
+#: 1 ポートあたりの気候値のセル数（曜日種別 × 15 分枠）。`climatology.cell_key` と同じ形。
+_CLIMATOLOGY_CELLS_PER_PORT: Final[int] = len(DOW_TYPE_ORDER) * climatology.SLOTS_PER_DAY
 
 
 def _rounded(values: Float64 | Int64 | Bools) -> list[float]:

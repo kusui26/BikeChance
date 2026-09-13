@@ -91,12 +91,18 @@ class BaselinePredictor:
         )
 
     def _one(self, samples: Samples, target: Target) -> tuple[Float64, Bools]:
-        """B3 の確率と、気候値が使えたかどうか。**学習と同じ関数を呼ぶ。**"""
+        """B3 の確率と、気候値が使えたかどうか。**学習と同じ関数を呼ぶ。**
+
+        **「引けたか」は `climatology` に聞く。** 以前は `b2.probability != b1` と
+        確率どうしを見比べていたが、**プロファイルから作った気候値の率はちょうど 1.0 に
+        なることが多く**（実測：使えるセルの 53.1%）、B1 の 120 セルにも 1.0 が在る
+        （実測：貸出 4・返却 6）。**両方が 1.0 の行を「引けなかった」と数えて
+        `confidence` が下がる**（W5 プラン §12 の 144）。
+        """
         model = self.artifact.targets[target.name]
         b1, _ = conditional.predict(model.b1, samples, target)
         b2 = climatology.predict(model.b2, samples, b1)
-        used = np.asarray(b2.probability != b1, dtype=np.bool_)
-        return blend.predict(model.b3, blend.design(b1, b2.probability, samples.h_min)), used
+        return blend.predict(model.b3, blend.design(b1, b2.probability, samples.h_min)), b2.used
 
     def unknown_ports(self, system_id: str, table: pa.Table) -> int:
         ports = set(self.artifact.ports)
@@ -123,7 +129,7 @@ def to_samples(artifact: Artifact, system_id: str, at: datetime, table: pa.Table
     rows = table.num_rows
     return Samples(
         systems=artifact.systems,
-        n_ports=len(artifact.ports),
+        ports=artifact.ports,
         system=np.full(rows, artifact.systems.index(system_id), dtype=np.int8),
         port=np.fromiter(
             (ports.get(f"{system_id}/{one}", NO_PORT) for one in station_ids),

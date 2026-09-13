@@ -190,6 +190,50 @@ def test_b2_leave_one_out_also_ignores_an_unknown_port() -> None:
     assert applied.fell_back == 3
 
 
+def test_b2_says_it_was_used_without_comparing_probabilities() -> None:
+    """**W5 プラン §12 の 144。** 率が B1 と同じ値でも「引けた」は真である。
+
+    配信側は以前 `b2.probability != b1` で判定していた。プロファイルから作った率は
+    **ちょうど 1.0 になることが多く**（実測：使えるセルの 53.1%）、B1 の 120 セルにも
+    1.0 が在る（実測：貸出 4・返却 6）。**両方が 1.0 の行を「引けなかった」と数え、
+    `confidence` が 3 から 2 に落ちる。**
+    """
+    rows = [fixture.row(day, "hellocycling", "a", 5, 0, 9, 1, 1) for day in (DAY0, DAY1)]
+    samples = samples_of(rows)
+    table = climatology.fit(samples, BIKE, all_rows(2))
+    applied = climatology.predict(table, samples, np.ones(2))  # B1 も 1.0
+    assert applied.probability.tolist() == pytest.approx([1.0, 1.0])
+    assert applied.used.tolist() == [True, True], "確率が同じでも引けている"
+    assert applied.fell_back == 0
+
+
+def test_b2_keeps_the_day_count_behind_usable() -> None:
+    """**`usable` の根拠を捨てない。** 引いたあとに下限を判定し直すのに要る。"""
+    rows = [fixture.row(day, "hellocycling", "a", 5, 0, 9, 1, 1) for day in (DAY0, DAY1)]
+    table = climatology.fit(samples_of(rows), BIKE, all_rows(2))
+    assert int(table.days.max()) == 2
+    assert int(table.counted.max()) == 2
+
+
+def test_b2_leave_one_out_also_wants_two_days() -> None:
+    """**同じ日の 3 行は 3 サンプルだが 1 日である**（§12 の 101）。
+
+    件数だけを見ていたころは、`predict` が使わないセルを leave-one-out が使っていた。
+    B3 は「配信では引けないセル」の値を入力に係数を決めていたことになる。
+    """
+    rows = [
+        fixture.row(DAY0, "hellocycling", "a", 5, 0, 9, 1, 1, minute_of_day=600),
+        fixture.row(DAY0, "hellocycling", "a", 10, 0, 9, 1, 1, minute_of_day=595),
+        fixture.row(DAY0, "hellocycling", "a", 15, 0, 9, 1, 1, minute_of_day=590),
+    ]
+    samples = samples_of(rows)
+    table = climatology.fit(samples, BIKE, all_rows(3))
+    assert int(table.counted.max()) == 3, "同じセルに 3 行入っている"
+    assert table.cells == 0, "1 日しか無いので配信では使わない"
+    applied = climatology.predict_leave_one_out(table, samples, BIKE, np.full(3, 0.25))
+    assert applied.fell_back == 3, "配信で使わないセルを混合の入力にしない"
+
+
 # ── B3：混合 ──────────────────────────────────────────────────
 def test_b3_recovers_known_coefficients() -> None:
     """**入力 3 つなので勾配法で足りる**（`scikit-learn` を足さない。W3-20）。"""

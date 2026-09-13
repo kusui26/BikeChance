@@ -77,12 +77,19 @@ def bucket_index(counts: Int16) -> Int8:
 class Samples:
     """1 つ以上の日ぶんのサンプル。列は行の順にそろっている。
 
-    `systems` と `n_ports` は**元の全体**のもので、行を絞っても変わらない。
+    `systems` と `ports` は**元の全体**のもので、行を絞っても変わらない。
     参照表の大きさが学習期間と検証期間で違うと、番号が指す先がずれる。
+
+    **ポートの名前を持つのは、番号だけでは外と話せないから。** 成果物（`artifact.ports`）も
+    プロファイル（`(system_id, station_id)`）も名前で持っており、**番号に直す並びは
+    `np.unique` が作ったこの並び 1 つ**である。以前は `jobs/fit_baseline.py` が同じ
+    `np.unique` をもう一度呼んで成果物の並びを作っていた——**同じ規約が 2 か所に無名で
+    在った**（W5 プラン §12 の 142。§12 の 132 と同じ形）。
     """
 
     systems: tuple[str, ...]
-    n_ports: int
+    #: `"system_id/station_id"` の昇順。**添字が `port` の番号**である
+    ports: tuple[str, ...]
     system: Int8
     port: Int32
     day: Int32
@@ -96,6 +103,11 @@ class Samples:
     def __len__(self) -> int:
         return len(self.h_min)
 
+    @property
+    def n_ports(self) -> int:
+        """ポートの数。**気候値の表の大きさはこれで決まる。**"""
+        return len(self.ports)
+
     def y(self, target: Target) -> Int8:
         return self.labels[target.label]
 
@@ -106,7 +118,7 @@ class Samples:
         """真偽の並びで行を絞る。**列の対応を崩さない**ための唯一の入り口。"""
         return Samples(
             systems=self.systems,
-            n_ports=self.n_ports,
+            ports=self.ports,
             system=self.system[keep],
             port=self.port[keep],
             day=self.day[keep],
@@ -124,17 +136,17 @@ def to_samples(table: pa.Table) -> Samples:
     system_id = _strings(table, "system_id")
     systems, system = np.unique(system_id, return_inverse=True)
     ports, port = np.unique(
-        _port_keys(system_id, _strings(table, "station_id")), return_inverse=True
+        port_keys(system_id, _strings(table, "station_id")), return_inverse=True
     )
     return Samples(
         systems=tuple(str(one) for one in systems),
-        n_ports=len(ports),
+        ports=tuple(str(one) for one in ports),
         system=np.asarray(system, dtype=np.int8),
         port=np.asarray(port, dtype=np.int32),
         day=jst_ordinal(table.column("t")),
         h_min=_int16(table, "h_min"),
         minute_of_day=_int16(table, "minute_of_day"),
-        dow_type=_dow_type(_strings(table, "target_dow_type")),
+        dow_type=dow_type_indices(_strings(table, "target_dow_type")),
         weight=np.asarray(
             table.column("weight").combine_chunks().to_numpy(zero_copy_only=False),
             dtype=np.float32,
@@ -144,12 +156,16 @@ def to_samples(table: pa.Table) -> Samples:
     )
 
 
-def _port_keys(system_id: Strings, station_id: Strings) -> Strings:
-    """**`(system_id, station_id)` の組**を 1 本の文字列にする（衝突を避けるため）。"""
+def port_keys(system_id: Strings, station_id: Strings) -> Strings:
+    """**`(system_id, station_id)` の組**を 1 本の文字列にする（衝突を避けるため）。
+
+    **プロファイルの行を番号に直すときも同じ関数を通る**（`baselines/profile_climatology.py`）。
+    区切りが違えば別のポートを指す。
+    """
     return np.asarray(np.char.add(np.char.add(system_id, "/"), station_id), dtype=np.str_)
 
 
-def _dow_type(values: Strings) -> Int8:
+def dow_type_indices(values: Strings) -> Int8:
     """曜日種別を **`DOW_TYPE_ORDER` の番号**にする。**知らない値は例外にする。**
 
     **`DOW_TYPES` の番号ではない**（`weekday` は 2）。並びの正は

@@ -11,7 +11,7 @@
   * **割らない**——率にしてしまうと足せなくなり、分母の取り方も固定されてしまう
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Final
 
 import numpy as np
@@ -20,45 +20,17 @@ import pytest
 
 from bikechance_ml.features import asof, exclude, profile
 from bikechance_ml.features.constants import GRID_POINTS_PER_DAY, MISSING
-from bikechance_ml.features.grid import JST, build_grid, day_start, profile_path
+from bikechance_ml.features.grid import JST, build_grid, profile_path
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
+from tests import profile_fixture as pf
 
-DAY: Final[date] = date(2026, 9, 7)  # 月曜
-SATURDAY: Final[date] = date(2026, 9, 12)
-OPEN, SUSPENDED = 7, 1
-
-#: 収集の周期（秒）。**格子（5 分）より細かく**して、as-of が効くことを確かめる。
-CADENCE_S: Final[int] = 150
-
-
-def observations(
-    rows: list[tuple[str, str, int, int, int]], *, day: date = DAY, minutes: int = 24 * 60
-) -> pa.Table:
-    """`(system_id, station_id, bikes, docks, flags)` を、その日いっぱい繰り返す。
-
-    **形は `jobs/snapshot_table.py` の `SCHEMA` そのまま**（本番と同じ入口）。
-    """
-    start = day_start(day)
-    stamps = [
-        start + timedelta(seconds=step * CADENCE_S) for step in range(minutes * 60 // CADENCE_S + 1)
-    ]
-    return pa.table(
-        {
-            "system_id": [one[0] for one in rows for _ in stamps],
-            "station_id": [one[1] for one in rows for _ in stamps],
-            "observed_at": [at for _ in rows for at in stamps],
-            "fetched_at": [at for _ in rows for at in stamps],
-            "bikes": [one[2] for one in rows for _ in stamps],
-            "docks": [one[3] for one in rows for _ in stamps],
-            "flags": [one[4] for one in rows for _ in stamps],
-            "reported_age_s": [0 for _ in rows for _ in stamps],
-        },
-        schema=SNAPSHOT_SCHEMA,
-    )
-
-
-def daily(table: pa.Table, *, day: date = DAY) -> pa.Table:
-    return profile.build_day(profile.DayInputs(day=day, table=table, holidays=frozenset()))
+#: **観測の組み立ては `tests/profile_fixture.py` に置く**（PR D の検査と同じ入口を使う）。
+DAY: Final[date] = pf.DAY
+SATURDAY: Final[date] = pf.SATURDAY
+OPEN, SUSPENDED = pf.OPEN, pf.SUSPENDED
+CADENCE_S: Final[int] = pf.CADENCE_S
+observations = pf.observations
+daily = pf.daily
 
 
 def cell(table: pa.Table, station_id: str, slot15: int) -> dict[str, int]:

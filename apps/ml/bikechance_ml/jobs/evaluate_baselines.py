@@ -9,19 +9,22 @@
     set -a; . ./.env; set +a
     cd apps/ml
     ./.venv/bin/python -m bikechance_ml.jobs.evaluate_baselines \\
-        --from 2026-09-06 --to 2026-09-08 --eval-days 1 \\
-        --local .cache/features --out ../../docs/260908_eda_02_baseline.md
+        --from 2026-09-07 --to 2026-09-11 --eval-days 1 \\
+        --local .cache --out ../../docs/260908_eda_02_baseline.md
 
 `--from` / `--to` は **JST の暦日**（両端を含む）。`--local` を指すと、Storage の
-代わりにそこの `features/date=…/part.parquet` を読む（`build_features --out` で
-書いたものをそのまま使える）。
+代わりにそこの `features/date=…/part.parquet`（と `profiles/date=…`）を読む。
+
+**B2 はプロファイルから作る**（W5 プラン §6.4 の PR D）。読むのは**学習の最終日の版**で、
+検証日は 1 点も入っていない。無ければ従来どおり学習サンプルの行から作る。
+**`--no-profile` を付けると常に従来のやり方**になる（入れ替える前後を比べるため）。
 
 **日が足りなければ止まる。** 学習・パージ・検証を切り分けられないまま進むと、
 何を測ったのか分からない表が出る。
 """
 
 import argparse
-import io as _io
+import io
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -31,13 +34,15 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from bikechance_ml.baselines import climatology
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import harness, report
-from bikechance_ml.eval.dataset import NEEDED_COLUMNS, concat, to_samples
-from bikechance_ml.eval.split import split_days
+from bikechance_ml.eval.dataset import NEEDED_COLUMNS, Samples, concat, to_samples
+from bikechance_ml.eval.split import DaySplit, split_days
 from bikechance_ml.features import coverage
 from bikechance_ml.features.grid import features_path
-from bikechance_ml.io.supabase import PARQUET_BUCKET, SupabaseIo, open_storage
+from bikechance_ml.io.supabase import SupabaseIo, open_storage
+from bikechance_ml.jobs import climate
 
 
 class NoSamplesError(RuntimeError):
@@ -87,7 +92,7 @@ def load_days(
         body = _one_day(source, day, local)
         if body is None:
             continue
-        table = pq.read_table(_io.BytesIO(body))
+        table = pq.read_table(io.BytesIO(body))
         tables.append(table)
         found.append(day)
         weather[day] = coverage.measure(table)
@@ -97,12 +102,50 @@ def load_days(
 
 
 def _one_day(source: SupabaseIo | None, day: date, local: Path | None) -> bytes | None:
-    if local is not None:
-        path = local / features_path(day)
-        return path.read_bytes() if path.exists() else None
-    if source is None:  # pragma: no cover - 呼ぶ側が必ずどちらかを渡す
-        raise ValueError("Storage か --local のどちらかが要ります")
-    return source.download(PARQUET_BUCKET, features_path(day))
+    """1 日ぶんの学習サンプル。**プロファイルと同じ読み方**（`jobs/climate.py`）。"""
+    return climate.read_bytes(source, features_path(day), local)
+
+
+@dataclass(frozen=True)
+class Prepared:
+    """読んで、日を分け、**B2 の作り方まで決めたところ**。Storage を閉じたあとに使う。"""
+
+    loaded: Loaded
+    samples: Samples
+    split: DaySplit
+    climate: climatology.Source
+
+
+def prepare(
+    source: SupabaseIo | None,
+    days: Sequence[date],
+    local: Path | None,
+    options: argparse.Namespace,
+) -> Prepared:
+    """読み込みを 1 か所にまとめる。**Storage を開いていても手元でも同じ順**で進む。"""
+    loaded = load_days(source, days, local)
+    samples = to_samples(loaded.table)
+    split = split_days(loaded.days, options.eval_days, options.purge_days)
+    return Prepared(
+        loaded=loaded,
+        samples=samples,
+        split=split,
+        climate=_climate(source, split, local, samples, options.no_profile),
+    )
+
+
+def _climate(
+    source: SupabaseIo | None,
+    split: DaySplit,
+    local: Path | None,
+    samples: Samples,
+    no_profile: bool,
+) -> climatology.Source:
+    """B2 の作り方を決める。**読むのは学習期間の日だけ**（検証日を混ぜない）。"""
+    if no_profile:
+        return climatology.FromSamples()
+    found = climate.load(source, split.fit, local, samples.ports)
+    return found if found is not None else climatology.FromSamples()
 
 
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -115,6 +158,9 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--out", default=None, help="Markdown の出力先。省略すると標準出力")
     parser.add_argument("--title", default="ベースライン B0〜B3（W3 段 7）")
     parser.add_argument("--note", default="", help="表の前に置く但し書き")
+    parser.add_argument(
+        "--no-profile", action="store_true", help="気候値を学習サンプルの行から作る（従来）"
+    )
     return parser.parse_args(argv)
 
 
@@ -124,18 +170,18 @@ def run(argv: Sequence[str] | None = None) -> int:
     local = Path(options.local) if options.local else None
 
     if local is not None:
-        loaded = load_days(None, days, local)
+        prepared = prepare(None, days, local, options)
     else:
-        with open_storage(read_storage_config()) as source:
-            loaded = load_days(source, days, None)
+        with open_storage(read_storage_config()) as remote:
+            prepared = prepare(remote, days, None, options)
 
-    samples = to_samples(loaded.table)
-    split = split_days(loaded.days, options.eval_days, options.purge_days)
-    outcome = harness.run(samples, split)
+    outcome = harness.run(prepared.samples, prepared.split, climate=prepared.climate)
     # **被覆は出すが、ここでは止めない。** ベースラインは天気の列を読まない
     # （`NEEDED_COLUMNS` に無い）ので、混ざっても B0〜B3 の数字は変わらない。
     # 止めるのは成果物を書く `fit_lightgbm` だけである（W4 プラン §6.8 の PR I）
-    text = report.render_markdown(outcome, options.title, options.note, weather=loaded.weather)
+    text = report.render_markdown(
+        outcome, options.title, options.note, weather=prepared.loaded.weather
+    )
 
     if options.out is None:
         print(text)

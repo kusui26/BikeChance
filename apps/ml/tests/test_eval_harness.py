@@ -11,6 +11,7 @@ from typing import Final
 import numpy as np
 import pytest
 
+from bikechance_ml.baselines import climatology
 from bikechance_ml.eval import harness, report
 from bikechance_ml.eval.dataset import to_samples
 from bikechance_ml.eval.split import mask_of, split_days
@@ -48,9 +49,12 @@ def _day_of(row: dict[str, object]) -> date:
     return at.astimezone(JST).date()
 
 
+#: 3 日ぶんの分割（学習 1 日 / パージ 1 日 / 検証 1 日）。
+SPLIT = split_days(fixture.DAYS, evaluate_days=1, purge_days=1)
+
+
 def build(rows: list[dict[str, object]]) -> harness.Outcome:
-    samples = to_samples(fixture.to_table(rows))
-    return harness.run(samples, split_days(fixture.DAYS, evaluate_days=1, purge_days=1))
+    return harness.run(to_samples(fixture.to_table(rows)), SPLIT)
 
 
 def scenario() -> list[dict[str, object]]:
@@ -76,6 +80,7 @@ def scenario() -> list[dict[str, object]]:
     return rows
 
 
+SAMPLES = to_samples(fixture.to_table(scenario()))
 OUTCOME = build(scenario())
 
 
@@ -110,6 +115,71 @@ def test_b2_fallback_ratio_is_reported() -> None:
     """蓄積が短いあいだ B2 は実質 B1。**それが分かる形で出す**（W3-17）。"""
     for fit in OUTCOME.fits:
         assert 0.0 <= fit.b2_fallback_ratio <= 1.0
+
+
+def test_the_climatology_source_is_named_in_the_report() -> None:
+    """**同じ日でも作り方で B2 の中身が変わる。** どちらで測ったかを報告書に残す。"""
+    assert OUTCOME.climate == "学習サンプル（features/）"
+    text = report.render_markdown(OUTCOME, "検査", "", weather=WEATHER)
+    assert "学習サンプル（features/）" in text
+
+
+def test_a_source_given_from_outside_is_the_one_used() -> None:
+    """**渡した作り方がそのまま使われる**（W5 プラン §6.4 の PR D）。
+
+    ここでは「気候値をいっさい使わない」作り方を渡して、B2 が全行 B1 に落ちることで
+    確かめる——**渡したものが無視されていれば、落ちる割合が 1.0 にならない。**
+    """
+    outcome = harness.run(SAMPLES, SPLIT, climate=_NeverUsable())
+    assert outcome.climate == "検査用（いつも B1 に落ちる）"
+    for fit in outcome.fits:
+        assert fit.b2_cells == 0
+        assert fit.b2_fallback_ratio == 1.0
+
+
+def test_rows_whose_own_share_cannot_be_removed_are_left_out_of_the_blend() -> None:
+    """**引けない行を混合の当てはめに混ぜない**（W5 プラン §6.4 の PR D）。
+
+    プロファイルから作るときは「その行の日ぶん」を引くので、`daily.parquet` の無い日は
+    引けない。**引かずに混ぜると B2 が自分の答えを見たまま係数に効く。**
+    """
+    outcome = harness.run(SAMPLES, SPLIT, climate=_HalfTheRows())
+    for fit in outcome.fits:
+        assert 0 < fit.n_blend < outcome.n_fit
+
+
+class _HalfTheRows:
+    """`climatology.FromSamples` と同じだが、**混合に使う行を半分にする。**"""
+
+    def table(self, samples, target, keep):  # type: ignore[no-untyped-def]
+        return climatology.fit(samples, target, keep)
+
+    def leave_out(self, table, samples, target, fallback):  # type: ignore[no-untyped-def]
+        return climatology.predict_leave_one_out(table, samples, target, fallback)
+
+    def blend_rows(self, samples):  # type: ignore[no-untyped-def]
+        keep = np.zeros(len(samples), dtype=np.bool_)
+        keep[::2] = True
+        return keep
+
+    def describe(self) -> str:
+        return "検査用（行を半分にする）"
+
+
+class _NeverUsable:
+    """`climatology.Source` の最小の実装。**使えるセルが 1 つも無い表**を返す。"""
+
+    def table(self, samples, target, keep):  # type: ignore[no-untyped-def]
+        return climatology.fit(samples, target, np.zeros(len(samples), dtype=np.bool_))
+
+    def leave_out(self, table, samples, target, fallback):  # type: ignore[no-untyped-def]
+        return climatology.predict(table, samples, fallback)
+
+    def blend_rows(self, samples):  # type: ignore[no-untyped-def]
+        return np.ones(len(samples), dtype=np.bool_)
+
+    def describe(self) -> str:
+        return "検査用（いつも B1 に落ちる）"
 
 
 def test_report_renders_the_judgement_first() -> None:

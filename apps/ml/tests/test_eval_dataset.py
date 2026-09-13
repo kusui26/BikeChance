@@ -40,6 +40,31 @@ def test_systems_are_numbered_and_kept() -> None:
     assert sorted(samples.system.tolist()) == [0, 1]
 
 
+def test_the_port_names_are_in_the_number_order() -> None:
+    """**名前と番号は同じ並び。** 成果物もプロファイルも名前で持っており、番号に直す
+    並びが 2 か所に在ると、片方を直したときに静かに別のセルを指す
+    （W5 プラン §12 の 142。§12 の 132 と同じ形）。
+    """
+    rows = [
+        fixture.row(fixture.DAYS[0], "hellocycling", "b", 5, 3, 3, 1, 1),
+        fixture.row(fixture.DAYS[0], "docomo-cycle", "a", 5, 3, 3, 1, 1),
+    ]
+    samples = to_samples(fixture.to_table(rows))
+    assert samples.ports == ("docomo-cycle/a", "hellocycling/b")
+    assert [samples.ports[one] for one in samples.port] == ["hellocycling/b", "docomo-cycle/a"]
+    assert samples.n_ports == len(samples.ports)
+
+
+def test_take_keeps_the_port_names() -> None:
+    """行を絞っても**名前の並びは元のまま**（番号が指す先がずれないため）。"""
+    rows = [
+        fixture.row(fixture.DAYS[0], "hellocycling", "a", 5, 3, 3, 1, 1),
+        fixture.row(fixture.DAYS[1], "hellocycling", "b", 5, 3, 3, 1, 1),
+    ]
+    samples = to_samples(fixture.to_table(rows))
+    assert samples.take(np.array([True, False])).ports == samples.ports
+
+
 def test_take_keeps_the_reference_sizes() -> None:
     """**行を絞っても参照表の大きさは変わらない。** 番号が指す先がずれるため。"""
     rows = [

@@ -181,12 +181,12 @@ def test_the_training_side_and_the_serving_side_agree() -> None:
     学習（`eval/dataset.py`）と配信（`models/predictor.py`）が別々に `sorted()` を
     呼んでいたので、片方だけ直すと成果物が別のセルを指す状態だった。
     """
-    from bikechance_ml.eval.dataset import _dow_type
+    from bikechance_ml.eval.dataset import dow_type_indices
     from bikechance_ml.models.predictor import _dow_type_index
 
     values = [*DOW_TYPES, "weekday", "sat"]
     table = pa.table({"target_dow_type": pa.array(values, type=pa.string())})
-    training = _dow_type(np.array(values, dtype=np.str_))
+    training = dow_type_indices(np.array(values, dtype=np.str_))
     serving = _dow_type_index(table)
     assert training.tolist() == serving.tolist()
     assert [dow_type_name(one) for one in training] == values
@@ -194,7 +194,7 @@ def test_the_training_side_and_the_serving_side_agree() -> None:
 
 def test_an_unknown_dow_type_is_refused() -> None:
     """**知らない値で黙って番号を作らない**（`searchsorted` は必ず何かを返す）。"""
-    from bikechance_ml.eval.dataset import _dow_type
+    from bikechance_ml.eval.dataset import dow_type_indices
 
     with pytest.raises(ValueError, match="dow_type"):
-        _dow_type(np.array(["holiday"], dtype=np.str_))
+        dow_type_indices(np.array(["holiday"], dtype=np.str_))
