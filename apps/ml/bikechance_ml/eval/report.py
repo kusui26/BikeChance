@@ -20,6 +20,7 @@ from typing import Final
 
 from bikechance_ml.eval.harness import Outcome, SliceScores
 from bikechance_ml.eval.metrics import skill
+from bikechance_ml.eval.slices import ALL
 from bikechance_ml.eval.split import DaySplit
 from bikechance_ml.features.constants import FEATURE_SET
 from bikechance_ml.features.coverage import MAX_SPREAD_PP, Coverage, restrict, spread_pp
@@ -72,6 +73,26 @@ def render_markdown(
         *_horizon_block(outcome),
         "",
         *_bucket_block(outcome),
+        "",
+        *_cut_block(
+            outcome,
+            outcome.by_dow_type,
+            "6. 曜日種別別（重み付き Brier、水平はまとめる）",
+            "**W5 の PR D の効果はここに出る。** 曜日種別ごとに気候値のセルが埋まる"
+            "日が違うので（土は 09-19、日祝は 09-20 が 2 日目）、**種別で当たり方が"
+            "違うのは正常**である。どの種別も同じ割合で 10 水平を持つので、種別どうしは"
+            "比べられる。",
+            "曜日種別",
+        ),
+        "",
+        *_cut_block(
+            outcome,
+            outcome.by_time_of_day,
+            "7. 時間帯別（重み付き Brier、到着時刻で切る）",
+            "**切るのは `t + h`**（利用者が着く時刻）。`t` で切ると、朝に問い合わせて"
+            "昼に着く行が「朝」に入る（開発プラン §7.3）。",
+            "時間帯",
+        ),
         "",
         *_calibration_block(outcome),
         "",
@@ -303,35 +324,84 @@ def _bucket_row(one: SliceScores, compared: Sequence[str], extra: Sequence[str])
     )
 
 
-def _calibration_block(outcome: Outcome) -> list[str]:
-    lines = [
-        "## 6. キャリブレーション（ECE、重み付き）",
-        "",
-        "**「70% と言った日の 7 割で降る」からのずれ。** 合格基準は ECE < 0.03"
-        "（開発プラン §7.1）。B0 は 0 か 1 しか出さないので、ECE は「外した割合」に等しい。",
-        "",
-        _header("| system | ターゲット | h", outcome.models, "|"),
-        _rule(2, 1 + len(outcome.models)),
-    ]
+def _cut_block(
+    outcome: Outcome, parts: Sequence[SliceScores], title: str, note: str, label: str
+) -> list[str]:
+    """軸を 1 つ足したときの表。**`horizon` は使わず `cut` の札で並べる。**"""
+    lines = [f"## {title}", "", note, ""]
+    if not parts:
+        return [*lines, "（この軸に入る行がありません）"]
+    lines.extend(
+        [
+            _header(f"| system | ターゲット | {label} | n", outcome.models, "|"),
+            _rule(3, 1 + len(outcome.models)),
+        ]
+    )
     lines.extend(
         _row(
             one.slice.system,
             one.slice.target,
-            one.slice.horizon_label(),
-            *[f"{one.weighted[name].ece:.5f}" for name in outcome.models],
+            one.slice.cut or ALL,
+            f"{one.n:,}",
+            *[f"{one.weighted[name].brier:.5f}" for name in outcome.models],
         )
-        for one in outcome.by_horizon
+        for one in parts
     )
     return lines
+
+
+def _calibration_block(outcome: Outcome) -> list[str]:
+    """ECE を**2 つ並べる**（W5-07）。**合否は等頻度のほうで決める。**"""
+    lines = [
+        "## 8. キャリブレーション（ECE、重み付き）",
+        "",
+        "**「70% と言った日の 7 割で降る」からのずれ。** 合格基準は ECE < 0.03"
+        "（開発プラン §7.1）。B0 は 0 か 1 しか出さないので、ECE は「外した割合」に等しい。",
+        "",
+        "**判定に使うのは等頻度（15 区間）のほう**である（開発プラン §7.3、W5-07）。"
+        "等幅（20 区間）は **2026-09-13 より前の記録と比べるため**に並べてある——"
+        "配信中の確率は等幅の 20 区間のうち 4 つにしか入らず、**66.7% が最上位に集まる**"
+        "ので、**アプリの約束（85% 以上）がいちばん潰れる**（W5 プラン §2.3e）。",
+        "",
+        "### 8.1 等頻度 15 区間（**判定はこちら**）",
+        "",
+        _header("| system | ターゲット | h", outcome.models, "|"),
+        _rule(2, 1 + len(outcome.models)),
+    ]
+    lines.extend(_ece_row(one, outcome.models, uniform=False) for one in outcome.by_horizon)
+    lines.extend(
+        [
+            "",
+            "### 8.2 等幅 20 区間（**過去の記録と比べるため**）",
+            "",
+            _header("| system | ターゲット | h", outcome.models, "|"),
+            _rule(2, 1 + len(outcome.models)),
+        ]
+    )
+    lines.extend(_ece_row(one, outcome.models, uniform=True) for one in outcome.by_horizon)
+    return lines
+
+
+def _ece_row(one: SliceScores, models: Sequence[str], *, uniform: bool) -> str:
+    return _row(
+        one.slice.system,
+        one.slice.target,
+        one.slice.horizon_label(),
+        *[
+            f"{(one.weighted[name].ece_uniform if uniform else one.weighted[name].ece):.5f}"
+            for name in models
+        ],
+    )
 
 
 def _reliability_block(outcome: Outcome) -> list[str]:
     """信頼度図（開発プラン §7.1）。**画像を作らず、数と棒で見せる。**"""
     lines = [
-        "## 7. 信頼度図（B3、重み付き、system × ターゲットの総合）",
+        "## 9. 信頼度図（B3、重み付き、system × ターゲットの総合）",
         "",
         "**「p と言った行のうち、実際に何割が 1 だったか」。** 対角線に乗っていれば"
-        "確率として正しい。区間は 20 等分で、行の無い区間は出さない。",
+        "確率として正しい。**区間は等幅 20 等分**（図として読むため）で、行の無い区間は"
+        "出さない。**判定に使う ECE は §8.1 の等頻度**のほうで、区切りが違う。",
     ]
     for part in outcome.overall:
         lines.extend(
@@ -365,7 +435,7 @@ def _gap_bar(gap: float) -> str:
 def _weighting_block(outcome: Outcome) -> list[str]:
     """重み付きと重み無しの比較（§7.7）。**差が説明できることを確かめる。**"""
     return [
-        "## 8. 重み付きと重み無し",
+        "## 10. 重み付きと重み無し",
         "",
         "**重み付きが主**（開発プラン §6.2）。難所（`bikes <= 2` または `docks <= 2`）を "
         "4 倍濃く抽出しているので、**重み無しの Brier は難所に引かれて大きく出る**。"
@@ -391,7 +461,7 @@ def _weighting_row(one: SliceScores) -> str:
 
 def _fitting_block(outcome: Outcome) -> list[str]:
     lines = [
-        "## 9. 当てはめの中身",
+        "## 11. 当てはめの中身",
         "",
         "| ターゲット | B1 のセル | B1 に無かった行 | B2 のセル "
         "| **B2 が B1 に落ちた割合** | B3 の係数 |",

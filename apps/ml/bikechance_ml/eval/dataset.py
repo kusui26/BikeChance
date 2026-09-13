@@ -26,7 +26,7 @@ import numpy as np
 import pyarrow as pa
 
 from bikechance_ml.features.arrays import Bools, Float32, Int8, Int16, Int32, Strings
-from bikechance_ml.features.calendar import DOW_TYPES
+from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 from bikechance_ml.features.grid import JST_OFFSET_MS
 
 _MS_PER_DAY: Final[int] = 86_400_000
@@ -150,10 +150,18 @@ def _port_keys(system_id: Strings, station_id: Strings) -> Strings:
 
 
 def _dow_type(values: Strings) -> Int8:
-    """曜日種別を `DOW_TYPES` の番号にする。**知らない値は例外にする。**"""
-    known = np.array(DOW_TYPES, dtype=np.str_)
-    index = np.searchsorted(np.sort(known), values)
-    if not bool(np.all(np.sort(known)[np.clip(index, 0, len(known) - 1)] == values)):
+    """曜日種別を **`DOW_TYPE_ORDER` の番号**にする。**知らない値は例外にする。**
+
+    **`DOW_TYPES` の番号ではない**（`weekday` は 2）。並びの正は
+    `features/calendar.py` の `DOW_TYPE_ORDER` 1 つで、**配信側
+    （`models/predictor.py`）も同じ定数を読む**——以前は両方が別々に `sorted()` を
+    呼んでいて、**規約が 2 か所に無名で在った**（W5 プラン §12 の 132）。
+
+    `DOW_TYPE_ORDER` は昇順なので、`searchsorted` にそのまま渡せる。
+    """
+    order = np.array(DOW_TYPE_ORDER, dtype=np.str_)
+    index = np.searchsorted(order, values)
+    if not bool(np.all(order[np.clip(index, 0, len(order) - 1)] == values)):
         raise ValueError("dow_type に想定外の値が入っています")
     return np.asarray(index, dtype=np.int8)
 

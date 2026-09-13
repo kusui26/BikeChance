@@ -13,14 +13,18 @@ import csv
 from datetime import date
 from pathlib import Path
 
+import numpy as np
+import pyarrow as pa
 import pytest
 
 from bikechance_ml.features.calendar import (
     DAY_TYPES,
+    DOW_TYPE_ORDER,
     DOW_TYPES,
     dates_between,
     day_type,
     dow_type,
+    dow_type_name,
     is_day_before_holiday,
     is_last_business_day,
     is_new_year,
@@ -147,3 +151,50 @@ def test_december_last_business_day_avoids_the_new_year_period() -> None:
 def test_leap_day_is_handled(day: date) -> None:
     """うるう日でも例外にならない（2028 年は祝日データの範囲外だが規則は効く）。"""
     assert day_type(day, HOLIDAYS) in DAY_TYPES
+
+
+# ── 曜日種別の番号（W5 の PR C、§12 の 132）────────────────────
+# **値を変えると、Storage に在る成果物が別のセルを指す。** 例外は出ず、確率だけが
+# 静かに変わる。だから「直したくなったとき」に落ちる検査をここに置く。
+def test_the_number_for_each_dow_type_is_pinned() -> None:
+    """**この並びは契約である。** `DOW_TYPES` の並びではない。
+
+    気候値の成果物は `(ポート, 曜日種別, 15 分枠)` を平たい配列で持ち、**曜日種別は
+    この番号で引く**。`DOW_TYPES` の順に「直す」と、`weekday` の 66 万セルが
+    `sun_holiday` として読まれる（W5 プラン §2.3f）。
+    """
+    assert DOW_TYPE_ORDER == ("sat", "sun_holiday", "weekday")
+    assert DOW_TYPE_ORDER != DOW_TYPES, "**わざと違う。** 同じにすると過去の成果物が壊れる"
+
+
+def test_the_name_comes_back_from_the_number() -> None:
+    """**報告書はここを通す。** `DOW_TYPES[index]` と書くと 1 つずれる。"""
+    assert [dow_type_name(index) for index in range(len(DOW_TYPE_ORDER))] == list(DOW_TYPE_ORDER)
+    assert dow_type_name(2) == "weekday"
+    # **これが「直したくなる」書き方。** 実際に W5 プランの最初の表がこうなっていた
+    assert DOW_TYPES[2] == "sun_holiday", "素直に引くと日祝になってしまう"
+
+
+def test_the_training_side_and_the_serving_side_agree() -> None:
+    """**規約が 2 か所に無名で在った**（W5 プラン §12 の 132）。いまは同じ定数を読む。
+
+    学習（`eval/dataset.py`）と配信（`models/predictor.py`）が別々に `sorted()` を
+    呼んでいたので、片方だけ直すと成果物が別のセルを指す状態だった。
+    """
+    from bikechance_ml.eval.dataset import _dow_type
+    from bikechance_ml.models.predictor import _dow_type_index
+
+    values = [*DOW_TYPES, "weekday", "sat"]
+    table = pa.table({"target_dow_type": pa.array(values, type=pa.string())})
+    training = _dow_type(np.array(values, dtype=np.str_))
+    serving = _dow_type_index(table)
+    assert training.tolist() == serving.tolist()
+    assert [dow_type_name(one) for one in training] == values
+
+
+def test_an_unknown_dow_type_is_refused() -> None:
+    """**知らない値で黙って番号を作らない**（`searchsorted` は必ず何かを返す）。"""
+    from bikechance_ml.eval.dataset import _dow_type
+
+    with pytest.raises(ValueError, match="dow_type"):
+        _dow_type(np.array(["holiday"], dtype=np.str_))

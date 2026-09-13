@@ -497,13 +497,17 @@ def _judgement_lines(outcome: harness.Outcome) -> list[str]:
         >= ADOPTION_IMPROVEMENT
     ]
     worse = [one for one in judgeable if one.weighted[MODEL_NAME].brier > one.weighted["B3"].brier]
+    # **判定は等頻度のほう**（W5-07）。等幅も並べる——2026-09-13 より前の記録はすべて
+    # 等幅で、片方だけ書くと「悪くなった」のか「見えるようになった」のか分からない
     ece = max((one.weighted[MODEL_NAME].ece for one in outcome.by_horizon), default=0.0)
+    uniform = max((one.weighted[MODEL_NAME].ece_uniform for one in outcome.by_horizon), default=0.0)
     return [
         f"- **判定対象のバケツ**：{len(judgeable)} / {len(outcome.by_bucket)} 件",
         f"- **B3 を 10% 以上改善**：{len(improved)} 件",
         f"- **B3 を下回った**：{len(worse)} 件",
-        f"- **ECE の最大（水平別）**：{ece:.5f}"
+        f"- **ECE の最大（水平別、等頻度 15）**：{ece:.5f}"
         f"（基準 {MAX_ECE} {'を満たす' if ece < MAX_ECE else 'を超える'}）",
+        f"- **同（等幅 20。過去の記録と比べるため）**：{uniform:.5f}",
     ]
 
 
