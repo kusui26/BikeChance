@@ -65,7 +65,7 @@ from bikechance_ml.features.constants import (
     NOW_LOOKBACK_MINUTES,
     ROLL_MINUTES,
     SAME_TIME_MINUTES,
-    STRATUM_TIGHT,
+    SAMPLE_WEIGHT,
     STRATUM_UNIFORM,
 )
 from bikechance_ml.features.grid import (
@@ -280,13 +280,14 @@ def build_day(inputs: DayInputs) -> Built:
     state = _grid_state(inputs, grid)
     base = _base_exclusion(inputs, state, grid)
     pre = _precompute(inputs, grid, state)
-    sampling = _sampling(inputs, grid, state)
+    # **抽出に要るのは種だけ**（一様に引くので基準時刻の状態を見ない。W5 プラン §6.9）
+    seeds = _seeds(inputs)
     parts: list[pa.Table] = []
     # 基準時刻の側で落ちた行は**全水平で落ちる**ので、件数を水平の数だけ数える
     counts = {reason: number * len(HORIZONS_MIN) for reason, number in base.counts.items()}
     total = int(base.keep.size) * len(HORIZONS_MIN)
     for index, horizon in enumerate(HORIZONS_MIN):
-        part, dropped = _one_horizon(inputs, grid, state, pre, sampling, base.keep, index, horizon)
+        part, dropped = _one_horizon(inputs, grid, state, pre, seeds, base.keep, index, horizon)
         parts.append(part)
         for reason, number in dropped.items():
             counts[reason] = counts.get(reason, 0) + number
@@ -499,14 +500,6 @@ def _base_exclusion(
 
 # ── グリッド上の派生量（水平に依らないもの）──────────────────
 @dataclass(frozen=True)
-class Sampling:
-    """抽出に要るもの。**学習だけが持つ**（推論は全件を出す）。"""
-
-    seeds: UInt64
-    tight: Bools
-
-
-@dataclass(frozen=True)
 class Precomputed:
     """基準時刻について、水平によらず 1 度だけ作れるもの。**学習と推論で共通。**"""
 
@@ -553,15 +546,6 @@ def _precompute(inputs: Inputs, grid: Grid, state: GridState) -> Precomputed:
         weather_cell=inputs.weather.cell_at(facts.lat, facts.lon),
         # **基準時刻ごとに 1 度だけ決める。** 引くのは `available_at <= t` の最新
         weather_issue=inputs.weather.issue_at(np.asarray(grid.day_times_ms(), dtype=np.int64)),
-    )
-
-
-def _sampling(inputs: DayInputs, grid: Grid, state: GridState) -> Sampling:
-    """抽出の材料。**学習でしか作らない**（20,750 ポートぶんの種を引く手間を省く）。"""
-    day = grid.day_slice()
-    return Sampling(
-        seeds=_seeds(inputs),
-        tight=sample.is_tight(state.bikes[:, day], state.docks[:, day]),
     )
 
 
@@ -693,7 +677,7 @@ def _one_horizon(
     grid: Grid,
     state: GridState,
     pre: Precomputed,
-    sampling: Sampling,
+    seeds: UInt64,
     alive: Bools,
     index: int,
     horizon: int,
@@ -710,19 +694,19 @@ def _one_horizon(
         bikes=state.label_bikes[:, target],
         docks=state.label_docks[:, target],
     )
-    accepted = dropped.keep & _accept(sampling, index, len(grid.day_times_ms()))
+    accepted = dropped.keep & _accept(seeds, index, len(grid.day_times_ms()))
     stations, points = np.nonzero(accepted)
     picked = Picked(stations, points, index, horizon)
-    return _assemble(inputs, grid, state, pre, sampling, picked, target), dropped.counts
+    return _assemble(inputs, grid, state, pre, picked, target), dropped.counts
 
 
-def _accept(sampling: Sampling, index: int, n_grid: int) -> Bools:
+def _accept(seeds: UInt64, index: int, n_grid: int) -> Bools:
     """抽出の判定。**行ごとに 1 回だけ引く**（W3 プラン §9.3）。"""
     counters = (np.arange(n_grid, dtype=np.uint64) * np.uint64(len(HORIZONS_MIN))) + np.uint64(
         index
     )
-    drawn = sample.uniform_array(sampling.seeds[:, None], counters[None, :])
-    return np.asarray(drawn < sample.rate_of(sampling.tight), dtype=np.bool_)
+    drawn = sample.uniform_array(seeds[:, None], counters[None, :])
+    return sample.accepted(drawn)
 
 
 # ── 列の組み立て ──────────────────────────────────────────────
@@ -753,14 +737,13 @@ def _assemble(
     grid: Grid,
     state: GridState,
     pre: Precomputed,
-    sampling: Sampling,
     picked: Picked,
     target: Span,
 ) -> pa.Table:
     """抽出された行を `SCHEMA` の列にする（学習）。"""
     columns = _feature_columns(inputs, grid, state, pre, picked)
     columns.update(_label_columns(state, picked, target))
-    columns.update(_sampling_columns(sampling, picked))
+    columns.update(_sampling_columns(picked))
     return to_table(columns)
 
 
@@ -789,12 +772,17 @@ def _identity_columns(grid: Grid, pre: Precomputed, picked: Picked) -> dict[str,
     }
 
 
-def _sampling_columns(sampling: Sampling, picked: Picked) -> dict[str, pa.Array]:
-    """逆抽出確率と層。**学習だけが持つ**（推論は全件を出すので重みが無い）。"""
-    tight = _take(sampling.tight, picked)
+def _sampling_columns(picked: Picked) -> dict[str, pa.Array]:
+    """逆抽出確率と層。**学習だけが持つ**（推論は全件を出すので重みが無い）。
+
+    一様に引くので**どちらも定数**になる。**それでも列は残す**——2026-09-15 までの
+    `features/` は層化で作ってあり、新しい日と混ぜて読むときに行ごとの重みが要る
+    （`constants.SAMPLE_WEIGHT`）。Parquet では定数の列は辞書符号化でほぼ場所を取らない。
+    """
+    count = len(picked)
     return {
-        "weight": _col(sample.weight_of(tight), "weight"),
-        "stratum": _col(np.where(tight, STRATUM_TIGHT, STRATUM_UNIFORM), "stratum"),
+        "weight": _constant(SAMPLE_WEIGHT, "weight", count),
+        "stratum": _constant(STRATUM_UNIFORM, "stratum", count),
     }
 
 

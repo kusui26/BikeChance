@@ -22,13 +22,14 @@ from bikechance_ml.features import build, coverage
 from bikechance_ml.features import weather as weather_module
 from bikechance_ml.features.constants import (
     FEATURE_SET,
+    GRID_MINUTES,
     HORIZONS_MIN,
     MAX_STALENESS_S,
-    STRATUM_TIGHT,
+    SAMPLE_RATE,
+    SAMPLE_WEIGHT,
     STRATUM_UNIFORM,
-    TIGHT_RATE,
-    UNIFORM_RATE,
 )
+from bikechance_ml.features.sample import counter, station_seed, uniform
 from bikechance_ml.features.schema import SCHEMA, MissingColumnError, feature_columns, to_table
 from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.build_features import to_parquet_bytes
@@ -186,17 +187,39 @@ def test_collision_guard_is_recorded_even_when_it_is_rare() -> None:
     assert "collision" in BUILT.stats.excluded
 
 
-def test_weights_are_the_inverse_of_the_stratum_rate() -> None:
+def test_every_row_has_the_same_weight() -> None:
+    """一様に引くので**重みは定数**（2026-09-16、W5 プラン §6.9 の PR I）。"""
     for row in ROWS:
-        expected = 1 / TIGHT_RATE if row["stratum"] == STRATUM_TIGHT else 1 / UNIFORM_RATE
-        assert abs(float(str(row["weight"])) - expected) < 1e-6
+        assert abs(float(str(row["weight"])) - SAMPLE_WEIGHT) < 1e-6
 
 
-def test_stratum_matches_the_base_state() -> None:
-    """難所は `bikes <= 2` または `docks <= 2`。**水平によらない。**"""
+def test_every_row_is_in_the_uniform_stratum() -> None:
+    """**層は 1 つしか出ない。** 列は残してあるが、値は 1 種類である。
+
+    2026-09-15 までのファイルには `"tight"` も入っている——**混ぜて読むときに
+    行ごとの重みが効く**ので、列そのものは落とさない（`constants.SAMPLE_WEIGHT`）。
+    """
+    assert {str(row["stratum"]) for row in ROWS} == {STRATUM_UNIFORM}
+
+
+def test_the_accepted_rows_are_exactly_those_under_the_rate() -> None:
+    """**採った行を種から作り直して突き合わせる。**
+
+    「抽出率どおりの割合が入っている」では、**台数で分岐する経路が戻ってきても
+    気づけない**（割合は同じまま中身だけ変わる）。ここでは 1 行ずつ乱数を作り直し、
+    `u < SAMPLE_RATE` が**そのまま採否になっている**ことを見る。
+    """
+    horizon_index = {horizon: index for index, horizon in enumerate(HORIZONS_MIN)}
     for row in ROWS:
-        tight = int(str(row["bikes"])) <= 2 or int(str(row["docks"])) <= 2
-        assert row["stratum"] == (STRATUM_TIGHT if tight else STRATUM_UNIFORM)
+        seed = station_seed(fixture.DAY, str(row["system_id"]), str(row["station_id"]))
+        drawn = uniform(
+            seed,
+            counter(
+                int(str(row["minute_of_day"])) // GRID_MINUTES,
+                horizon_index[int(str(row["h_min"]))],
+            ),
+        )
+        assert drawn < SAMPLE_RATE
 
 
 def test_weight_sum_is_within_a_factor_of_the_population() -> None:

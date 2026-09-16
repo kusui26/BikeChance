@@ -19,8 +19,8 @@ from bikechance_ml.features.constants import (
     LAG_MINUTES,
     ROLL_MINUTES,
     SAME_TIME_MINUTES,
-    TIGHT_RATE,
-    UNIFORM_RATE,
+    SAMPLE_RATE,
+    SAMPLE_WEIGHT,
     WEATHER_GRID_LAT_STEP,
     WEATHER_GRID_LON_STEP,
     WEATHER_LEAD_HOURS,
@@ -61,10 +61,14 @@ def test_grid_covers_the_day() -> None:
     assert GRID_POINTS_PER_DAY * GRID_MINUTES == 24 * 60
 
 
-def test_tight_rate_is_higher_than_uniform() -> None:
-    """難所を厚く取る（開発プラン §6.2）。逆になっていたら重みの意味が反転する。"""
-    assert TIGHT_RATE > UNIFORM_RATE > 0
-    assert TIGHT_RATE < 1
+def test_the_weight_is_the_inverse_of_the_rate() -> None:
+    """**重みは率の逆数。** ここがずれると、母集団の推定が静かに倍率ぶん狂う。
+
+    2026-09-16 に層化をやめて率が 1 つになった（W5 プラン §6.9 の PR I）。
+    それまでは「難所 4% と他 1%」の 2 つで、重みも 25 と 100 の 2 つだった。
+    """
+    assert 0 < SAMPLE_RATE < 1
+    assert SAMPLE_WEIGHT == 1 / SAMPLE_RATE
 
 
 def typescript_number(name: str) -> float:
