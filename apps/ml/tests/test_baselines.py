@@ -52,7 +52,11 @@ def test_b1_learns_the_rate_per_cell() -> None:
 
 
 def test_b1_uses_the_sampling_weights() -> None:
-    """**難所を 4 倍濃く抽出している**ので、素の平均は母集団の確率にならない。"""
+    """**重みは行ごとに違いうる**ので、素の平均は母集団の確率にならない。
+
+    2026-09-16 からは一様に引くので実データの重みは定数だが、**09-15 以前の日を
+    混ぜれば 25 と 100 が並ぶ**（W5 プラン §6.9 の PR I）。重みを読む経路は要る。
+    """
     rows = [
         fixture.row(DAY0, "hellocycling", "a", 5, 0, 9, 1, 1, weight=25.0),
         fixture.row(DAY0, "hellocycling", "b", 5, 0, 9, 0, 1, weight=75.0),
@@ -262,7 +266,7 @@ def test_b3_predictions_stay_inside_the_unit_interval() -> None:
 
 
 def test_b3_uses_the_weights() -> None:
-    """重みを無視すると、難所に寄った係数になる。"""
+    """重みを無視すると、重い行を軽んじた係数になる。"""
     x = np.zeros((2, 3))
     x[0, 0], x[1, 0] = -1.0, 1.0
     heavy = blend.fit(x, np.array([1, 0], dtype=np.int8), np.array([99.0, 1.0], dtype=np.float32))

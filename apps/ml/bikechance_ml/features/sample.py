@@ -1,20 +1,26 @@
-"""層化抽出と逆抽出確率の重み（W3-14、W3 プラン §9.3）。
+"""抽出と逆抽出確率の重み（W3-14、W3 プラン §9.3。**2026-09-16 に一様へ変えた**）。
 
-1 日の（ポート, 基準時刻, 水平）は **5,731 万ペア**（実測）で、全部は載らない。
-一様 1% に加えて、**難所**（`bikes <= 2` または `docks <= 2`。実測 45.4%）を 4% で引く。
+1 日の（ポート, 基準時刻, 水平）は **5,875 万行**（実測）で、全部は載らない。
+**一様に 1% を引く**（`SAMPLE_RATE`）。
 
-**2 回抽選しない。** 行ごとに一様乱数を 1 つ作り、難所なら閾値 4%、それ以外は 1% で
-判定する。「一様に 1% 引いてから難所を 3% 足す」と独立抽選になり、包含確率が
-`1 − 0.99 × 0.97 = 3.97%` になって重みが厳密でなくなる。1 回の判定なら重みは
-ちょうど 25 と 100 になり、**重みの総和が母集団のペア数に一致する**（§7.6 の検査）。
+**層化はやめた**（W5 プラン §6.9 の PR I）。「稀で重要な場面を濃く取る」のが目的
+だったが、**難所は稀ではない**——母集団の 84.3% が `bikes <= 2 または docks <= 2` で、
+4% と 1% の層化が同じ行数の一様抽出より多く取れる難所は **+13.3%** しかなかった。
+理由と閾値ごとの数字は `constants.SAMPLE_RATE` に書いてある。
+
+**引くのは行ごとに 1 回。** `(ポート, 基準時刻, 水平)` の 1 行につき乱数を 1 つ作り、
+`SAMPLE_RATE` と比べる。**2 回抽選しない**——「一様に引いてから何かを足す」と独立抽選に
+なり、包含確率が掛け算になって重みが厳密でなくなる。1 回なら重みはちょうど
+`1 / SAMPLE_RATE` で、**重みの総和が母集団のペア数に一致する**（§7.6 の検査）。
 
 **乱数は決定的なハッシュで作る。** `random.seed` に頼ると、並列化やポートの並び順で
 変わる。種はポート毎に `(日付, system_id, station_id)` から作り（blake2b）、行ごとの
 値は splitmix64 で `(基準時刻の番号, 水平の番号)` を混ぜて得る。**同じ日を 2 回作れば
-同じ行が出る**（§7.6 の再現性）。
+同じ行が出る**（§7.6 の再現性）。**層をやめても種と通し番号は変えていない**ので、
+2026-09-15 までの日をこの種で作り直せば、当時の抽出をそのまま再現できる。
 
 スカラ版と numpy 版の 2 つを持つ。速い側だけを持つと規則が読めなくなり、遅い側だけを
-持つと 5,731 万回を回せない。**両者が一致することを `tests/test_features_sample.py` が
+持つと 5,875 万回を回せない。**両者が一致することを `tests/test_features_sample.py` が
 固定する。**
 """
 
@@ -24,15 +30,8 @@ from typing import Final
 
 import numpy as np
 
-from bikechance_ml.features.arrays import Bools, Float32, Float64, Int16, UInt64
-from bikechance_ml.features.constants import (
-    HORIZONS_MIN,
-    STRATUM_TIGHT,
-    STRATUM_UNIFORM,
-    TIGHT_RATE,
-    TIGHT_THRESHOLD,
-    UNIFORM_RATE,
-)
+from bikechance_ml.features.arrays import Bools, Float64, UInt64
+from bikechance_ml.features.constants import HORIZONS_MIN, SAMPLE_RATE
 
 _MASK: Final[int] = (1 << 64) - 1
 
@@ -68,6 +67,15 @@ def uniform_array(seeds: UInt64, counters: UInt64) -> Float64:
     return np.asarray((mixed >> np.uint64(_DROP_BITS)).astype(np.float64) / _SCALE)
 
 
+def accepted(drawn: Float64) -> Bools:
+    """引いた値が抽出率の内側か。**層は見ない**（一様に引く）。
+
+    **抽出の規則はこの 1 行だけ。** 呼ぶ側に `< SAMPLE_RATE` を書かせると、
+    率を変えたときに直し漏れる場所ができる。
+    """
+    return np.asarray(drawn < SAMPLE_RATE, dtype=np.bool_)
+
+
 def _mix64(state: int) -> int:
     z = (state + _GAMMA) & _MASK
     z = ((z ^ (z >> 30)) * _MUL1) & _MASK
@@ -85,22 +93,3 @@ def _mix64_array(state: UInt64) -> UInt64:
     z = (z ^ (z >> np.uint64(30))) * np.uint64(_MUL1)
     z = (z ^ (z >> np.uint64(27))) * np.uint64(_MUL2)
     return np.asarray(z ^ (z >> np.uint64(31)), dtype=np.uint64)
-
-
-def is_tight(bikes: Int16, docks: Int16) -> Bools:
-    """難所か。**`t` 時点の水準で決まる**ので、水平によらず同じ値になる。"""
-    return np.asarray((bikes <= TIGHT_THRESHOLD) | (docks <= TIGHT_THRESHOLD), dtype=np.bool_)
-
-
-def rate_of(tight: Bools) -> Float64:
-    """層ごとの抽出率。"""
-    return np.asarray(np.where(tight, TIGHT_RATE, UNIFORM_RATE), dtype=np.float64)
-
-
-def weight_of(tight: Bools) -> Float32:
-    """逆抽出確率の重み。`1 / 抽出率` なので 25 と 100 になる。"""
-    return np.asarray(1.0 / rate_of(tight), dtype=np.float32)
-
-
-def stratum_name(tight: bool) -> str:
-    return STRATUM_TIGHT if tight else STRATUM_UNIFORM

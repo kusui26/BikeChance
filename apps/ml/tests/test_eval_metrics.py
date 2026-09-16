@@ -47,7 +47,7 @@ def test_brier_of_a_perfect_prediction_is_zero() -> None:
 
 
 def test_brier_weights_the_rows() -> None:
-    """**重み付きが主**（開発プラン §6.2）。難所を 4 倍濃く抽出しているため。"""
+    """**重み付きが主**（開発プラン §6.2）。重みは逆抽出確率である。"""
     # 誤差 0.01 の行を 3、誤差 0.81 の行を 1
     assert brier(y(1, 1), p(0.9, 0.1), w(3, 1)) == pytest.approx((3 * 0.01 + 0.81) / 4)
 
@@ -190,7 +190,7 @@ def test_the_bounds_are_the_values_that_landed_there() -> None:
 
 
 def test_the_quantile_bins_follow_the_weights() -> None:
-    """**重みで等分する**（重み無しの件数ではない）。難所を 4 倍濃く取っているため。"""
+    """**重みで等分する**（重み無しの件数ではない）。母集団の分布で読むため。"""
     values = p(0.1, 0.2, 0.3, 0.4)
     labels = y(0, 0, 1, 1)
     weights = w(100.0, 1.0, 1.0, 1.0)
