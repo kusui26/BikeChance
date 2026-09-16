@@ -544,6 +544,38 @@ create table public.station_hourly (
 `usable_points` と同じ規律）。片方だけの点を数えると 2 つの平均が別の母数に乗る。
 **観測が 1 度も無かった時間帯は行を作らない**（0 を入れると「0 台だった」に見える）。
 
+### 4.17 `model_daily_metrics` — 配った確率の日次成績（0050）
+
+```sql
+create table public.model_daily_metrics (
+  model_version text, metric_date date,   -- **JST の暦日**（generated_at が属する日）
+  system_id text, target text,            -- 'bike' | 'dock'
+  h_min smallint, bucket text,            -- バケツは 0 / 1 / 2 / 3-5 / 6-10 / 11+ と「全体」
+  n integer, positives real,
+  brier real, log_loss real, ece real, ece_uniform real,
+  brier_b0 real, skill_vs_b0 real,        -- 参照は **B0（持続）**。測れなければ NULL
+  primary key (model_version, metric_date, system_id, target, h_min, bucket)
+);
+```
+
+`/ml/evaluate`（Vercel Cron 04:40 JST）が**前日ぶんを 1 回で入れる**。読むのは
+`forecast-log/`（1 サイクル 1 ファイル）と `gbfs-parquet` の実測で、**ラベルも除外も
+学習と同じ関数**（`features/labels.py`・`features/exclude.py`）を通る。
+
+**全数であって標本ではない。** 配った全ポート × 全サイクルを数えるので抽出の重みが無い。
+**オフラインの報告書と比べるときは「重み付き」のほう**と並べる——重みは「標本から母集団を
+推定する」ためのもので、**その推定値と全数の値が同じものを指す**（W5 プラン §12 の 165）。
+
+**水平ごとに 1 行。** 全水平をまとめた値は `n` で重み付けして足せば出る（Brier も log loss も
+陽性率も行の平均だから）。**ECE だけは足せない**——が、ECE は水平ごとに見るものである。
+
+| | 見込み |
+|---|---|
+| 行 | 1 日 1 版あたり **280**（2 システム × 2 ターゲット × 10 水平 × 7 バケツ） |
+| 1 年 | 約 10 万行・**10 MB 未満**。**保持の規則は置かない**（配った版の成績を消さない） |
+
+**`model_versions` への外部キーは意図したもの**：**成績の残っている版は消せない。**
+
 ## 5. 公開ビュー（`/v1` が読む唯一の面）
 
 匿名ロールに権限があるのは**この 4 つだけ**（0046 で `v1_station_hourly` を足した）。基底テーブルには一切手が届かない（pgTAP `0010_public_views.sql` が固定する。**数だけでなく名前も**——1 枚消して 1 枚足したときに素通りしないため）。**列の一覧も pgTAP が固定している**（`columns_are`）。読む側は `select *` をせず列を並べるので（`apps/web/lib/api/view-query.ts`）、片方だけ変えると実行時まで気づけない。
@@ -641,6 +673,7 @@ create table public.station_hourly (
 | `weather_grid_cells(lat_step, lon_step)` | ポートが分布する気象格子を返す |
 | `snapshot_partition_exists(at)` | 再構築スクリプトの事前確認 |
 | `watchdog_collect()` / `monitor_feeds()` / `run_maintenance(keep_days)` / `refresh_station_activity()` / `compute_daily_quality(date)` | pg_cron が呼ぶ運用ジョブ |
+| **`upsert_model_daily_metrics(rows)`** | **配った確率の日次成績**（0050、W5 の PR L）。主キー `(版, 日, システム, ターゲット, 水平, バケツ)` で衝突させるので、**同じ日を 2 回測っても行は増えない** |
 | **`v1_station_cells(west, south, east, north, cell_deg, system, fresh_after, horizons)`** | **低ズームの格子集約**（0049、W5 の PR E）。台数は**観測のあるポートだけ**の合計、確率は**水平ごとの最大を取った曲線**（補間はしない——呼ぶ側が `interpolateForecast` を通す）。`fresh_after` と `horizons` は**呼ぶ側が渡す**（規則の正は `packages/shared`） |
 
 ---

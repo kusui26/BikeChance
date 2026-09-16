@@ -539,6 +539,46 @@ class SupabaseIo:
         """
         self.upload(FORECAST_LOG_BUCKET, path, body, PARQUET_CONTENT_TYPE)
 
+    def list_forecast_log(self, prefix: str, limit: int) -> tuple[str, ...]:
+        """予測ログの 1 階層を並べる（W5 プラン §6.12 の PR L）。
+
+        **返すのは `prefix` からの相対名**（Storage の list はそう返す）。`sortBy` を
+        付けるのは**同じ入力から同じ並びを得る**ため——測り直したときに順序だけが
+        違う要約が出ると、差分を読むのに手間がかかる。
+        """
+        response = self._request(
+            "POST",
+            f"/storage/v1/object/list/{FORECAST_LOG_BUCKET}",
+            "storage",
+            json={
+                "prefix": prefix,
+                "limit": limit,
+                "sortBy": {"column": "name", "order": "asc"},
+            },
+        )
+        rows = as_list(response.json(), "storage.list")
+        return tuple(as_str(as_dict(one, "storage.list").get("name"), "name") for one in rows)
+
+    def download_forecast_log(self, path: str) -> bytes | None:
+        """予測ログの 1 サイクルぶんを取る。**無ければ None。**"""
+        return self.download(FORECAST_LOG_BUCKET, path)
+
+    def download_parquet(self, path: str) -> bytes | None:
+        """実測の Parquet を取る。**畳んでいない時間帯は単に無い。**"""
+        return self.download(PARQUET_BUCKET, path)
+
+    def upsert_model_daily_metrics(self, rows: Sequence[Mapping[str, object]]) -> int:
+        """日次評価の結果をまとめて書く（0050）。**主キーで衝突させるので増えない。**"""
+        if not rows:
+            return 0
+        response = self._request(
+            "POST",
+            "/rest/v1/rpc/upsert_model_daily_metrics",
+            "rest",
+            json={"p_rows": list(rows)},
+        )
+        return as_int(response.json(), "upsert_model_daily_metrics")
+
     def upload(self, bucket: str, path: str, body: bytes, content_type: str) -> None:
         """Storage の 1 オブジェクトを置く（上書き）。"""
         self._request(

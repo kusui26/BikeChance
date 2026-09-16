@@ -178,7 +178,9 @@ create function pg_temp.rest_called() returns text[] language sql immutable as $
     -- ポートの大きさ（apps/ml の build_reference。0045）
     'upsert_capacity_est',
     -- 低ズームの格子集約（apps/web の /v1/stations。0049）
-    'v1_station_cells'
+    'v1_station_cells',
+    -- 実運用の日次評価（apps/ml の /ml/evaluate。0050）
+    'upsert_model_daily_metrics'
   ];
 $$;
 

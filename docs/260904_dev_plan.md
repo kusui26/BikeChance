@@ -1359,7 +1359,9 @@ forecast-log/{system_id}/date=YYYY-MM-DD/hour=HH/{base_epoch_s}_{model_version}.
 
 ### 8.5 継続評価（予測 vs 実測）
 
-- 日次ジョブ（Vercel Cron `40 19 * * *` = 04:40 JST → `/ml/evaluate`）：前日の `forecast-log` と Parquet 実測を結合し、モデル版・水平・ターゲット別に Brier / ECE / AUC / precision@0.9 を計算 → `model_daily_metrics`。B2 気候値の Brier も併記して Skill を追跡。処理は数分・メモリ 1 GB 以内（日単位で読む）。
+- 日次ジョブ（Vercel Cron `40 19 * * *` = 04:40 JST → `/ml/evaluate`）：前日の `forecast-log` と Parquet 実測を結合し、**モデル版 × システム × ターゲット × 水平 × 台数バケツ**別に Brier / log loss / ECE（等頻度と等幅）/ 陽性率を計算 → `model_daily_metrics`。**Skill の基準は B0（持続）**。処理は数分・メモリ 1 GB 以内（日単位で読む）。**実装は 2026-09-16（W5 の PR L、migration 0050）**。
+  - ~~AUC / precision@0.9~~ → **出さない**。`eval/metrics.py` に無く、ここだけに足すと**オフラインの報告書と並べられない数**が増える（下の「比べられる形にする」の裏返し）。要るときは `eval/metrics.py` に足して両方から出す。
+  - ~~B2 気候値の Brier も併記して Skill を追跡~~ → **B0（持続）を基準にした**。B0 は `bikes(t) >= 1` そのもので**実測だけから作れる**が、B2 は成果物を読んで引き直す必要がある。**BSS の基準はオフライン（`eval/harness.py`）も B0** なので、揃えたほうが比べられる。B2 を足すかは **W6**（LightGBM v1 で「気候値を何割上回るか」が採用基準になるとき）に決める。
 - 週次ダイジェスト（Webhook）：Brier の 7 日移動平均、悪化スライス上位、データ欠損率、推論 CPU 時間と Vercel 使用量。
 - ドリフト検知：主要特徴量（`bikes`、`fill_ratio`、`n_changes_60`）の分布を週単位で比較（PSI > 0.2 で通知）。ポート数・容量分布の急変（NOLL ブランド移行、共同ポート再開などの運用変更）もここで捕捉する。
 
@@ -1368,7 +1370,7 @@ forecast-log/{system_id}/date=YYYY-MM-DD/hour=HH/{base_epoch_s}_{model_version}.
 1. **ラベルは `features/labels.py` を通す**（as-of の取り方・欠測の扱いを書き直さない）
 2. **除外も揃える**（`features/exclude.py`。実運用が全行を使うと難所の比率が変わって Brier が動く）
 3. **重み付きと重み無しの両方を出す**（学習は逆抽出確率で重み付けしている。§7.6）
-4. `model_daily_metrics` は**まだ無い**（テーブルも無い）。W6 の PR で作る
+4. ~~`model_daily_metrics` は**まだ無い**（テーブルも無い）。W6 の PR で作る~~ → **2026-09-16 に作った**（W5 の PR L、migration 0050）。**実運用は全数なので抽出の重みが無い**——だから比べるのは**オフラインの「重み無し」**のほうである。2026-09-16 の PR I で抽出が一様になったので、**オフラインの重み付きと重み無しも一致する**ようになった（D-25）
 
 ## 9. iPhone アプリ設計
 
