@@ -1973,6 +1973,7 @@ for day in 09-07 … （当日の前日）:
 |---|---|
 | マイグレーション | `model_daily_metrics`（`model_version` / `metric_date` / `system_id` / `target` / `h_min` / `bucket` / `n` / `brier` / `brier_unweighted` / `ece` / `log_loss` / `positives` / `skill_vs_b2`） |
 | ジョブ | `/ml/evaluate`（Vercel Cron `40 19 * * *` ＝ **04:40 JST**。開発プラン §8.5） |
+| 読み方 | **並行**（`io/fanout.py`、`IO_WORKERS = 16`）。1 日ぶんは 2 システムで**予測ログ 576 件・84 MB ＋ 実測 58 件**あり、直列だと `maxDuration` の 240 秒を超える（§12 の 169。**2026-09-17 の初回がそれで殺された**） |
 | 入力 | 前日の `forecast-log/` **約 288 × 2 ファイル** ＋ `gbfs-parquet` の実測。**数で判定しない**——JST の日で数えると 287 や 289 になる（§12 の 163） |
 | 出力 | `model_daily_metrics` ＋ `job_runs` の記録（`recording.py` を通す） |
 
@@ -2012,7 +2013,7 @@ for day in 09-07 … （当日の前日）:
 | マイグレーション | **0050**：`model_daily_metrics`（表 ＋ `upsert_model_daily_metrics`）と、`monitored_jobs` に `evaluate_daily`（1 日・**30 時間**で鳴る） |
 | 純粋な部分 | `bikechance_ml/eval/served.py`。**ラベルは `features/labels.py`、除外は `features/exclude.py`、成績は `eval/metrics.py`** を呼ぶだけ |
 | 副作用 | `bikechance_ml/jobs/evaluate.py`。Storage の一覧・取得・`upsert`・`job_runs` |
-| 入口 | `GET /ml/evaluate`（**`?date_text=` で日を指定できる**——引数の名前は `/ml/reference` と揃えた。`date` は Python の組み込みと衝突する）。Vercel Cron **`40 19 * * *` ＝ 04:40 JST** |
+| 入口 | `GET /ml/evaluate`（**`?date=YYYY-MM-DD` で日を指定できる**——`/ml/reference` と揃えてある）。Vercel Cron **`40 19 * * *` ＝ 04:40 JST**。~~引数の名前は `date_text`~~ → **2026-09-17 に `?date=` へ直した**：Python 側は `date` が組み込みと衝突するので `date_text` のままだが、`Query(alias="date")` で **URL 上の名前だけ `date` にできる**（§12 の 170） |
 | 入出力の口 | `io/supabase.py` に 4 つ（`list_forecast_log` / `download_forecast_log` / `download_parquet` / `upsert_model_daily_metrics`） |
 
 **格子は学習と同じ `build_grid` で作る。** 基準時刻は JST 00:00 起点の 288 点、水平は
@@ -3824,6 +3825,81 @@ final class Recorder: @unchecked Sendable {
 
 **W6 に入る前に片付ける。** 学習日を増やす計画が先にあって、**それが載る場所を確かめて
 いなかった**のがここでの抜けである。
+
+### 169. **`/ml/evaluate` の初回が `maxDuration` で殺された**（9/17。本番）
+
+**PR L を入れて最初の実行（2026-09-17 04:40 JST）が、7 時間 55 分 `running` のまま
+終わらなかった。** `model_daily_metrics` は 0 行。
+
+**Python の例外ではない。** `run_evaluation` は `except Exception` で囲んで必ず
+`job_finished` を呼び、ルート側も `except Exception` で受ける。**どちらも通らずに
+`running` が残るのは、プロセスごと落ちたとき**である（`maxDuration` は 240 秒）。
+
+**往復の数を数えていなかった。** 1 日ぶんの読み取りは実測で次のとおり。
+
+| 読むもの | 1 システム | 2 システム |
+|---|---:|---:|
+| 予測ログの一覧 | 26 回 | 52 回 |
+| 予測ログの本体 | **288 件・42 MB** | **576 件・84 MB** |
+| 実測の Parquet | 29 時間ぶん | 58 件 |
+
+**686 往復を直列に積んでいた。** 1 往復 150 ミリ秒でも 103 秒、300 ミリ秒なら 206 秒で、
+計算（実測 62 秒）を足せば 240 秒を超える。
+
+**見落としていた理由**：**PR L の試し打ちは本番のデータで測っていたのに、時間の読み方を
+間違えた。** 「全体 5 分・うち計算 62 秒」という数字を見て、**残りを「家の回線が遅いだけ」と
+切り分けた**。回線の速さは変わっても**往復の数は変わらない**。速い回線でも 686 回は 686 回で、
+1 往復が 300 ミリ秒を超えれば同じところで死ぬ。
+
+**規則**：**`maxDuration` に収まるかは、計算時間ではなく往復の数で見る。** 「ローカルで
+何秒だったか」は回線の速さに依存するが、**往復の数は実装が決める定数**である。
+
+**直した**：読み取りを並行にした（`io/fanout.py`、`IO_WORKERS = 16`）。**リポジトリで
+スレッドを作るのはここだけ**にして、入力と同じ順で返すこと・最初の例外がそのまま出ることを
+検査で留めた。
+
+**本番のデータ（2026-09-16）で測った**（読み取りだけ。1 行も書いていない）。
+
+| | 直列（`IO_WORKERS = 1`） | **並行（16）** |
+|---|---:|---:|
+| docomo-cycle | 163.2 秒 | **24.4 秒** |
+| hellocycling | 189.0 秒 | **51.3 秒** |
+| **合計** | **353 秒** | **77 秒** |
+| 最大メモリ | 0.53 GB | 0.52 GB |
+
+**結果は 280 行すべてが完全に一致した**（主キーも値も差 0 件）。速さのために測るものを
+変えていないことの確認である。
+
+**これは自宅の回線での数字**なので、`hnd1` から東京の Supabase を叩く本番は**これより
+速い**。直列の 353 秒は本番が死んだ 240 秒と整合する（回線が速いぶん本番のほうが
+短かったはずだが、それでも超えた）。
+
+### 170. **URL の引数名に Python の都合が出ていた**（9/17）
+
+`/ml/evaluate` と `/ml/reference` は日を `?date_text=` で受けていた。理由は
+「**`date` は Python の組み込み（`datetime.date`）と衝突する**」で、それ自体は正しい
+——ルートの中で `date.fromisoformat` を呼ぶので、引数名を `date` にすると暦日を作れない。
+
+**だが FastAPI の `Query(alias=...)` で解ける。** Python 側の名前は `date_text` のまま、
+URL 上の名前だけ `date` にできる。**衝突を避けるために外に出る名前まで歪める必要は
+無かった。**
+
+**文書のほうが多数派で、しかも本番に出ているのは `date` だった。**
+
+| どこ | 何と書いてあったか |
+|---|---|
+| 本番の `monitored_jobs.note`（0050） | `?date=` |
+| 400 のエラー文言（両ルート） | 「`date` は YYYY-MM-DD」 |
+| `/ml/evaluate` の docstring | `date` |
+| この文書の §6.12 | `?date_text=` |
+| 0050 の SQL コメント | `?date_text=` |
+
+**間違えても 400 にならない。** FastAPI は**知らない問い合わせ引数を黙って捨てる**ので、
+`?date=2026-09-16` と打つと**指定したつもりで前日が測られる**。**取り違えたことに
+気づけない形の失敗**である。
+
+**規則**：**外に出る名前は、中の都合で歪めない。** 別名を付ける手があるなら、そちらを使う。
+**両方向を検査で留める**（`?date=` が効くこと・`?date_text=` が効かないこと）。
 
 ---
 

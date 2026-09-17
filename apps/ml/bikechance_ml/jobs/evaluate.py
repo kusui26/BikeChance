@@ -12,6 +12,11 @@
 **ログの無い日は `skipped`。** 埋めない（CLAUDE.md §6「収集の欠損は補間しない」）。
 予測ログは 12 か月残るので、後から `?date=` で測り直せる。
 
+**読み取りは並行に行う**（`io/fanout.py`）。1 日ぶんは 2 システムで**予測ログ 576 件・
+84 MB**、加えて実測の Parquet が 58 時間ぶんある。直列に積むと往復の待ちだけで
+`maxDuration` の 240 秒を超える——**2026-09-17 の初回がそれで殺された**（§12 の 169）。
+書き込み（`upsert`）は並行にしない：1 日に数回しかなく、速くしても効かない。
+
 **ここは副作用の置き場所。** 突き合わせの規則は `eval/served.py` にあり、そこは
 `features/labels.py`・`features/exclude.py`・`eval/metrics.py` をそのまま呼ぶ。
 
@@ -49,6 +54,7 @@ from bikechance_ml.features.grid import (
     parquet_hours,
     to_epoch_ms,
 )
+from bikechance_ml.io import fanout
 from bikechance_ml.jobs import recording
 from bikechance_ml.jobs.build_features import SYSTEM_IDS
 from bikechance_ml.jobs.snapshot_table import parquet_path
@@ -74,6 +80,17 @@ UPSERT_BATCH: Final[int] = 500
 #: Storage の一覧が返す上限。**達したら切り捨てられた可能性がある**ので止める。
 #: 1 つの時間帯には 12 サイクル × 版の数しか置かれない。
 LIST_LIMIT: Final[int] = 1000
+
+#: 同時に開く読み取りの数（`io/fanout.py`）。
+#:
+#: **待ちが支配的なので、重ねるだけで効く。** 1 システム 288 件の取得が 18 巡になる。
+#: **どこまで開いてよいかは `io/` 側が知っている**——接続プールの上限はそちらの
+#: 持ちもので、16 はそれより十分に小さい（CLAUDE.md §3「外向きの通信は `io/` に
+#: 集める」。ここに通信の相手の話を書かないのはそのため）。
+#:
+#: **速さより「確実に 240 秒に収まること」**で選んだ。ここを上げても縮むのは数秒で、
+#: 失うのは Storage への行儀である。
+IO_WORKERS: Final[int] = 16
 
 #: `{base_epoch_s}_{model_version}.parquet` の名前。
 _LOG_NAME: Final[re.Pattern[str]] = re.compile(r"\A\d+_.+\.parquet\Z")
@@ -195,16 +212,24 @@ def log_prefix(system_id: str, hour: datetime) -> str:
     return f"{system_id}/date={at:%Y-%m-%d}/hour={at:%H}/"
 
 
+def names_at(port: EvaluatePort, system_id: str, hour: datetime) -> tuple[str, ...]:
+    """1 時間帯ぶんの一覧。**上限に達したら止める。**"""
+    prefix = log_prefix(system_id, hour)
+    names = port.list_forecast_log(prefix, LIST_LIMIT)
+    if len(names) >= LIST_LIMIT:
+        raise TruncatedListingError(f"{prefix} の一覧が上限 {LIST_LIMIT} に達しました")
+    return tuple(f"{prefix}{name}" for name in names if _LOG_NAME.match(name))
+
+
 def list_logs(port: EvaluatePort, system_id: str, day: date) -> tuple[str, ...]:
-    """その日の候補になるファイルの一覧。**上限に達したら止める。**"""
-    found: list[str] = []
-    for hour in log_hours(day):
-        prefix = log_prefix(system_id, hour)
-        names = port.list_forecast_log(prefix, LIST_LIMIT)
-        if len(names) >= LIST_LIMIT:
-            raise TruncatedListingError(f"{prefix} の一覧が上限 {LIST_LIMIT} に達しました")
-        found.extend(f"{prefix}{name}" for name in names if _LOG_NAME.match(name))
-    return tuple(sorted(found))
+    """その日の候補になるファイルの一覧。**26 時間ぶんを並行に取る。**
+
+    **並べ替えて返すのは元のまま。** 一覧の順を Storage の都合に委ねない。
+    """
+    found = fanout.gather(
+        lambda hour: names_at(port, system_id, hour), log_hours(day), workers=IO_WORKERS
+    )
+    return tuple(sorted(name for names in found for name in names))
 
 
 def read_log(body: bytes, path: str) -> LogFile:
@@ -237,17 +262,22 @@ def within(day: date, at: datetime) -> bool:
     return start <= at < start + timedelta(hours=24)
 
 
+def fetch_log(port: EvaluatePort, path: str) -> LogFile | None:
+    """1 サイクルぶんを取って読む。**無ければ None**（消えていても止めない）。"""
+    body = port.download_forecast_log(path)
+    return None if body is None else read_log(body, path)
+
+
 def read_logs(port: EvaluatePort, system_id: str, day: date) -> tuple[LogFile, ...]:
-    """その日の予測ログ。**`generated_at` で絞り直す**（パスは基準観測の時刻）。"""
-    found: list[LogFile] = []
-    for path in list_logs(port, system_id, day):
-        body = port.download_forecast_log(path)
-        if body is None:
-            continue
-        one = read_log(body, path)
-        if within(day, one.generated_at):
-            found.append(one)
-    return tuple(found)
+    """その日の予測ログ。**`generated_at` で絞り直す**（パスは基準観測の時刻）。
+
+    **取得と Parquet の展開をまとめて並行にする。** 展開は `pyarrow` の中で GIL を
+    放すので、往復の待ちと重なる。**絞り込みは戻ってから**——`within` を並行の中に
+    入れると、読んだ数と残った数の差が追えなくなる。
+    """
+    paths = list_logs(port, system_id, day)
+    found = fanout.gather(lambda path: fetch_log(port, path), paths, workers=IO_WORKERS)
+    return tuple(one for one in found if one is not None and within(day, one.generated_at))
 
 
 # ── 「配った確率」を格子に載せる ──────────────────────────────
@@ -315,14 +345,23 @@ def to_served(
 
 
 # ── 実測を読む ────────────────────────────────────────────────
+def fetch_hour(port: EvaluatePort, system_id: str, hour: datetime) -> pa.Table | None:
+    """1 時間帯ぶんの実測。**無ければ None**（畳んでいないだけ）。"""
+    path = parquet_path(system_id, hour)
+    body = port.download_parquet(path)
+    return None if body is None else read_snapshot_table(body, path)
+
+
 def read_observations(port: EvaluatePort, system_id: str, day: date) -> pa.Table:
-    """当日ぶんと前後の余白の実測。**無い時間帯は飛ばす**（畳んでいないだけ）。"""
-    tables: list[pa.Table] = []
-    for hour in parquet_hours(day, LOOKBACK_HOURS, LOOKAHEAD_HOURS):
-        path = parquet_path(system_id, hour)
-        body = port.download_parquet(path)
-        if body is not None:
-            tables.append(read_snapshot_table(body, path))
+    """当日ぶんと前後の余白の実測。**無い時間帯は飛ばす**（畳んでいないだけ）。
+
+    **順を保ったまま並行に取る。** 戻る順が走るたびに変われば `concat_tables` の
+    行の並びも変わる。値そのものは `served.to_truth` が時刻で引き直すので変わらないが、
+    **同じ入力から同じ表**が出ることに頼れるほうがよい。
+    """
+    hours = parquet_hours(day, LOOKBACK_HOURS, LOOKAHEAD_HOURS)
+    read = fanout.gather(lambda hour: fetch_hour(port, system_id, hour), hours, workers=IO_WORKERS)
+    tables = [one for one in read if one is not None]
     if not tables:
         raise MissingObservationsError(f"{system_id} の {day} に実測の Parquet がありません")
     return pa.concat_tables(tables)
