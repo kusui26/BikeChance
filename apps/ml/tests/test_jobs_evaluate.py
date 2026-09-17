@@ -33,6 +33,7 @@ from bikechance_ml.jobs.evaluate import (
     log_prefix,
     probabilities,
     read_log,
+    read_logs,
     run_evaluation,
     within,
 )
@@ -164,6 +165,38 @@ def test_a_truncated_listing_stops_the_job() -> None:
 
     with pytest.raises(TruncatedListingError):
         list_logs(Truncating(), "hellocycling", DAY)
+
+
+def test_a_cycle_outside_the_day_is_dropped_after_reading() -> None:
+    """**日の外のサイクルは捨てる。** 一覧は前後 1 時間ぶん余分に拾うので必ず出てくる。
+
+    余白は `base_observed_at` と `generated_at` が最大 5 分ずれるために要るもので、
+    **拾ったあと `generated_at` で絞り直す**のが対になっている。片方だけになると、
+    日の境目のサイクルが**隣の日に二重に入る**。
+    """
+    inside = log_file(["p1"], at(0, 0))
+    before = log_file(["p1"], at(0, 0) - timedelta(minutes=5))
+    after = log_file(["p1"], at(0, 0) + timedelta(days=1))
+    port = FakePort([inside, before, after])
+    read = read_logs(port, "hellocycling", DAY)
+    assert [one.generated_at for one in read] == [at(0, 0).astimezone(UTC)]
+
+
+def test_a_listed_file_that_has_vanished_is_skipped() -> None:
+    """**一覧に在って本体が無いファイルは飛ばす。**
+
+    一覧と取得のあいだに保持期間が切れれば起こりうる。**`None` をそのまま先へ流すと**
+    `station_keys` が属性を引けずに落ち、1 日ぶんの成績がまるごと書けなくなる。
+    """
+    kept = log_file(["p1"], at(9, 0))
+    lost = log_file(["p1"], at(9, 5))
+
+    class Vanishing(FakePort):
+        def download_forecast_log(self, path: str) -> bytes | None:
+            return None if path == lost.path else self.objects.get(path)
+
+    port = Vanishing([kept, lost])
+    assert [one.path for one in read_logs(port, "hellocycling", DAY)] == [kept.path]
 
 
 def test_names_that_are_not_logs_are_ignored() -> None:
@@ -312,7 +345,7 @@ def test_the_endpoint_needs_the_secret(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_endpoint_refuses_a_bad_date(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CRON_SECRET", SECRET)
     response = client(FakePort()).get(
-        "/ml/evaluate?date_text=2026-13-99", headers={"Authorization": f"Bearer {SECRET}"}
+        "/ml/evaluate?date=2026-13-99", headers={"Authorization": f"Bearer {SECRET}"}
     )
     assert response.status_code == 400
     assert response.json()["title"] == "invalid_date"
@@ -322,11 +355,30 @@ def test_the_endpoint_measures_the_day_it_is_given(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("CRON_SECRET", SECRET)
     port = full_day_port()
     response = client(port).get(
-        "/ml/evaluate?date_text=2026-09-07", headers={"Authorization": f"Bearer {SECRET}"}
+        "/ml/evaluate?date=2026-09-07", headers={"Authorization": f"Bearer {SECRET}"}
     )
     assert response.status_code == 200
     assert response.json()["metric_date"] == "2026-09-07"
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_the_day_is_given_as_date_not_as_the_python_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**URL 上の名前は `date`。** Python 側の `date_text` では効かない。
+
+    FastAPI は**知らない問い合わせ引数を黙って捨てる**ので、名前を間違えると
+    400 ではなく「指定したつもりで前日が測られる」。**取り違えたときに気づけない
+    形の失敗**なので、どちらの向きも固定しておく（W5 プラン §12 の 170）。
+    """
+    monkeypatch.setenv("CRON_SECRET", SECRET)
+    header = {"Authorization": f"Bearer {SECRET}"}
+    given = client(full_day_port()).get("/ml/evaluate?date=2026-09-07", headers=header)
+    assert given.json()["metric_date"] == "2026-09-07"
+
+    # **古い名前は効かない**（既定の「前日」に落ちる。2026-09-07 にはならない）
+    ignored = client(full_day_port()).get("/ml/evaluate?date_text=2026-09-07", headers=header)
+    assert ignored.json()["metric_date"] != "2026-09-07"
 
 
 def test_the_endpoint_reports_a_failure_with_500(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -334,7 +386,7 @@ def test_the_endpoint_reports_a_failure_with_500(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("CRON_SECRET", SECRET)
     port = FakePort([log_file(["p1"], at(9, 0))])
     response = client(port).get(
-        "/ml/evaluate?date_text=2026-09-07", headers={"Authorization": f"Bearer {SECRET}"}
+        "/ml/evaluate?date=2026-09-07", headers={"Authorization": f"Bearer {SECRET}"}
     )
     assert response.status_code == 500
     assert response.json()["ok"] is False

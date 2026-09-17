@@ -18,7 +18,7 @@ from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, date, datetime
 from typing import Final
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from bikechance_ml import __version__
@@ -45,6 +45,16 @@ SERVICE_NAME: Final[str] = "ml"
 
 #: Cron の応答を CDN に載せない。
 NO_STORE: Final[dict[str, str]] = {"Cache-Control": "no-store"}
+
+#: 日を指定する問い合わせ引数。**URL 上の名前は `date`。**
+#:
+#: Python 側の変数名は `date_text` のままにする——`date` は `datetime.date` と衝突し、
+#: ルートの中で暦日を作れなくなる。**`alias` があれば、衝突を避けるために URL の名前まで
+#: 歪める必要は無い**（2026-09-17 に直した。W5 プラン §12 の 170）。
+#:
+#: **既定の `None` は「前日」を意味する。** 知らない引数を FastAPI は黙って捨てるので、
+#: 名前を間違えると**指定したつもりで前日が測られる**。だから名前は 1 か所で決める。
+DAY_QUERY: Final[str] = "date"
 
 #: 推論を受け付けるシステム。**知らない名前は 400 で弾く**（DB に問い合わせない）。
 KNOWN_SYSTEMS: Final[frozenset[str]] = frozenset({"hellocycling", "docomo-cycle"})
@@ -156,12 +166,16 @@ def build_app(
         )
 
     @app.get("/ml/reference")
-    def reference(request: Request, date_text: str | None = None) -> JSONResponse:
+    def reference(
+        request: Request,
+        date_text: str | None = Query(default=None, alias=DAY_QUERY),
+    ) -> JSONResponse:
         """日次の参照スナップショットを書く（W3 プラン §14.3）。
 
-        既定は**前日（JST）ぶん**。`rebuild_geo`（04:30 JST）の後に走らせるので、
-        その日の近傍と行政区画が入ったものが固まる。**同じパスに上書きする**ので、
-        何度実行しても結果は変わらない。
+        既定は**前日（JST）ぶん**。`?date=YYYY-MM-DD` でその日を指定できる。
+        `rebuild_geo`（04:30 JST）の後に走らせるので、その日の近傍と行政区画が
+        入ったものが固まる。**同じパスに上書きする**ので、何度実行しても結果は
+        変わらない。
         """
         secret = os.environ.get("CRON_SECRET", "")
         if not is_authorized(request.headers.get("authorization"), secret):
@@ -185,11 +199,14 @@ def build_app(
         return JSONResponse(summary, status_code=200, headers=NO_STORE)
 
     @app.get("/ml/evaluate")
-    def evaluate(request: Request, date_text: str | None = None) -> JSONResponse:
+    def evaluate(
+        request: Request,
+        date_text: str | None = Query(default=None, alias=DAY_QUERY),
+    ) -> JSONResponse:
         """前日ぶんの実運用 Brier を `model_daily_metrics` に入れる（W5 プラン §6.12）。
 
-        既定は**前日（JST）ぶん**。`date` を渡すと、その日を測り直す。**主キーで
-        衝突させる**ので、同じ日を何度測っても行は増えない。
+        既定は**前日（JST）ぶん**。`?date=YYYY-MM-DD` を渡すと、その日を測り直す。
+        **主キーで衝突させる**ので、同じ日を何度測っても行は増えない。
 
         **予測ログの無い日は `skipped` で 200 を返す**（失敗にしない）。埋めるものが
         無いだけで、こちらの不調ではない。
