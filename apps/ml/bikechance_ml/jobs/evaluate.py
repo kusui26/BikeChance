@@ -3,14 +3,16 @@
 **配った確率を、実際に起きたことと突き合わせる。** 読むのは `forecast-log/`（1 サイクル
 1 ファイル）と `gbfs-parquet` の実測で、書くのは `model_daily_metrics`（0050）である。
 
-手順（CLAUDE.md §3 の Cron ハンドラの定型）：
-  `CRON_SECRET` 検証 → 処理 → `job_runs` に記録 → 要約 JSON
+**GitHub Actions で走る**（`.github/workflows/evaluate-daily.yml`）。Vercel Cron では
+ない——**実測の山が 2.26 GB** で、Vercel の枠（300 秒・2 GB）に入らない（§12 の 171）。
+W4-27 が `build_features` について決めたのと同じ規律である：**5 分毎の推論と同じ
+サービスに重いバッチを混ぜない。**
 
 **アドバイザリロックは取らない。** 二重起動は同じ日を 2 度測るだけで、主キーで衝突
-させるので行は増えない（完了条件 2）。
+させるので行は増えない（完了条件 2）。ワークフロー側の `concurrency` でも重ならない。
 
 **ログの無い日は `skipped`。** 埋めない（CLAUDE.md §6「収集の欠損は補間しない」）。
-予測ログは 12 か月残るので、後から `?date=` で測り直せる。
+予測ログは 12 か月残るので、後から `--date` で測り直せる（`workflow_dispatch` の入力）。
 
 **読み取りは並行に行う**（`io/fanout.py`）。1 日ぶんは 2 システムで**予測ログ 576 件・
 84 MB**、加えて実測の Parquet が 58 時間ぶんある。直列に積むと往復の待ちだけで
@@ -25,7 +27,9 @@
 **測るのは水平ごと**なので作業用の配列は `(ポート, サイクル)` に収まる。
 """
 
+import argparse
 import io
+import json
 import re
 import time
 from collections.abc import Mapping, Sequence
@@ -38,6 +42,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import served
 from bikechance_ml.eval.dataset import TARGETS
 from bikechance_ml.features.arrays import Int16
@@ -51,16 +56,18 @@ from bikechance_ml.features.grid import (
     Grid,
     build_grid,
     day_start,
+    jst_yesterday,
     parquet_hours,
     to_epoch_ms,
 )
 from bikechance_ml.io import fanout
+from bikechance_ml.io.supabase import open_storage
 from bikechance_ml.jobs import recording
 from bikechance_ml.jobs.build_features import SYSTEM_IDS
 from bikechance_ml.jobs.snapshot_table import parquet_path
 from bikechance_ml.jobs.snapshot_table import read_table as read_snapshot_table
 
-#: `job_runs` と `monitored_jobs` に載る名前（0050）。**毎日 1 回**（04:40 JST）。
+#: `job_runs` と `monitored_jobs` に載る名前（0050）。**毎日 1 回**（06:40 JST）。
 JOB_NAME: Final[str] = "evaluate_daily"
 
 #: 格子の前の余白（時間）。**as-of は 600 秒しかさかのぼらない**ので 1 時間で足りる。
@@ -433,21 +440,11 @@ def write_all(port: EvaluatePort, results: Sequence[SystemResult]) -> int:
     return sum(port.upsert_model_daily_metrics(chunk) for chunk in batches(rows, UPSERT_BATCH))
 
 
-def run_evaluation(port: EvaluatePort, day: date) -> EvaluateSummary:
-    """前日ぶんを測って書く。**測れなかった日は `skipped`**（失敗にしない）。
-
-    **全体が落ちても `job_runs` は必ず終わる。** 書き込みで落ちたまま `running` を
-    残すと、見張りが「止まった」ではなく「遅い」と読む（`jobs/compact.py` と同じ形）。
-    """
-    started = time.monotonic_ns()
-    run_id = recording.started_quietly(port, JOB_NAME)
-    try:
-        results = measure_all(port, day)
-        written, error = write_all(port, results), None
-    except Exception as cause:
-        # **例外の種類だけ**を残す。文言は接続先を抱えうる（CLAUDE.md §5）
-        results, written, error = (), 0, type(cause).__name__
-    summary = EvaluateSummary(
+def _summarise(
+    results: Sequence[SystemResult], written: int, error: str | None, day: date, started: int
+) -> EvaluateSummary:
+    """要約を作る。**書く道と書かない道で同じ形にする**（読む場所を 2 つにしない）。"""
+    return EvaluateSummary(
         ok=error is None and all(result.outcome.ok for result in results),
         status=_status(results, error),
         metric_date=day.isoformat(),
@@ -456,6 +453,39 @@ def run_evaluation(port: EvaluatePort, day: date) -> EvaluateSummary:
         systems=tuple(result.outcome for result in results),
         error=error,
     )
+
+
+def measure_only(port: EvaluatePort, day: date) -> EvaluateSummary:
+    """測るだけ。**1 行も書かず、`job_runs` にも残さない**（試し打ち用）。
+
+    `build_features` の `--upload` を付けないときと同じ作法である（W4 プラン §6.8）
+    ——**手元で確かめたことが本番の記録を汚さない**。
+    """
+    started = time.monotonic_ns()
+    try:
+        results, error = measure_all(port, day), None
+    except Exception as cause:
+        # **例外の種類だけ**を残す。文言は接続先を抱えうる（CLAUDE.md §5）
+        results, error = (), type(cause).__name__
+    return _summarise(results, 0, error, day, started)
+
+
+def run_evaluation(port: EvaluatePort, day: date) -> EvaluateSummary:
+    """前日ぶんを測って書く。**測れなかった日は `skipped`**（失敗にしない）。
+
+    **全体が落ちても `job_runs` は必ず終わる。** 書き込みで落ちたまま `running` を
+    残すと、見張りが「止まった」ではなく「遅い」と読む（`jobs/compact.py` と同じ形）。
+    **プロセスごと殺されたときだけは残る**——2026-09-17 と 09-18 がそれで、`running` の
+    まま 4 行残った（§12 の 171）。
+    """
+    started = time.monotonic_ns()
+    run_id = recording.started_quietly(port, JOB_NAME)
+    try:
+        results = measure_all(port, day)
+        written, error = write_all(port, results), None
+    except Exception as cause:
+        results, written, error = (), 0, type(cause).__name__
+    summary = _summarise(results, written, error, day, started)
     recording.record_quietly(port, run_id, summary.status, summary.as_dict())
     return summary
 
@@ -470,9 +500,41 @@ def _status(results: Sequence[SystemResult], error: str | None = None) -> str:
 
 
 def to_detail(summary: EvaluateSummary) -> dict[str, object]:
-    """応答の本文。**記録と同じ形**（見る場所を 2 つにしない）。"""
+    """外に出す本文。**記録と同じ形**（見る場所を 2 つにしない）。"""
     return summary.as_dict()
+
+
+# ── 実行（GitHub Actions から）──────────────────────────────────
+def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="配った確率の実運用 Brier を 1 日ぶん測る")
+    parser.add_argument("--date", default=None, help="JST の暦日（既定は昨日）")
+    parser.add_argument(
+        "--write", action="store_true", help="model_daily_metrics に書き、job_runs に記録する"
+    )
+    return parser.parse_args(argv)
+
+
+def run(argv: Sequence[str] | None = None) -> int:
+    """**`--write` を付けたときだけ書く。** 付けなければ測って表示するだけ。
+
+    返り値は終了コード。**測れなかった日（`skipped`）は 0 で返す**——埋めるものが
+    無いだけで、こちらの不調ではない（完了条件 5）。**失敗は 1**で、ワークフローが
+    赤くなる。
+    """
+    options = _arguments(argv)
+    day = date.fromisoformat(options.date) if options.date else jst_yesterday(datetime.now(UTC))
+    with open_storage(read_storage_config()) as source:
+        summary = run_evaluation(source, day) if options.write else measure_only(source, day)
+    print(json.dumps({**to_detail(summary), "wrote": options.write}, ensure_ascii=False, indent=2))
+    return 0 if summary.ok else 1
 
 
 def _floor_hour(at: datetime) -> datetime:
     return at.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+
+
+# **入口はファイルのいちばん最後に置く。** `python -m` はモジュールを `__main__` として
+# **上から順に実行する**ので、途中に置くと**まだ定義されていない名前**を掴む
+# （2026-09-18 に `_floor_hour` でそうなった。W5 プラン §12 の 172）。
+if __name__ == "__main__":
+    raise SystemExit(run())

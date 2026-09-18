@@ -70,10 +70,6 @@
     {
       "path": "/ml/reference",
       "schedule": "0 20 * * *"
-    },
-    {
-      "path": "/ml/evaluate",
-      "schedule": "40 19 * * *"
     }
   ]
 }

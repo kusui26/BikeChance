@@ -29,8 +29,6 @@ from bikechance_ml.io.supabase import SupabaseIo, open_supabase
 from bikechance_ml.jobs.build_reference import ReferencePort, build_and_upload
 from bikechance_ml.jobs.compact import CompactPort, compact_hour
 from bikechance_ml.jobs.compact import to_detail as compact_detail
-from bikechance_ml.jobs.evaluate import EvaluatePort, run_evaluation
-from bikechance_ml.jobs.evaluate import to_detail as evaluate_detail
 from bikechance_ml.jobs.infer import InferPort, run_inference
 from bikechance_ml.jobs.infer import to_detail as infer_detail
 from bikechance_ml.jobs.load_weather import WeatherPort, run_load
@@ -63,7 +61,6 @@ KNOWN_SYSTEMS: Final[frozenset[str]] = frozenset({"hellocycling", "docomo-cycle"
 #: 入出力の差し替え点。**ルートごとに要る口が違う**ので別々に取る。テストは必要な
 #: ほうだけを用意すればよく、本番はどちらにも同じ `SupabaseIo` を渡す。
 CompactPortFactory = Callable[[], AbstractContextManager[CompactPort]]
-EvaluatePortFactory = Callable[[], AbstractContextManager[EvaluatePort]]
 InferPortFactory = Callable[[], AbstractContextManager[InferPort]]
 ReferencePortFactory = Callable[[], AbstractContextManager[ReferencePort]]
 WeatherPortFactory = Callable[[], AbstractContextManager[WeatherPort]]
@@ -104,7 +101,6 @@ def build_app(
     make_infer_port: InferPortFactory = _default_port,
     make_reference_port: ReferencePortFactory = _default_port,
     make_weather_port: WeatherPortFactory = _default_port,
-    make_evaluate_port: EvaluatePortFactory = _default_port,
 ) -> FastAPI:
     """アプリを組み立てて返す。
 
@@ -197,41 +193,6 @@ def build_app(
             return _problem(500, "unhandled", type(cause).__name__)
 
         return JSONResponse(summary, status_code=200, headers=NO_STORE)
-
-    @app.get("/ml/evaluate")
-    def evaluate(
-        request: Request,
-        date_text: str | None = Query(default=None, alias=DAY_QUERY),
-    ) -> JSONResponse:
-        """前日ぶんの実運用 Brier を `model_daily_metrics` に入れる（W5 プラン §6.12）。
-
-        既定は**前日（JST）ぶん**。`?date=YYYY-MM-DD` を渡すと、その日を測り直す。
-        **主キーで衝突させる**ので、同じ日を何度測っても行は増えない。
-
-        **予測ログの無い日は `skipped` で 200 を返す**（失敗にしない）。埋めるものが
-        無いだけで、こちらの不調ではない。
-        """
-        secret = os.environ.get("CRON_SECRET", "")
-        if not is_authorized(request.headers.get("authorization"), secret):
-            return _problem(401, "unauthorized", "CRON_SECRET が一致しません。")
-
-        try:
-            day = date.fromisoformat(date_text) if date_text else jst_yesterday(datetime.now(UTC))
-        except ValueError:
-            return _problem(400, "invalid_date", "date は YYYY-MM-DD（JST の暦日）です。")
-
-        try:
-            with make_evaluate_port() as port:
-                summary = run_evaluation(port, day)
-        except MissingConfigError as cause:
-            return _problem(500, "misconfigured", str(cause))
-        except Exception as cause:
-            print(f"未処理の例外: {type(cause).__name__}", file=sys.stderr)
-            return _problem(500, "unhandled", type(cause).__name__)
-
-        return JSONResponse(
-            evaluate_detail(summary), status_code=200 if summary.ok else 500, headers=NO_STORE
-        )
 
     @app.get("/ml/weather")
     def weather(request: Request) -> JSONResponse:

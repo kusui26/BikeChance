@@ -1972,7 +1972,7 @@ for day in 09-07 … （当日の前日）:
 | | |
 |---|---|
 | マイグレーション | `model_daily_metrics`（`model_version` / `metric_date` / `system_id` / `target` / `h_min` / `bucket` / `n` / `brier` / `brier_unweighted` / `ece` / `log_loss` / `positives` / `skill_vs_b2`） |
-| ジョブ | `/ml/evaluate`（Vercel Cron `40 19 * * *` ＝ **04:40 JST**。開発プラン §8.5） |
+| ジョブ | ~~`/ml/evaluate`（Vercel Cron 04:40 JST）~~ → **GitHub Actions**（`evaluate-daily.yml`、`40 21 * * *` ＝ **06:40 JST**）。**Vercel では山 2.26 GB が枠（2 GB）に入らず 2 回続けて死んだ**（§12 の 171、開発プラン §15 の D-26）。入口は `python -m bikechance_ml.jobs.evaluate --write` |
 | 読み方 | **並行**（`io/fanout.py`、`IO_WORKERS = 16`）。1 日ぶんは 2 システムで**予測ログ 576 件・84 MB ＋ 実測 58 件**あり、直列だと `maxDuration` の 240 秒を超える（§12 の 169。**2026-09-17 の初回がそれで殺された**） |
 | 入力 | 前日の `forecast-log/` **約 288 × 2 ファイル** ＋ `gbfs-parquet` の実測。**数で判定しない**——JST の日で数えると 287 や 289 になる（§12 の 163） |
 | 出力 | `model_daily_metrics` ＋ `job_runs` の記録（`recording.py` を通す） |
@@ -2013,7 +2013,7 @@ for day in 09-07 … （当日の前日）:
 | マイグレーション | **0050**：`model_daily_metrics`（表 ＋ `upsert_model_daily_metrics`）と、`monitored_jobs` に `evaluate_daily`（1 日・**30 時間**で鳴る） |
 | 純粋な部分 | `bikechance_ml/eval/served.py`。**ラベルは `features/labels.py`、除外は `features/exclude.py`、成績は `eval/metrics.py`** を呼ぶだけ |
 | 副作用 | `bikechance_ml/jobs/evaluate.py`。Storage の一覧・取得・`upsert`・`job_runs` |
-| 入口 | `GET /ml/evaluate`（**`?date=YYYY-MM-DD` で日を指定できる**——`/ml/reference` と揃えてある）。Vercel Cron **`40 19 * * *` ＝ 04:40 JST**。~~引数の名前は `date_text`~~ → **2026-09-17 に `?date=` へ直した**：Python 側は `date` が組み込みと衝突するので `date_text` のままだが、`Query(alias="date")` で **URL 上の名前だけ `date` にできる**（§12 の 170） |
+| 入口 | **CLI**：`python -m bikechance_ml.jobs.evaluate [--date YYYY-MM-DD] [--write]`。**`--write` を付けたときだけ**書く（`build_features` の `--upload` と同じ作法で、手元の試し打ちが `job_runs` を汚さない）。測り直しは `workflow_dispatch` の `date` 入力から。~~`GET /ml/evaluate`~~ は **2026-09-18 に消した**——動かない入口を残すほうが危ない（§12 の 171） |
 | 入出力の口 | `io/supabase.py` に 4 つ（`list_forecast_log` / `download_forecast_log` / `download_parquet` / `upsert_model_daily_metrics`） |
 
 **格子は学習と同じ `build_grid` で作る。** 基準時刻は JST 00:00 起点の 288 点、水平は
@@ -3900,6 +3900,91 @@ URL 上の名前だけ `date` にできる。**衝突を避けるために外に
 
 **規則**：**外に出る名前は、中の都合で歪めない。** 別名を付ける手があるなら、そちらを使う。
 **両方向を検査で留める**（`?date=` が効くこと・`?date_text=` が効かないこと）。
+
+> **この所見は 1 日で古くなった。** 2026-09-18 に `/ml/evaluate` そのものを GitHub Actions へ
+> 移したので（D-26）、**日の指定は `--date`** になった。`?date=` の別名は `/ml/reference`
+> にだけ残っている。**「外に出る名前を中の都合で歪めない」という規則のほうは残る。**
+
+### 171. **`/ml/evaluate` が死んだ本当の原因はメモリだった**（9/17〜9/18。本番。169 の訂正）
+
+**169 で「`maxDuration` の 240 秒を超えた」と書いたのは誤りである。**
+
+並列化（PR #108）を入れた翌日、**2026-09-18 04:40 の回も同じ形で死んだ**。手で叩いて
+初めて種別が分かった。
+
+```
+GET /ml/evaluate?date=2026-09-16 → FUNCTION_INVOCATION_FAILED / HTTP 500 / 16.3 秒
+GET /ml/evaluate?date=2026-09-13 → FUNCTION_INVOCATION_FAILED / HTTP 500 / 13.8 秒
+```
+
+**`FUNCTION_INVOCATION_TIMEOUT` ではない。** 時間切れなら別のコードが返る。しかも
+13〜16 秒で、240 秒には遠い。**プロセスの異常終了**である。
+
+**正体はメモリ。** 2026-09-16 を実測した。
+
+| | 山（`peak memory footprint`） | 常駐（`maximum resident set size`） |
+|---|---:|---:|
+| 並行（`IO_WORKERS = 16`） | **2.26 GB** | 0.68 GB |
+| 直列（`IO_WORKERS = 1`） | **2.25 GB** | 0.54 GB |
+
+**差は 0.5%。** 並列化はメモリに影響していない——**元から 2.25 GB 必要だった**。
+そして `build-features.yml` に**枠が書いてあった**：「Vercel の枠（300 秒・2 GB）」。
+
+**2.26 GB は 2 GB に入らない。** 09-17 の初回も、並列化を入れた 09-18 も、同じ理由で
+死んでいた。**並列化（353 秒 → 77 秒）は速さの改善として正しいが、障害は直していない。**
+
+**3 つ間違えた。**
+
+1. **HTTP ステータスを持っていないのに種別を断定した。** `running` の行と往復の数から
+   「時間切れ」と推論した。**手で 1 回叩けば 1 分で分かった**ことを、しなかった
+2. **常駐だけを見ていた。** 試し打ちは `ru_maxrss`（0.63 GB）を出しており、それを見て
+   「1 GB の見積りの内側」と読んだ。**山は 2.26 GB** で、`/usr/bin/time -l` を通せば
+   出ていた。同じ日に LightGBM の測定で**まさにその差**（RSS 0.97 GB 対 山 6.37 GB）を
+   自分で観測していたのに、こちらに当てはめなかった
+3. **規則が既に書いてあったのに適用しなかった。** W4-27 は「5 分毎の推論と同じサービスに
+   重いバッチを混ぜない」と決め、**1.28 GB の `build_features` を移して**いる。PR L は
+   それより重い 2.26 GB を Vercel Cron に置いた
+
+**規則**：**「落ちた」の種別は、推論せずに取りに行く。** ログでも手で 1 回叩くのでもよい。
+**そして見積りと突き合わせるのは山であって常駐ではない。**
+
+**直した**：GitHub Actions に移した（D-26、`evaluate-daily.yml`、06:40 JST）。
+**持ち方を削るのは別の仕事として残す**——16 GB のランナーなら当面通るが、
+`pa.concat_tables` の二重取りと `(水平, ポート, サイクル)` の配列は日数が増えれば
+また効いてくる。
+
+### 172. **`python -m` の入口をファイルの途中に置いて、ワークフローが必ず落ちる形になっていた**（9/18。PR 前に本番データで見つけた）
+
+GitHub Actions へ移すために `jobs/evaluate.py` に CLI を足したとき、
+`if __name__ == "__main__":` を `to_detail` の直後——**ファイルの途中**に置いた。
+
+```
+NameError: name '_floor_hour' is not defined
+  log_hours → list_logs → read_logs → evaluate_system → _safe_system
+```
+
+**`python -m` はモジュールを `__main__` として上から順に実行する。** 入口が途中にあると、
+そこで `run()` が走り出し、**その下で定義される名前がまだ束縛されていない**。
+`_floor_hour` はファイルの最後にあった。
+
+**検査は全部通っていた。** `pytest` 864 件も `mypy --strict` も `ruff` も緑である
+——どれも**`import` してから `run()` を呼ぶ**ので、モジュールは最後まで定義されている。
+**ワークフローが使う唯一の形（`python -m`）だけを、誰も通していなかった。**
+
+**`_safe_system` が握り潰していた。** 1 システムの失敗で他を止めない設計が正しく働き、
+`NameError` は `{"error": "NameError"}` になって `status: failed` で静かに返った。
+**種類だけ残す**（CLAUDE.md §5）ので、どの名前かは出ない。**握り潰す設計は正しいが、
+握り潰したものを読む道が要る**——今回は一時的に `traceback.print_exc()` を挿して掴んだ。
+
+**見つけたのは本番のデータで空打ちしたから。** `--write` を付けずに 1 回走らせる手順が
+無ければ、**PR は緑のまま通り、翌朝 06:40 に初めて落ちていた**。
+
+**規則 2 つ**：
+
+1. **入口はファイルのいちばん最後に置く。** `build_features` も `build_profiles` も
+   そうなっている（真似したつもりで、そこだけ外していた）
+2. **`python -m` の形そのものを検査で通す。** `import` して呼ぶ検査は、入口の
+   置き場所を見ない。`subprocess` で 1 回走らせれば済む（`test_the_module_runs_as_a_script`）
 
 ---
 

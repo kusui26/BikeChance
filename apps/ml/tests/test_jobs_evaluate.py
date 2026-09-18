@@ -1,4 +1,4 @@
-"""日次評価のジョブと入口（`jobs/evaluate.py`、`api.py` の `/ml/evaluate`）。
+"""日次評価のジョブと入口（`jobs/evaluate.py` の CLI）。
 
 差し替え可能な `EvaluatePort` にしてあるので、本物の Supabase 無しで分岐を全部通せる。
 ここで守りたいのは 5 つ。
@@ -10,17 +10,21 @@
   * **1 システムの失敗が他を巻き込まない**
 """
 
+import json
+import subprocess
+import sys
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import pyarrow as pa
 import pytest
-from fastapi.testclient import TestClient
 
 from bikechance_ml.api import build_app
 from bikechance_ml.features.constants import HORIZONS_MIN
-from bikechance_ml.features.grid import JST, parquet_hours
+from bikechance_ml.features.grid import JST, jst_yesterday, parquet_hours
+from bikechance_ml.jobs import evaluate as evaluate_job
 from bikechance_ml.jobs import forecast_log
 from bikechance_ml.jobs.evaluate import (
     JOB_NAME,
@@ -37,6 +41,7 @@ from bikechance_ml.jobs.evaluate import (
     run_evaluation,
     within,
 )
+from bikechance_ml.jobs.evaluate import run as cli
 from bikechance_ml.jobs.snapshot_table import parquet_path, to_parquet_bytes
 from tests.test_eval_served import observations, stream
 
@@ -91,6 +96,8 @@ class FakePort:
         self.observed = observed
         self.written: list[Mapping[str, object]] = []
         self.finished: list[tuple[int, str, Mapping[str, object]]] = []
+        # **始まりも数える。** `running` の行だけが残るのが、いちばん厄介な壊れ方である
+        self.started: list[str] = []
         self.listed: list[str] = []
 
     def list_forecast_log(self, prefix: str, limit: int) -> tuple[str, ...]:
@@ -113,6 +120,7 @@ class FakePort:
 
     def job_started(self, job_name: str) -> int:
         assert job_name == JOB_NAME
+        self.started.append(job_name)
         return 41
 
     def job_finished(self, run_id: int, status: str, detail: Mapping[str, object]) -> None:
@@ -327,69 +335,112 @@ def test_the_probabilities_are_read_as_a_matrix() -> None:
     assert set(values.flatten().tolist()) == {800}
 
 
-# ── 入口 ──────────────────────────────────────────────────────
-@contextmanager
-def _port(port: EvaluatePort) -> Iterator[EvaluatePort]:
-    yield port
+# ── 入口（GitHub Actions の CLI）────────────────────────────────
+def _patched(monkeypatch: pytest.MonkeyPatch, port: EvaluatePort) -> None:
+    """`open_storage` を差し替えて、本物の Supabase 無しで CLI を通す。"""
+
+    @contextmanager
+    def fake_storage(config: object, *args: object, **kwargs: object) -> Iterator[EvaluatePort]:
+        yield port
+
+    monkeypatch.setattr(evaluate_job, "open_storage", fake_storage)
+    monkeypatch.setattr(evaluate_job, "read_storage_config", lambda: None)
 
 
-def client(port: EvaluatePort) -> TestClient:
-    return TestClient(build_app(make_evaluate_port=lambda: _port(port)))
-
-
-def test_the_endpoint_needs_the_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CRON_SECRET", SECRET)
-    assert client(FakePort()).get("/ml/evaluate").status_code == 401
-
-
-def test_the_endpoint_refuses_a_bad_date(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CRON_SECRET", SECRET)
-    response = client(FakePort()).get(
-        "/ml/evaluate?date=2026-13-99", headers={"Authorization": f"Bearer {SECRET}"}
-    )
-    assert response.status_code == 400
-    assert response.json()["title"] == "invalid_date"
-
-
-def test_the_endpoint_measures_the_day_it_is_given(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CRON_SECRET", SECRET)
-    port = full_day_port()
-    response = client(port).get(
-        "/ml/evaluate?date=2026-09-07", headers={"Authorization": f"Bearer {SECRET}"}
-    )
-    assert response.status_code == 200
-    assert response.json()["metric_date"] == "2026-09-07"
-    assert response.headers["cache-control"] == "no-store"
-
-
-def test_the_day_is_given_as_date_not_as_the_python_name(
-    monkeypatch: pytest.MonkeyPatch,
+def test_the_cli_measures_the_day_it_is_given(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**URL 上の名前は `date`。** Python 側の `date_text` では効かない。
+    """`--date` で日を指定できる。**測り直しはここから。**"""
+    port = full_day_port()
+    _patched(monkeypatch, port)
+    assert cli(["--date", "2026-09-07", "--write"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["metric_date"] == "2026-09-07"
+    assert printed["wrote"] is True
+    assert len(port.written) > 0
+    # **書く回は始まりと終わりの両方が残る**（見張りが「遅い」と「止まった」を分けられる）
+    assert port.started == [JOB_NAME] and len(port.finished) == 1
 
-    FastAPI は**知らない問い合わせ引数を黙って捨てる**ので、名前を間違えると
-    400 ではなく「指定したつもりで前日が測られる」。**取り違えたときに気づけない
-    形の失敗**なので、どちらの向きも固定しておく（W5 プラン §12 の 170）。
+
+def test_the_cli_defaults_to_yesterday(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**既定は前日（JST）。** 定時の回は引数なしで走る。"""
+    _patched(monkeypatch, FakePort())
+    assert cli([]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    expected = jst_yesterday(datetime.now(UTC))
+    assert printed["metric_date"] == expected.isoformat()
+
+
+def test_the_cli_writes_nothing_without_the_flag(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**`--write` を付けなければ 1 行も書かない。**
+
+    `build_features` の `--upload` と同じ作法である——**手元で確かめたことが本番の
+    記録を汚さない**。`job_runs` にも残らない。
     """
-    monkeypatch.setenv("CRON_SECRET", SECRET)
-    header = {"Authorization": f"Bearer {SECRET}"}
-    given = client(full_day_port()).get("/ml/evaluate?date=2026-09-07", headers=header)
-    assert given.json()["metric_date"] == "2026-09-07"
+    port = full_day_port()
+    _patched(monkeypatch, port)
+    assert cli(["--date", "2026-09-07"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["wrote"] is False
+    assert printed["status"] == "ok"
+    assert port.written == []
+    # **`job_runs` に始まりも終わりも残さない。** 始まりだけ書くと `running` が残る
+    assert port.started == [] and port.finished == []
 
-    # **古い名前は効かない**（既定の「前日」に落ちる。2026-09-07 にはならない）
-    ignored = client(full_day_port()).get("/ml/evaluate?date_text=2026-09-07", headers=header)
-    assert ignored.json()["metric_date"] != "2026-09-07"
+
+def test_the_cli_returns_one_when_a_system_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**失敗は終了コード 1**（ワークフローが赤くなる）。"""
+    _patched(monkeypatch, FakePort([log_file(["p1"], at(9, 0))]))
+    assert cli(["--date", "2026-09-07", "--write"]) == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
 
 
-def test_the_endpoint_reports_a_failure_with_500(monkeypatch: pytest.MonkeyPatch) -> None:
-    """**エラーは 500 で返す**（Vercel Observability のエラー率検知を効かせる）。"""
-    monkeypatch.setenv("CRON_SECRET", SECRET)
-    port = FakePort([log_file(["p1"], at(9, 0))])
-    response = client(port).get(
-        "/ml/evaluate?date=2026-09-07", headers={"Authorization": f"Bearer {SECRET}"}
+def test_the_cli_returns_zero_for_a_day_without_logs(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**測れなかった日は 0 で返す**（完了条件 5）。埋めるものが無いだけである。"""
+    _patched(monkeypatch, FakePort())
+    assert cli(["--date", "2026-09-07", "--write"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "skipped"
+
+
+def test_the_module_runs_as_a_script() -> None:
+    """**`python -m` で本当に動くか。** ワークフローはこの形でしか呼ばない。
+
+    `import` してから `run()` を呼ぶ検査は、**モジュールが最後まで定義されてから**
+    走るので、入口の置き場所を間違えても通ってしまう。`-m` は `__main__` として
+    **上から順に実行する**ので、入口を途中に置くと**まだ定義されていない名前**を掴む。
+    2026-09-18 に `_floor_hour` で実際にそうなった（W5 プラン §12 の 172）。
+
+    ここでは**引数が足りない**ことだけを見る（本物の Supabase は要らない）。
+    `--date` の形が悪ければ `argparse` が 2 で落ち、モジュールが壊れていれば 1 で落ちる。
+    """
+    done = subprocess.run(
+        [sys.executable, "-m", "bikechance_ml.jobs.evaluate", "--date", "壊れた日付"],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parent.parent,
     )
-    assert response.status_code == 500
-    assert response.json()["ok"] is False
+    # **ValueError で落ちる**（`date.fromisoformat`）。NameError なら別の文言になる
+    assert "NameError" not in done.stderr, done.stderr
+    assert "ValueError" in done.stderr or "Invalid isoformat" in done.stderr, done.stderr
+
+
+def test_the_route_is_gone() -> None:
+    """**`/ml/evaluate` はもう無い**（D-26 で GitHub Actions に移した）。
+
+    残しておくと「叩けば測れる」ように見えるが、**Vercel では 2.26 GB が枠に入らず
+    必ず落ちる**。動かない入口を置いておくほうが、無いより危ない（§12 の 171）。
+    """
+    paths = {route.path for route in build_app().routes}  # type: ignore[attr-defined]
+    assert "/ml/evaluate" not in paths
+    assert "/ml/reference" in paths
 
 
 # ── 読み込む時間帯 ────────────────────────────────────────────
