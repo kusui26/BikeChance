@@ -1,3 +1,7 @@
+import {
+  WEATHER_LOCATIONS_PER_MINUTE,
+  WEATHER_RATE_WINDOW_MS,
+} from "@bikechance/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { archiveWeather, type ArchiveWeatherParams } from "./archive-weather";
 import type { RawUploader } from "./storage";
@@ -73,12 +77,31 @@ const uploaderThat = (
   return { upload, paths };
 };
 
-const paramsWith = (db: WeatherPort, upload: RawUploader): ArchiveWeatherParams => ({
+/**
+ * 待ちを記録して、実際には待たない。**本当に 1 分待つ試験は書かれなくなる**ので、
+ * 「何ミリ秒で呼ばれたか」を見て待ちが挟まったことを確かめる。
+ */
+const recordingSleep = (): { sleep: (ms: number) => Promise<void>; waits: number[] } => {
+  const waits: number[] = [];
+  return {
+    sleep: async (ms) => {
+      waits.push(ms);
+    },
+    waits,
+  };
+};
+
+const paramsWith = (
+  db: WeatherPort,
+  upload: RawUploader,
+  sleep?: (ms: number) => Promise<void>,
+): ArchiveWeatherParams => ({
   db,
   upload,
   gzip: async (body) => body.slice(0, Math.max(1, Math.floor(body.byteLength / 4))),
   contact_email: CONTACT_EMAIL,
   now: NOW,
+  sleep: sleep ?? (async () => {}),
 });
 
 afterEach(() => {
@@ -237,5 +260,76 @@ describe("archiveWeather", () => {
     expect(seen[0]).toContain("precipitation_probability");
     // 窓は JST 当日 0 時起点なので、3 日 = 72 時間。jma_msm が欠けない最大（W3 §12 の 77）
     expect(seen[0]).toContain("forecast_days=3");
+  });
+});
+
+describe("投げる速さ（Open-Meteo の 1 分 600 地点）", () => {
+  const everyBatchOk = (): void => {
+    stubFetch(async (url) => {
+      const count = (new URL(String(url)).searchParams.get("latitude") ?? "").split(",").length;
+      return okResponse(forecastBody(count));
+    });
+  };
+
+  it("**600 格子までは待たない**（いままで通っていた大きさ）", async () => {
+    everyBatchOk();
+    const { db } = recordingDb({ cells: cellsOf(500) });
+    const { upload } = uploaderThat();
+    const { sleep, waits } = recordingSleep();
+    const summary = await archiveWeather(paramsWith(db, upload, sleep));
+    expect(summary.ok).toBe(true);
+    expect(waits).toEqual([]);
+    expect(summary.waited_ms).toBe(0);
+  });
+
+  it("**601 格子で窓をまたぐ**（ここが 429 になっていた）", async () => {
+    everyBatchOk();
+    const { db } = recordingDb({ cells: cellsOf(601) });
+    const { upload } = uploaderThat();
+    const { sleep, waits } = recordingSleep();
+    const summary = await archiveWeather(paramsWith(db, upload, sleep));
+    expect(summary.ok).toBe(true);
+    expect(waits).toEqual([WEATHER_RATE_WINDOW_MS]);
+    expect(summary.waited_ms).toBe(WEATHER_RATE_WINDOW_MS);
+  });
+
+  it("**どの窓も 500 地点を超えない**（実際に投げた順で数える）", async () => {
+    const sent: number[] = [];
+    stubFetch(async (url) => {
+      const count = (new URL(String(url)).searchParams.get("latitude") ?? "").split(",").length;
+      sent.push(count);
+      return okResponse(forecastBody(count));
+    });
+    const { db } = recordingDb({ cells: cellsOf(602) });
+    const { upload } = uploaderThat();
+    const waits: number[] = [];
+    const sleep = async (ms: number): Promise<void> => {
+      // 待った位置を「そこまでに投げた数」で記録する
+      waits.push(sent.length);
+      await Promise.resolve(ms);
+    };
+    await archiveWeather(paramsWith(db, upload, sleep));
+
+    expect(sent).toEqual([100, 100, 100, 100, 100, 100, 2]);
+    expect(waits).toEqual([5]); // 5 分割（500 地点）投げた直後に待つ
+    let spent = 0;
+    for (const [index, size] of sent.entries()) {
+      if (waits.includes(index)) {
+        spent = 0;
+      }
+      spent += size;
+      expect(spent).toBeLessThanOrEqual(WEATHER_LOCATIONS_PER_MINUTE);
+    }
+  });
+
+  it("待った時間は job_runs の記録に残る", async () => {
+    everyBatchOk();
+    const { db, finished } = recordingDb({ cells: cellsOf(602) });
+    const { upload } = uploaderThat();
+    const { sleep } = recordingSleep();
+    await archiveWeather(paramsWith(db, upload, sleep));
+    const detail = finished.at(-1)?.detail;
+    expect(detail?.waited_ms).toBe(WEATHER_RATE_WINDOW_MS);
+    expect(detail?.n_cells).toBe(602);
   });
 });

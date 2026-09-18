@@ -78,6 +78,8 @@ class IssueOutcome:
     n_cells: int
     n_written: int
     error: str | None
+    #: 読めなかった分割の数。**0 でない発行は天気の被覆がその分だけ欠ける**
+    n_missing_batches: int = 0
 
 
 @dataclass(frozen=True)
@@ -109,32 +111,55 @@ class LoadSummary:
         }
 
 
-def read_issue(source: WeatherPort, issue: PendingIssue) -> tuple[CellForecast, ...]:
-    """1 発行ぶんの 6 ファイルを読んで 1 つに並べる。**1 つでも欠ければ止める。**"""
+@dataclass(frozen=True)
+class ReadIssue:
+    """読めた予報と、**読めなかった分割の数**。"""
+
+    forecasts: tuple[CellForecast, ...]
+    n_missing: int
+
+
+def read_issue(source: WeatherPort, issue: PendingIssue) -> ReadIssue:
+    """1 発行ぶんの分割を読んで 1 つに並べる。**欠けた分割は飛ばす。**
+
+    ~~1 つでも欠ければ止める~~ → **読めたものは入れる**（2026-09-18 に変えた。
+    W5 プラン §12 の 173）。2026-09-17〜18 は取得が 1 分の枠に当たって 7 分割目だけが
+    落ちており、**600 / 602 セルは Storage に在るのに 1 セルも取り込めていなかった**。
+
+    **欠けた分を補間はしない**（CLAUDE.md §6）。入らなかったセルは `weather_hourly` に
+    行が無いままで、`build_features` の天気の被覆にそのまま出る。
+
+    **1 つも読めなければ止める。** それは「途中まで保存できた」ではなく「何も無い」で、
+    `v_weather_pending` が `n_saved > 0` で絞っている前提が崩れている。
+    """
     forecasts: list[CellForecast] = []
+    missing = 0
     for batch in range(batch_count(issue.n_cells)):
         path = weather_object_path(issue.hour_epoch_s, batch)
         body = source.download(WEATHER_BUCKET, path)
         if body is None:
-            raise MissingBatchError(f"分割が Storage に無い: {path}")
+            missing += 1
+            continue
         forecasts.extend(read_batch(body, issue.issued_hour))
-    return tuple(forecasts)
+    if not forecasts:
+        raise MissingBatchError(f"分割が 1 つも読めなかった: {issue.issued_hour.isoformat()}")
+    return ReadIssue(tuple(forecasts), missing)
 
 
 def load_issue(source: WeatherPort, issue: PendingIssue) -> IssueOutcome:
     """1 発行を取り込む。**例外は種類だけを詰め替える**（文言に接続先が混じらない）。"""
     label = issue.issued_hour.isoformat()
     try:
-        forecasts = read_issue(source, issue)
+        read = read_issue(source, issue)
         written = source.upsert_weather_hourly(
-            to_rows(forecasts, issue.issued_hour, issue.available_at)
+            to_rows(read.forecasts, issue.issued_hour, issue.available_at)
         )
     except Exception as cause:
         # **種類だけを残す**（文言に接続先が混じる経路を作らない。`infer` と同じ）。
         # 期待している失敗は `ArchiveShapeError` と `MissingBatchError` の 2 つだが、
         # 取りこぼしても次の実行が拾えるので、ここでは区別せずに次の発行へ進む
         return IssueOutcome(label, False, issue.n_cells, 0, type(cause).__name__)
-    return IssueOutcome(label, True, issue.n_cells, written, None)
+    return IssueOutcome(label, True, issue.n_cells, written, None, read.n_missing)
 
 
 def load_pending(

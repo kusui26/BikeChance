@@ -16,7 +16,10 @@
  */
 import {
   WEATHER_BATCH_SIZE,
+  WEATHER_LOCATIONS_PER_MINUTE,
+  WEATHER_RATE_WINDOW_MS,
   batchCells,
+  pacingDelaysMs,
   truncateToHour,
   weatherObjectPath,
   type EpochSeconds,
@@ -27,6 +30,12 @@ import { fetchWeatherBatch, type WeatherCell } from "./weather-fetch";
 import type { WeatherPort } from "./weather-port";
 
 const MS_PER_S = 1000;
+
+/** 速さを抑えるための待ち。**ここだけが時計に触る**（決め方は `pacingDelaysMs`）。 */
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 export const ARCHIVE_WEATHER_JOB_NAME = "archive_weather";
 
@@ -55,6 +64,8 @@ export type ArchiveWeatherSummary = {
   readonly gzip_bytes: number;
   readonly hour_epoch_s: EpochSeconds;
   readonly duration_ms: number;
+  /** 速さを抑えるために待った合計（ミリ秒）。**枠に近づいたらここが伸びる。** */
+  readonly waited_ms: number;
   readonly batches: readonly BatchOutcome[];
   readonly error: JobFailure | null;
 };
@@ -65,6 +76,14 @@ export type ArchiveWeatherParams = {
   readonly gzip: (body: Uint8Array) => Promise<Uint8Array>;
   readonly contact_email: string;
   readonly now: Date;
+  /**
+   * 速さを抑えるための待ち。**省くと本物の時計で待つ。**
+   *
+   * 差し替えられるのは試験のためである——待ちは 1 分以上あり、**本当に待つ試験は
+   * 書かれなくなる**。差し替えた側は「何ミリ秒で呼ばれたか」を見て、待ちが実際に
+   * 挟まっていることを確かめる（`archive-weather.test.ts`）。
+   */
+  readonly sleep?: (ms: number) => Promise<void>;
 };
 
 const toEpochSeconds = (date: Date): EpochSeconds => Math.floor(date.getTime() / MS_PER_S);
@@ -132,6 +151,7 @@ const summarize = (params: {
   readonly n_cells: number;
   readonly batches: readonly BatchOutcome[];
   readonly duration_ms: number;
+  readonly waited_ms: number;
   readonly error: JobFailure | null;
 }): ArchiveWeatherSummary => {
   const { batches } = params;
@@ -149,6 +169,7 @@ const summarize = (params: {
     gzip_bytes: batches.reduce((total, outcome) => total + (outcome.gzip_bytes ?? 0), 0),
     hour_epoch_s: params.hour_epoch_s,
     duration_ms: params.duration_ms,
+    waited_ms: params.waited_ms,
     batches,
     error: params.error,
   };
@@ -165,6 +186,7 @@ const toDetail = (summary: ArchiveWeatherSummary): Readonly<Record<string, unkno
   gzip_bytes: summary.gzip_bytes,
   hour_epoch_s: summary.hour_epoch_s,
   duration_ms: summary.duration_ms,
+  waited_ms: summary.waited_ms,
   ...(summary.n_failed === 0
     ? {}
     : { failures: summary.batches.filter((b) => !b.ok).map((b) => `${b.batch}: ${b.error}`) }),
@@ -214,8 +236,21 @@ export const archiveWeather = async (
       });
     }
     const batches = batchCells(cells, WEATHER_BATCH_SIZE);
+    // **投げる前に待ちを決める。** 実時間ではなく分割の大きさだけで決まるので、
+    // 何秒待つことになるかは要求を 1 つも投げる前に分かる
+    const delays = pacingDelaysMs(
+      batches.map((batch) => batch.length),
+      WEATHER_LOCATIONS_PER_MINUTE,
+      WEATHER_RATE_WINDOW_MS,
+    );
     const outcomes: BatchOutcome[] = [];
+    let waited_ms = 0;
     for (const [index, batch] of batches.entries()) {
+      const delay = delays[index] ?? 0;
+      if (delay > 0) {
+        await (params.sleep ?? sleep)(delay);
+        waited_ms += delay;
+      }
       outcomes.push(await archiveBatch({ job: params, cells: batch, batch: index, epoch_s }));
     }
     return summarize({
@@ -223,6 +258,7 @@ export const archiveWeather = async (
       n_cells: cells.length,
       batches: outcomes,
       duration_ms: Date.now() - started_ms,
+      waited_ms,
       error: null,
     });
   })().catch((cause: unknown) =>
@@ -231,6 +267,7 @@ export const archiveWeather = async (
       n_cells: 0,
       batches: [],
       duration_ms: Date.now() - started_ms,
+      waited_ms: 0,
       error: isJobError(cause) ? cause.failure : toJobFailure({ phase: "unknown", cause }),
     }),
   );
