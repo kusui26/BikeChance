@@ -1,7 +1,4 @@
-import {
-  WEATHER_LOCATIONS_PER_MINUTE,
-  WEATHER_RATE_WINDOW_MS,
-} from "@bikechance/shared";
+import { WEATHER_LOCATIONS_PER_MINUTE, WEATHER_RATE_WINDOW_MS } from "@bikechance/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { archiveWeather, type ArchiveWeatherParams } from "./archive-weather";
 import type { RawUploader } from "./storage";

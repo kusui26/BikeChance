@@ -5,19 +5,22 @@
 -- `tests/test_features_weather.py` が持つ。
 
 begin;
-select plan(37);
+select plan(39);
 
 delete from public.weather_hourly;
 delete from public.job_runs;
 
 -- 予報ファイルを 1 つ「入手した」ことにする（`v_weather_files` はここから作られる）
+-- `p_saved` は**実際に Storage に置けた分割の数**。0052 から、未処理かどうかは
+-- ジョブの status ではなく**これ**で決まる（「落ちたが一部は保存できた」が在りうる）
 create function pg_temp.archived(
-  p_hour timestamptz, p_cells integer, p_status text default 'ok'
+  p_hour timestamptz, p_cells integer, p_status text default 'ok', p_saved integer default 6
 ) returns void language sql as $$
   insert into public.job_runs (job_name, started_at, finished_at, status, detail)
   values ('archive_weather', p_hour, p_hour + interval '18 minutes', p_status,
           jsonb_build_object('hour_epoch_s', extract(epoch from p_hour)::bigint,
-                             'n_cells', p_cells, 'n_saved', 6, 'n_failed', 0));
+                             'n_cells', p_cells, 'n_saved', p_saved,
+                             'n_failed', case when p_status = 'ok' then 0 else 1 end));
 $$;
 
 create function pg_temp.forecast_rows(p_hour timestamptz, p_cells integer) returns jsonb
@@ -129,18 +132,22 @@ select is(has_table_privilege('anon', 'public.v_weather_pending', 'select'), fal
 
 select pg_temp.archived('2026-09-10T00:00Z', 3);   -- 3 格子ぶん取り込み済み
 select pg_temp.archived('2026-09-10T01:00Z', 3);   -- まだ 0 行
-select pg_temp.archived('2026-09-10T02:00Z', 3, 'failed');  -- 失敗した取得
+-- **落ちたが一部は保存できた**（2026-09-17 の形。7 分割のうち 6 つだけ置けた）
+select pg_temp.archived('2026-09-10T02:00Z', 3, 'failed', 6);
+-- **1 つも保存できなかった**（取得そのものが落ちた）
+select pg_temp.archived('2026-09-10T03:00Z', 3, 'failed', 0);
 
 select is(
   (select count(*)::integer from public.v_weather_pending),
-  1, '取り込み済みの発行は出ない。未処理の 1 件だけ'
+  2, '取り込み済みの発行は出ない。未処理の 2 件（01:00 と、落ちたが一部は在る 02:00）'
 );
 select is(
-  (select issued_hour from public.v_weather_pending),
-  '2026-09-10T01:00Z'::timestamptz, '未処理なのは 01:00 の発行'
+  (select count(*)::integer from public.v_weather_pending
+    where issued_hour = '2026-09-10T01:00Z'),
+  1, '未処理なのは 01:00 の発行'
 );
 select is(
-  (select n_loaded from public.v_weather_pending),
+  (select n_loaded from public.v_weather_pending where issued_hour = '2026-09-10T01:00Z'),
   0, 'まだ 1 行も入っていない'
 );
 -- **途中まで入った発行も未処理として出る**（6 分割のうち一部だけ入った、など）
@@ -149,10 +156,25 @@ select is(
   (select n_loaded from public.v_weather_pending where issued_hour = '2026-09-10T01:00Z'),
   2, '途中まで入った発行は「2/3」として残る'
 );
+-- **落ちても、置けた分割が在るなら未処理として出す**（0052。W5 プラン §12 の 173）。
+-- 2026-09-17 はここで 600 / 602 セルが捨てられていた
 select is(
   (select count(*)::integer from public.v_weather_pending
     where issued_hour = '2026-09-10T02:00Z'),
-  0, '失敗した取得は未処理に出さない（ファイルが無い）'
+  1, '**落ちたが一部は保存できた発行は未処理として出る**'
+);
+select is(
+  (select count(*)::integer from public.v_weather_pending
+    where issued_hour = '2026-09-10T03:00Z'),
+  0, '1 つも保存できなかった発行は出ない（n_saved = 0）'
+);
+-- **ただし 1 度だけ。** 欠けた分は二度と取れないので、入り切るまで出し続けると
+-- `load_weather`（1 回 6 発行・古い順）が新しい発行に永久に到達しない
+select public.upsert_weather_hourly(pg_temp.forecast_rows('2026-09-10T02:00Z', 1));
+select is(
+  (select count(*)::integer from public.v_weather_pending
+    where issued_hour = '2026-09-10T02:00Z'),
+  0, '**落ちた発行は 1 行入ったらもう出ない**（新しい発行に到達できる）'
 );
 
 -- ────────────────────────────────────────────────────────────────
@@ -160,7 +182,7 @@ select is(
 -- ────────────────────────────────────────────────────────────────
 select public.upsert_weather_hourly(pg_temp.forecast_rows(now() - interval '31 days', 2));
 select public.upsert_weather_hourly(pg_temp.forecast_rows(now() - interval '29 days', 2));
-select is((select count(*)::integer from public.weather_hourly), 9, '古い行も含めて 9 行');
+select is((select count(*)::integer from public.weather_hourly), 10, '古い行も含めて 10 行');
 
 select is(
   (public.run_maintenance(60) ->> 'weather_rows_deleted')::integer,
@@ -172,7 +194,7 @@ select is(
   0, '古い行は残っていない'
 );
 select cmp_ok(
-  (select count(*)::integer from public.weather_hourly), '=', 7,
+  (select count(*)::integer from public.weather_hourly), '=', 8,
   '残るのは 29 日前の 2 行と今日の 5 行'
 );
 
