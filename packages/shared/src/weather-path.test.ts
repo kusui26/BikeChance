@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { WEATHER_BATCH_SIZE } from "./constants";
-import { batchCells, truncateToHour, weatherObjectPath } from "./weather-path";
+import {
+  ARCHIVE_WEATHER_MAX_DURATION_S,
+  WEATHER_BATCH_SIZE,
+  WEATHER_LOCATIONS_PER_MINUTE,
+  WEATHER_RATE_WINDOW_MS,
+} from "./constants";
+import {
+  batchCells,
+  pacingDelaysMs,
+  totalPacingMs,
+  truncateToHour,
+  weatherObjectPath,
+} from "./weather-path";
 
 describe("truncateToHour", () => {
   it("時の境界に切り下げる", () => {
@@ -63,5 +74,65 @@ describe("batchCells", () => {
 
   it("大きさ 0 以下は弾く", () => {
     expect(() => batchCells([1], 0)).toThrow();
+  });
+});
+
+describe("pacingDelaysMs", () => {
+  const BUDGET = WEATHER_LOCATIONS_PER_MINUTE;
+  const WINDOW = WEATHER_RATE_WINDOW_MS;
+
+  it("予算に収まるうちは待たない", () => {
+    expect(pacingDelaysMs([100, 100, 100, 100, 100], BUDGET, WINDOW)).toEqual([0, 0, 0, 0, 0]);
+  });
+
+  it("**実測の 602 格子**は 5 分割投げてから 1 度だけ待つ", () => {
+    const sizes = batchCells(
+      Array.from({ length: 602 }, (_, index) => index),
+      WEATHER_BATCH_SIZE,
+    ).map((batch) => batch.length);
+    expect(sizes).toEqual([100, 100, 100, 100, 100, 100, 2]);
+    expect(pacingDelaysMs(sizes, BUDGET, WINDOW)).toEqual([0, 0, 0, 0, 0, WINDOW, 0]);
+  });
+
+  it("**どの 1 分の窓も予算を超えない**（そこが守りたいこと）", () => {
+    const sizes = [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100];
+    const delays = pacingDelaysMs(sizes, BUDGET, WINDOW);
+    let spent = 0;
+    for (const [index, size] of sizes.entries()) {
+      if ((delays[index] ?? 0) > 0) {
+        spent = 0;
+      }
+      spent += size;
+      expect(spent).toBeLessThanOrEqual(BUDGET);
+    }
+  });
+
+  it("**待ちは分割の前に置く**（要素数は入力と同じ）", () => {
+    expect(pacingDelaysMs([100, 100], BUDGET, WINDOW)).toHaveLength(2);
+    expect(pacingDelaysMs([], BUDGET, WINDOW)).toEqual([]);
+  });
+
+  it("予算より大きい 1 分割は待たせない（待っても通らない）", () => {
+    expect(pacingDelaysMs([600], BUDGET, WINDOW)).toEqual([0]);
+  });
+
+  it("予算 0 以下は弾く", () => {
+    expect(() => pacingDelaysMs([1], 0, WINDOW)).toThrow();
+  });
+
+  it("合計は待ちの和", () => {
+    const sizes = [100, 100, 100, 100, 100, 100, 2];
+    expect(totalPacingMs(sizes, BUDGET, WINDOW)).toBe(WINDOW);
+  });
+
+  it("**いまの格子数なら maxDuration に収まる**（余裕がどれだけあるか）", () => {
+    // 602 格子は窓 1 つぶん待つ。取得そのものは実測 5 秒
+    const waited = totalPacingMs([100, 100, 100, 100, 100, 100, 2], BUDGET, WINDOW);
+    expect(waited + 5_000).toBeLessThan(ARCHIVE_WEATHER_MAX_DURATION_S * 1000);
+    // **1,000 格子でもまだ収まる**（窓 1 つ）。1,100 を超えると窓が 2 つになり危うい
+    const thousand = Array.from({ length: 10 }, () => 100);
+    expect(totalPacingMs(thousand, BUDGET, WINDOW) + 5_000).toBeLessThan(
+      ARCHIVE_WEATHER_MAX_DURATION_S * 1000,
+    );
   });
 });

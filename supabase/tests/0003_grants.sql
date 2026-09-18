@@ -192,6 +192,7 @@ create function pg_temp.cron_only() returns text[] language sql immutable as $$
     'trigger_infer',
     'check_jobs_missing', 'check_jobs_failed', 'check_cron_jobs', 'check_parquet_gap',
     'check_reference_data', 'check_inference', 'check_model_freshness',
+    'check_weather_stale',
     'rebuild_geo', 'rebuild_station_geo', 'rebuild_station_neighbors',
     'rollup_station_hourly',
     -- 他の関数の中からだけ呼ぶ補助

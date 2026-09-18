@@ -139,7 +139,7 @@ select is(
   (select count(*)::int
      from jsonb_object_keys((select detail->'checks' from public.job_runs
                               where job_name = 'monitor_jobs' order by id desc limit 1))),
-  7, '検査は 7 つになった（0048 で check_model_freshness を足した）'
+  8, '検査は 8 つになった（0048 の check_model_freshness、0052 の check_weather_stale）'
 );
 select ok(
   (select detail->'checks' ? 'check_model_freshness' from public.job_runs

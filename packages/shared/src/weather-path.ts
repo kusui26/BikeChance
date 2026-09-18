@@ -56,3 +56,52 @@ export const batchCells = <T>(cells: readonly T[], size: number): readonly (read
   }
   return batches;
 };
+
+/**
+ * **分割を投げる前に待つ時間**を、分割の大きさの並びから決める（W5 プラン §12 の 173）。
+ *
+ * Open-Meteo の無料枠は**地点の数**で数えるので、1 分の予算（`budget`）を超えないように
+ * 窓をまたぐ。返すのは「その分割を投げる**前**に待つミリ秒」で、要素数は入力と同じ。
+ *
+ * ```
+ * pacingDelaysMs([100, 100, 100, 100, 100, 100, 2], 500, 65_000)
+ *   → [0, 0, 0, 0, 0, 65_000, 0]
+ * ```
+ *
+ * **予算を使い切った次の分割の前**に 1 回だけ待つ。5 分割（500 地点）を投げ、待ち、
+ * 残り 2 分割（102 地点）を投げる——1 分あたり最大 500 地点に収まる。
+ *
+ * **窓の起点は数え直さない。** 経過時間を測って差し引けばもう少し短くできるが、
+ * **実時間に依存する関数はテストが時計に縛られる**。取得自体が数秒かかるぶん
+ * 余分に待つだけで、失うのは数秒である。
+ *
+ * **1 つの分割が予算より大きい場合は待たない。** 待っても通らない（分割の大きさを
+ * 直すべき問題）ので、ここで無限に待たせない。`WEATHER_BATCH_SIZE`（100）は
+ * 予算（500）より小さいので、実際には起こらない。
+ */
+export const pacingDelaysMs = (
+  sizes: readonly number[],
+  budget: number,
+  windowMs: number,
+): readonly number[] => {
+  if (budget < 1) {
+    throw new Error(`1 分の予算は 1 以上である必要があります: ${budget}`);
+  }
+  let spent = 0;
+  return sizes.map((size) => {
+    if (size > budget) {
+      spent = 0;
+      return 0;
+    }
+    if (spent + size > budget) {
+      spent = size;
+      return windowMs;
+    }
+    spent += size;
+    return 0;
+  });
+};
+
+/** 上の待ち時間の合計。**要約に載せて、枠に近づいたら気づけるようにする。** */
+export const totalPacingMs = (sizes: readonly number[], budget: number, windowMs: number): number =>
+  pacingDelaysMs(sizes, budget, windowMs).reduce((total, one) => total + one, 0);

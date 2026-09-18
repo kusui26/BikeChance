@@ -31,9 +31,11 @@ from bikechance_ml.jobs.load_weather import (
     run_load,
 )
 from bikechance_ml.jobs.weather_archive import (
+    WEATHER_BATCH_SIZE,
     WEATHER_BUCKET,
     PendingIssue,
     issued_hour_of,
+    read_batch,
     weather_object_path,
 )
 
@@ -159,8 +161,23 @@ def test_nothing_pending_is_a_success() -> None:
 
 
 # ── 落ちたとき ────────────────────────────────────────────────
-def test_a_missing_batch_fails_only_that_issue() -> None:
-    """**部分的に取り込まない。** その発行は未処理のまま残り、次の実行が拾う。"""
+def test_a_missing_batch_does_not_lose_the_other_batches() -> None:
+    """**読めた分割は入れる**（2026-09-18 に変えた。W5 プラン §12 の 173）。
+
+    ~~1 つでも欠ければ止める~~ だったので、2026-09-17〜18 は **600 / 602 セルが
+    Storage に在るのに 1 セルも取り込めていなかった**。欠けた分は補間せず、
+    行が無いまま残る（CLAUDE.md §6）。
+    """
+    # 3 分割のうち真ん中が無い
+    port = FakePort(missing=frozenset({weather_object_path(HOUR_EPOCH_S, 1)}))
+    read = read_issue(port, _issue(n_cells=3 * WEATHER_BATCH_SIZE))
+    assert read.n_missing == 1
+    # 読めた 2 分割ぶんは揃っている（作り物の本体は 1 分割 2 セル）
+    assert len(read.forecasts) == 2 * len(read_batch(BODY, ISSUED))
+
+
+def test_an_issue_with_no_batches_at_all_still_fails() -> None:
+    """**1 つも読めなければ止める。** それは「途中まで」ではなく「何も無い」。"""
     good = _issue(HOUR_EPOCH_S - 3600)
     port = FakePort(
         pending=(good, _issue()), missing=frozenset({weather_object_path(HOUR_EPOCH_S, 0)})
@@ -174,6 +191,17 @@ def test_a_missing_batch_fails_only_that_issue() -> None:
     ]
     # **落ちた発行の行は 1 つも入っていない**
     assert all(key[2] != ISSUED.isoformat() for key in port.stored)
+
+
+def test_the_number_of_missing_batches_is_reported() -> None:
+    """**欠けた数を残す。** 天気の被覆がその分だけ欠けることが記録から読める。"""
+    port = FakePort(
+        pending=(_issue(n_cells=3 * WEATHER_BATCH_SIZE),),
+        missing=frozenset({weather_object_path(HOUR_EPOCH_S, 2)}),
+    )
+    summary = load_pending(port, NOW - timedelta(days=1), 6, NOW)
+    assert summary.ok
+    assert summary.n_loaded == 1
 
 
 def test_a_broken_file_fails_only_that_issue() -> None:
