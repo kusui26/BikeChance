@@ -558,17 +558,20 @@ create table public.model_daily_metrics (
 );
 ```
 
-`/ml/evaluate`（Vercel Cron 04:40 JST）が**前日ぶんを 1 回で入れる**。読むのは
-`forecast-log/`（1 サイクル 1 ファイル）と `gbfs-parquet` の実測で、**ラベルも除外も
-学習と同じ関数**（`features/labels.py`・`features/exclude.py`）を通る。
+**GitHub Actions**（`evaluate-daily.yml`、06:40 JST）が**前日ぶんを 1 回で入れる**。
+読むのは `forecast-log/`（1 サイクル 1 ファイル）と `gbfs-parquet` の実測で、
+**ラベルも除外も学習と同じ関数**（`features/labels.py`・`features/exclude.py`）を通る。
 
-**測り直しは `?date=YYYY-MM-DD`**（JST の暦日）。主キーで衝突させるので、同じ日を
-何度測っても行は増えない。**引数名を間違えても 400 にはならず、黙って前日が測られる**
-——FastAPI は知らない問い合わせ引数を捨てるためで、`?date_text=` のような古い名前は
-効かない（W5 プラン §12 の 170）。
+**Vercel Cron ではない。** 実測の山が **2.26 GB** で枠（300 秒・2 GB）に入らず、
+2026-09-17・18 の 2 回とも `FUNCTION_INVOCATION_FAILED` で死んだ（W5 プラン §12 の 171、
+開発プラン §15 の D-26）。**`GET /ml/evaluate` は消してある。**
 
-**読み取りは並行**（`io/fanout.py`）。1 日ぶんは 2 システムで**予測ログ 576 件・84 MB**に
-実測 58 件が加わり、直列だと `maxDuration`（240 秒）を超える（同 169）。
+**測り直しは `--date YYYY-MM-DD`**（JST の暦日。`workflow_dispatch` の `date` 入力）。
+主キーで衝突させるので、同じ日を何度測っても行は増えない。
+
+**読み取りは並行**（`io/fanout.py`、`IO_WORKERS = 16`）。1 日ぶんは 2 システムで
+**予測ログ 576 件・84 MB**に実測 58 件が加わり、直列だと 686 往復ぶん待つ
+（実測 353 秒 → 77 秒。同 169）。
 
 **全数であって標本ではない。** 配った全ポート × 全サイクルを数えるので抽出の重みが無い。
 **オフラインの報告書と比べるときは「重み付き」のほう**と並べる——重みは「標本から母集団を

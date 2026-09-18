@@ -1,0 +1,109 @@
+name: 実運用 Brier の日次評価
+
+# 前日ぶんの**配った確率**を実測と突き合わせ、`model_daily_metrics` に入れる。
+# W5 プラン §6.12 の PR L、開発プラン §8.5。
+#
+# **Vercel Cron ではなく GitHub Actions に置く**（開発プラン §15 の D-26）。
+# 2026-09-16 を実測すると**メモリの山は 2.26 GB** で、Vercel の枠（300 秒・2 GB）に
+# 入らない。PR L は Vercel Cron 04:40 JST に置いたが、**初回（09-17）と 2 回目（09-18）が
+# どちらも `FUNCTION_INVOCATION_FAILED` で死に**、`model_daily_metrics` は 0 行だった
+# （W5 プラン §12 の 171）。
+#
+# **W4-27 が `build_features` について決めたのと同じ規律である**：5 分毎の推論と同じ
+# サービスに重いバッチを混ぜない。あのときは 1.28 GB で枠には収まっていたが、
+# それでも移した。**こちらは収まってすらいなかった。**
+#
+# **06:40 JST（21:40 UTC）に前日ぶんを測る。** 決め方は 3 つ。
+#
+#   * `LOOKAHEAD_HOURS = 3` なので、前日 21:00 JST の基準時刻は当日 03:00 JST までの
+#     実測を要求する。その時間帯の Parquet は `/ml/compact`（毎時）が畳む
+#   * `build_features`（21:00 UTC）と**40 分ずらす**。どちらも Storage を重く読むので、
+#     同じ分に重ねる理由が無い
+#   * `daily_quality`（22:00 UTC）より**前**に終える。日次の要約が成績を読めるようにする
+#
+# **ファイル名を変えない。** GitHub は `schedule` をワークフローのファイル単位で
+# 登録するので、改名するとそのたびに「定時の回が来ない」危険を引き受ける
+# （`build-features.yml` の注記と同じ）。
+#
+# **`schedule` と `workflow_dispatch` だけで起動する。** 秘密を使うワークフローに
+# `push` / `pull_request` を付けない（開発プラン D-12）。
+#
+# **注意**：GitHub はリポジトリが 60 日間無活動だと `schedule` を自動で止める。
+# また `schedule` は混雑時に遅れる（実測 1 時間 55 分）。見張りの閾値（30 時間）は
+# それを見込んである。
+on:
+  schedule:
+    - cron: "40 21 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "JST の暦日（YYYY-MM-DD）。空なら前日。測り直すときに使う"
+        required: false
+        type: string
+
+# 何も書かない。**このジョブは GITHUB_TOKEN を 1 つも使わない。**
+permissions: {}
+
+# **手で測り直す回と定時の回をぶつけない。** 主キーで衝突させるので壊れはしないが、
+# 2.3 GB のジョブを 2 つ同時に走らせる理由が無い。待たせる（`cancel-in-progress: false`）
+# のは、**始まった回を途中で捨てない**ため。
+concurrency:
+  group: evaluate-daily
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    name: 配った確率を実測と突き合わせる
+    runs-on: ubuntu-latest
+    # 実測は 77 秒（自宅の回線）。**ランナーの回線はもっと速い**ので余裕がある。
+    # 30 分にしてあるのは `build-features.yml` と揃えるため
+    timeout-minutes: 30
+    # **ここが鍵の在り処。** `training` 環境の secrets だけがこのジョブに渡る
+    environment: training
+    defaults:
+      run:
+        working-directory: apps/ml
+    steps:
+      - uses: actions/checkout@v7
+
+      # python.yml と同じ組み立て。**サードパーティのアクションに依存しない**
+      - name: uv を入れる
+        run: pip install --upgrade uv
+
+      - name: Python 3.12 を用意する
+        run: uv python install 3.12
+
+      # **`--extra dev` を付けない。** 当てはめる側（lightgbm・scipy で 122 MB）は
+      # 要らず、入れるのは本番と同じ依存（pyarrow・numpy・httpx）だけでよい
+      - name: 依存を入れる（uv.lock どおり、本番の依存だけ）
+        run: uv sync --frozen --python 3.12
+
+      # **入力は `env:` で渡す**（`${{ }}` をスクリプトに直接埋めない）。
+      #
+      # **3 回まで試す。** Supabase Storage は一過性の 504 を返すことがある
+      # （`build-features.yml` と同じ理由）。失敗した回も `job_runs` に `failed` として
+      # 残るので、**直ったことは隠れない**。
+      #
+      # **`--write` を必ず付ける。** 付けないと測るだけで `model_daily_metrics` にも
+      # `job_runs` にも残らない——定時の回で記録が残らなければ、見張りが鳴る
+      - name: 前日ぶんを測って書く
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          TARGET_DATE: ${{ inputs.date }}
+        run: |
+          args=(--write)
+          if [ -n "${TARGET_DATE}" ]; then
+            args+=(--date "${TARGET_DATE}")
+          fi
+          for attempt in 1 2 3; do
+            if uv run python -m bikechance_ml.jobs.evaluate "${args[@]}"; then
+              exit 0
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "::warning::${attempt} 回目が失敗しました。120 秒待って試し直します"
+              sleep 120
+            fi
+          done
+          echo "::error::3 回とも失敗しました。job_runs の evaluate_daily を見てください"
+          exit 1
