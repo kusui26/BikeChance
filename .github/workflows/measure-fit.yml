@@ -84,6 +84,10 @@ jobs:
       - name: 依存を入れる（uv.lock どおり、当てはめる側も）
         run: uv sync --frozen --extra dev --python 3.12
 
+      # **要約欄だけに書かない**（2026-09-20 に直した。W5 プラン §12 の 168）。
+      # **`GITHUB_STEP_SUMMARY` は API からも HTML からも取れない**ので、そこにしか
+      # 無い数字は**画面を開いた人にしか読めない**。1 回目の測定では、機械の諸元も
+      # 当てはめの報告書も後から機械で拾えなかった。**記録（ログ）にも流す。**
       - name: 機械の大きさを記録する
         run: |
           {
@@ -93,7 +97,7 @@ jobs:
             grep -E '^(MemTotal|SwapTotal)' /proc/meminfo
             echo "nproc: $(nproc)"
             echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
 
       # **入力は `env:` で渡す**（`${{ }}` をスクリプトに直接埋めない）。
       #
@@ -102,8 +106,9 @@ jobs:
       # 落ちたら落ちたことを結果として読む。
       #
       # **成果物の置き場を増やさない**（`--json` を渡さない）。要約に曲線の 24 点が
-      # 載り、**記録には 1 分ごとの行が残る**ので、`gh run view --log` で全部読める。
-      # アクションを 1 つ足してまで生の点を持ち出す理由がまだ無い。
+      # 載り、**記録には要約・1 分ごとの行・機械の諸元・当てはめの報告書が残る**ので、
+      # `gh run view --log` で全部読める（**要約欄は API から取れない**ので、
+      # 読めるものは記録にも置く）。アクションを 1 つ足して生の点を持ち出す理由はまだ無い。
       - name: 当てはめて山を測る
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -121,10 +126,13 @@ jobs:
       # **当てはめの報告書も要約に畳んで載せる。** 成果物の置き場を増やさずに、
       # 「どのベースラインと比べた数字か」（§11 の気候値の作り方）まで残す。
       # 落ちた回には報告書が無いので、**在るときだけ**。
-      - name: 報告書を要約に畳む
+      - name: 報告書を要約に畳み、記録にも残す
         if: always()
         run: |
           if [ -f "${RUNNER_TEMP}/fit.md" ]; then
+            # **記録には畳まずそのまま出す**（`<details>` は画面のための飾りで、
+            # ログに入れても読みにくくなるだけ）。要約には畳んで入れる
+            cat "${RUNNER_TEMP}/fit.md"
             {
               echo '<details><summary>当てはめの報告書</summary>'
               echo ''
@@ -133,5 +141,5 @@ jobs:
               echo '</details>'
             } >> "${GITHUB_STEP_SUMMARY}"
           else
-            echo '（報告書が無い。当てはめが最後まで行かなかった）' >> "${GITHUB_STEP_SUMMARY}"
+            echo '（報告書が無い。当てはめが最後まで行かなかった）' | tee -a "${GITHUB_STEP_SUMMARY}"
           fi
