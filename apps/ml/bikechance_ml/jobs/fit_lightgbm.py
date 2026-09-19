@@ -42,14 +42,13 @@ from typing import Final
 
 import lightgbm as lgb
 import numpy as np
-import pyarrow as pa
 
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import harness, report
 from bikechance_ml.eval.dataset import TARGETS, Samples, Target, to_samples
 from bikechance_ml.eval.split import DaySplit, mask_of, split_days
 from bikechance_ml.features import coverage
-from bikechance_ml.features.arrays import Bools, Float64
+from bikechance_ml.features.arrays import Bools, Features, Float64
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.io.supabase import SupabaseIo, open_storage
 from bikechance_ml.jobs.evaluate_baselines import Loaded, days_between, load_days
@@ -104,13 +103,18 @@ def model_version_for(days: Sequence[date]) -> str:
     return f"{VERSION_PREFIX}-{days[-1]:%Y%m%d}"
 
 
-def train_one(table: pa.Table, samples: Samples, fit_mask: Bools, target: Target) -> lgb.Booster:
+def train_one(
+    built: matrix.Matrix, samples: Samples, fit_mask: Bools, target: Target
+) -> lgb.Booster:
     """1 ターゲットぶんを当てはめる。**単調制約とカテゴリを渡す。**
 
     重みは §6.2 の逆抽出確率（`samples.weight`）。単調制約は「当てる対象と同じ側の
     台数に対して非減少」で、**異常な形を構造として防ぐ**（開発プラン §7.2）。
+
+    **行列は外で 1 度だけ作って、両方のターゲットで使い回す。** 違うのはラベルと
+    重みだけで、特徴量は同じである。ターゲットごとに作っていたときは、**同じ行列を
+    2 度組み立てていた**（28 日ぶんで 4 GB の組み立てを 2 回。W5 プラン §12 の 168）。
     """
-    built = matrix.build(table.filter(pa.array(fit_mask)))
     dataset = lgb.Dataset(
         built.values,
         label=samples.y(target)[fit_mask].astype(np.float64),
@@ -136,55 +140,67 @@ class Checked:
 
 
 def flatten_and_verify(
-    booster: lgb.Booster, name: str, values: Float64
+    booster: lgb.Booster, name: str, blocks: Sequence[Features]
 ) -> tuple[forest.Forest, Checked]:
     """木を平たくし、**`Booster.predict` と同じ値が出ることを確かめてから**返す。"""
     built = forest.flatten(booster.dump_model())
-    return built, refuse_if_different(booster, built, name, values)
+    return built, refuse_if_different(booster, built, name, blocks)
 
 
 def refuse_if_different(
-    booster: lgb.Booster, built: forest.Forest, name: str, values: Float64
+    booster: lgb.Booster, built: forest.Forest, name: str, blocks: Sequence[Features]
 ) -> Checked:
     """**1 行でも違えば止める。** 「同じはず」を宣言で済ませない（W4-19）。
 
     ここを通らなかった森は成果物にならないので、**配信側と学習側がずれた状態の
     成果物は生まれ得ない**。差は必ず残す（0 でも記録する）。
+
+    **ブロックのまま受け取って 1 つずつ照合する。** つなげてから渡すと
+    `np.vstack` が**検証行ぶんの写し**を作る——28 日ぶんの当てはめでは、それだけで
+    0.55 GB が増える（W5 プラン §12 の 168）。**見ている行は同じ**で、
+    最大の差はブロックごとの最大の最大である。
     """
-    theirs = np.asarray(booster.predict(values), dtype=np.float64)
-    ours = forest.probability(built, values)
-    gap = float(np.abs(theirs - ours).max())
-    print(f"{name}: {len(values):,} 行で照合、最大の差 {gap:.3e}", file=sys.stderr)
+    gap = 0.0
+    counted = 0
+    for values in blocks:
+        theirs = np.asarray(booster.predict(values), dtype=np.float64)
+        ours = forest.probability(built, values)
+        gap = max(gap, float(np.abs(theirs - ours).max()))
+        counted += len(values)
+    print(f"{name}: {counted:,} 行で照合、最大の差 {gap:.3e}", file=sys.stderr)
     if gap > MAX_DISAGREEMENT:
         raise ForestMismatchError(
             f"{name}: 平たくした森が Booster.predict と最大 {gap:.3e} 違います"
             f"（許容 {MAX_DISAGREEMENT:.0e}）。成果物は書きません"
         )
-    return Checked(n_rows=len(values), max_gap=gap)
+    return Checked(n_rows=counted, max_gap=gap)
 
 
-def verification_rows(values: Float64) -> Float64:
+def verification_blocks(values: Features) -> tuple[Features, ...]:
     """照合に使う行。**実データに、実データが踏まない枝を足す。**
 
     検証日の行だけでは「未知のカテゴリ」「全部欠損」「ちょうど 0」に当たる枝を
     一度も通らないことがある。**配信で最初に踏むのがその枝**では困るので、
     ここで作って足す。
+
+    ~~1 つにつなげて返す~~ → **並びのまま返す**（2026-09-19）。つなげると実データぶんの
+    写しができ、**削りたいものをそこで作ってしまう**（§12 の 168）。
     """
     sample = values[:STRESS_ROWS]
-    return np.vstack([values, _all_missing(sample), _all_zero(sample), _unseen(sample)])
+    return (values, _all_missing(sample), _all_zero(sample), _unseen(sample))
 
 
-def _all_missing(sample: Float64) -> Float64:
+def _all_missing(sample: Features) -> Features:
     """全列が欠損。**`default_left` の枝**をすべて通す。"""
     return np.full_like(sample, np.nan)
 
 
-def _all_zero(sample: Float64) -> Float64:
+def _all_zero(sample: Features) -> Features:
     """全列が 0。**`missing_type = Zero` の枝**を通す。"""
     return np.zeros_like(sample)
 
 
-def _unseen(sample: Float64) -> Float64:
+def _unseen(sample: Features) -> Features:
     """カテゴリ列だけ知らない値に差し替える。**ビット集合の外**へ落とす。"""
     changed = sample.copy()
     changed[:, list(matrix.categorical_indices())] = UNSEEN_CATEGORY
@@ -220,14 +236,17 @@ def fit_and_score(loaded: Loaded, samples: Samples, split: DaySplit) -> Fitted:
     """当てはめて平たくして、**B3 と同じ検証行の上で**測る。"""
     table = loaded.table
     fit_mask = mask_of(samples, split.fit)
-    built = matrix.build(table.filter(pa.array(mask_of(samples, split.evaluate))))
-    rows = verification_rows(built.values)
+    built = matrix.build(table, mask_of(samples, split.evaluate))
+    blocks = verification_blocks(built.values)
+    # **学習の行列は 1 度だけ作る**（ターゲットで違うのはラベルと重みだけ）
+    fitting = matrix.build(table, fit_mask)
     made = {
         target.name: flatten_and_verify(
-            train_one(table, samples, fit_mask, target), target.name, rows
+            train_one(fitting, samples, fit_mask, target), target.name, blocks
         )
         for target in TARGETS
     }
+    del fitting
     forests = {name: one for name, (one, _) in made.items()}
     return Fitted(
         forests=forests,

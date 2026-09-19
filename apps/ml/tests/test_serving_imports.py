@@ -23,7 +23,7 @@ from typing import Final
 
 import numpy as np
 
-from bikechance_ml.features.arrays import Float64
+from bikechance_ml.features.arrays import Features
 from bikechance_ml.models import artifact as lightgbm_artifact
 from bikechance_ml.models import matrix
 from tests.test_model_artifact import ARTIFACT, N_COLUMNS
@@ -63,7 +63,7 @@ print(json.dumps({{"loaded": sorted(one for one in sys.modules if one in BLOCKED
 '''
 
 
-def _run(body: bytes, values: Float64, tmp_path: Path) -> dict[str, object]:
+def _run(body: bytes, values: Features, tmp_path: Path) -> dict[str, object]:
     """`lightgbm` と `scipy` を塞いだ子プロセスで、成果物を読んで予測させる。"""
     artifact_file = tmp_path / "artifact.json.gz"
     artifact_file.write_bytes(body)
@@ -90,10 +90,12 @@ def test_serving_works_without_lightgbm(tmp_path: Path) -> None:
     for index in matrix.categorical_indices():
         values[:, index] = rng.integers(0, 3, size=64)
     values[rng.random((64, N_COLUMNS)) < 0.1] = np.nan
+    # **本番と同じ型で渡す**（`matrix.build` は float32 を作る。§12 の 168）
+    features = np.asarray(values, dtype=matrix.DTYPE)
 
-    result = _run(lightgbm_artifact.to_bytes(ARTIFACT), values, tmp_path)
+    result = _run(lightgbm_artifact.to_bytes(ARTIFACT), features, tmp_path)
 
     assert result["loaded"] == [], "配信の経路が lightgbm / scipy を読み込みました"
-    built = matrix.Matrix(values=values, columns=matrix.MODEL_COLUMNS)
+    built = matrix.Matrix(values=features, columns=matrix.MODEL_COLUMNS)
     here = lightgbm_artifact.predict(ARTIFACT.forests["bike"], built)
     assert np.array_equal(np.asarray(result["probability"], dtype=np.float64), here)
