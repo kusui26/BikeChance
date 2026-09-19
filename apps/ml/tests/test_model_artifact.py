@@ -15,7 +15,7 @@ import lightgbm as lgb
 import numpy as np
 import pytest
 
-from bikechance_ml.features.arrays import Float64
+from bikechance_ml.features.arrays import Float32
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.features.schema import SERVING_SCHEMA
 from bikechance_ml.models import artifact as lightgbm_artifact
@@ -27,14 +27,18 @@ N_COLUMNS: Final[int] = len(matrix.MODEL_COLUMNS)
 TOLERANCE: Final[float] = 1e-9
 
 
-def _features(rows: int, seed: int) -> Float64:
-    """本番と同じ列数・同じカテゴリの位置で、**欠損も混ぜた**行列を作る。"""
+def _features(rows: int, seed: int) -> Float32:
+    """本番と同じ列数・同じカテゴリの位置で、**欠損も混ぜた**行列を作る。
+
+    **型も本番と同じ `matrix.DTYPE`（float32）にする。** ここを float64 のままにすると、
+    検査は本番が通らない経路を通ることになる（W5 プラン §12 の 168 で型を変えた）。
+    """
     rng = np.random.default_rng(seed)
     values = rng.normal(size=(rows, N_COLUMNS))
     for index in matrix.categorical_indices():
         values[:, index] = rng.integers(0, 3, size=rows)
     values[rng.random((rows, N_COLUMNS)) < 0.05] = np.nan
-    return values
+    return np.asarray(values, dtype=matrix.DTYPE)
 
 
 def _boosters(rounds: int = 12) -> dict[str, lgb.Booster]:

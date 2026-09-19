@@ -54,7 +54,7 @@ from typing import Final
 
 import numpy as np
 
-from bikechance_ml.features.arrays import Bools, Float64, Int32, Int64
+from bikechance_ml.features.arrays import Bools, Features, Float64, Int32, Int64
 
 #: ビット集合の 1 語のビット数（LightGBM の `cat_threshold` と同じ）。
 WORD_BITS: Final[int] = 32
@@ -138,7 +138,7 @@ class Forest:
         return int(self.feature.size)
 
 
-def raw_score(forest: Forest, values: Float64, block: int = BLOCK_ROWS) -> Float64:
+def raw_score(forest: Forest, values: Features, block: int = BLOCK_ROWS) -> Float64:
     """生スコア（葉の値の合計）。**`Booster.predict(raw_score=True)` と同じ値。**"""
     total = np.zeros(len(values), dtype=np.float64)
     for start in range(0, len(values), block):
@@ -147,12 +147,18 @@ def raw_score(forest: Forest, values: Float64, block: int = BLOCK_ROWS) -> Float
     return total
 
 
-def probability(forest: Forest, values: Float64, block: int = BLOCK_ROWS) -> Float64:
-    """確率。**`binary` の sigmoid を掛ける**（`Booster.predict` と同じ値）。"""
+def probability(forest: Forest, values: Features, block: int = BLOCK_ROWS) -> Float64:
+    """確率。**`binary` の sigmoid を掛ける**（`Booster.predict` と同じ値）。
+
+    `values` は **float32 でも float64 でもよい**（`models/matrix.py` は float32 を作る）。
+    閾値との比較は numpy が倍精度に上げてから行うので、**float32 の値を倍精度に
+    直してから比べる LightGBM の内部と同じ**になる。ここで型を落とさないのは、
+    **写しを作らないため**——28 日ぶんで 4 GB の写しになる。
+    """
     return 1.0 / (1.0 + np.exp(-forest.sigmoid * raw_score(forest, values, block)))
 
 
-def _score_block(forest: Forest, chunk: Float64) -> Float64:
+def _score_block(forest: Forest, chunk: Features) -> Float64:
     """1 ブロックぶん。**全部の木を同時に歩き、葉に着いたものは毎回外す。**
 
     `node` は「行 × 木」を平たく並べた 1 本の配列で、`walking` がまだ歩いている位置を
@@ -171,7 +177,7 @@ def _score_block(forest: Forest, chunk: Float64) -> Float64:
     return np.asarray(forest.value[node].reshape(rows, trees).sum(axis=1), dtype=np.float64)
 
 
-def _step(forest: Forest, chunk: Float64, where_row: Int32, node: Int32, walking: Int64) -> Int64:
+def _step(forest: Forest, chunk: Features, where_row: Int32, node: Int32, walking: Int64) -> Int64:
     """歩いている位置を 1 段進め、**まだ葉に着いていない位置**を返す。`node` を書き換える。"""
     here = node[walking]
     picked = chunk[where_row[walking], forest.feature[here]]
@@ -190,7 +196,7 @@ def _refuse_a_walk_that_does_not_end(walking: Int64) -> None:
         raise UnsupportedModelError(f"max_depth 回で葉に着かない位置が {walking.size} あります")
 
 
-def _goes_left(forest: Forest, node: Int32, picked: Float64) -> Bools:
+def _goes_left(forest: Forest, node: Int32, picked: Features) -> Bools:
     """左へ行くか。**数値で全部決めてから、カテゴリの節だけ上書きする。**
 
     カテゴリの分岐は全体の 3 割（実測 11,950 / 37,800）なので、**残り 7 割に
@@ -203,7 +209,7 @@ def _goes_left(forest: Forest, node: Int32, picked: Float64) -> Bools:
     return goes
 
 
-def _numeric_left(forest: Forest, node: Int32, picked: Float64) -> Bools:
+def _numeric_left(forest: Forest, node: Int32, picked: Features) -> Bools:
     """数値の節。**NaN の行き先は節ごとに決まっている**（`nan_left`）。
 
     NaN との比較は必ず偽なので、`picked <= threshold` は NaN で右に行く。それを
@@ -215,7 +221,7 @@ def _numeric_left(forest: Forest, node: Int32, picked: Float64) -> Bools:
     return np.asarray(goes, dtype=np.bool_)
 
 
-def _zero_is_missing(forest: Forest, node: Int32, picked: Float64, goes: Bools) -> Bools:
+def _zero_is_missing(forest: Forest, node: Int32, picked: Features, goes: Bools) -> Bools:
     """`missing_type = Zero` の節だけ、**0 を欠損として `default_left` へ送る**。
 
     LightGBM の既定では出ない形（`zero_as_missing` を立てたときだけ）なので、
@@ -228,7 +234,7 @@ def _zero_is_missing(forest: Forest, node: Int32, picked: Float64, goes: Bools) 
     )
 
 
-def _categorical_left(forest: Forest, node: Int32, picked: Float64) -> Bools:
+def _categorical_left(forest: Forest, node: Int32, picked: Features) -> Bools:
     """カテゴリの節。**NaN と負は右**、それ以外はビット集合を引く。"""
     code = np.where(np.isnan(picked) | (picked < 0), -1, picked).astype(np.int64)
     word = code >> WORD_SHIFT

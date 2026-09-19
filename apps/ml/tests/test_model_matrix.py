@@ -7,6 +7,7 @@
 その値を**行列に並べる規則**——順序・型・符号化・欠損の扱いである。
 """
 
+import inspect
 import math
 from typing import Final
 
@@ -97,7 +98,64 @@ def test_monotone_points_at_the_matching_count() -> None:
 def test_shape_matches_the_table() -> None:
     built = matrix.build(BUILT)
     assert built.values.shape == (BUILT.num_rows, len(matrix.MODEL_COLUMNS))
-    assert built.values.dtype == np.float64
+    # **float32。** 28 日ぶんの行列を 8.1 → 4.05 GB にするために変えた（§12 の 168）
+    assert built.values.dtype == np.float32
+
+
+def test_the_dtype_does_not_change_the_values() -> None:
+    """**型を落としても値は変わらない。**
+
+    仮数 24 ビットで足りることは実データでも確かめてある（2026-09-19、117 万行で
+    **62 列のうち 60 列が float64 と完全一致**。違うのは `lat` と `lon` だけで、
+    往復の誤差は 7.6e-06 度 ＝ 約 0.6 m）。ここではフィクスチャの全列で、
+    **float64 で作ってから落とした値**と一致することを見る。
+    """
+    built = matrix.build(BUILT)
+    for index, name in enumerate(built.columns):
+        exact = np.asarray(matrix._column(BUILT, name), dtype=np.float64)
+        assert np.array_equal(built.values[:, index], exact.astype(matrix.DTYPE), equal_nan=True), (
+            f"{name} が型を落とす前後で違います"
+        )
+
+
+def test_keep_selects_rows_without_copying_the_table() -> None:
+    """**`keep` は `table.filter(...)` と同じ結果を出す。**
+
+    先に `filter` を通すと**表まるごとの写し**ができる。28 日ぶんではそれだけで
+    4.3 GB になるので、**行を選ぶのは列ごと**にした（§12 の 168）。
+    ここでは「同じ答えになること」を、古いやり方と突き合わせて留める。
+    """
+    keep = np.zeros(BUILT.num_rows, dtype=np.bool_)
+    keep[::2] = True
+    picked = matrix.build(BUILT, keep)
+    filtered = matrix.build(BUILT.filter(pa.array(keep)))
+    assert picked.values.shape == (int(keep.sum()), len(matrix.MODEL_COLUMNS))
+    assert np.array_equal(picked.values, filtered.values, equal_nan=True)
+
+
+def test_keep_none_takes_every_row() -> None:
+    assert len(matrix.build(BUILT, None)) == BUILT.num_rows
+    assert len(matrix.build(BUILT)) == BUILT.num_rows
+
+
+def test_an_empty_selection_gives_an_empty_matrix() -> None:
+    """**1 行も選ばなくても落ちない**（形は保つ）。"""
+    none = matrix.build(BUILT, np.zeros(BUILT.num_rows, dtype=np.bool_))
+    assert none.values.shape == (0, len(matrix.MODEL_COLUMNS))
+
+
+def test_building_does_not_hold_twice_the_matrix() -> None:
+    """**置き場所を先に確保して 1 列ずつ埋める**（`np.column_stack` を使わない）。
+
+    素直に書くと 62 列ぶんの配列を全部作ってから同じ大きさの結果を確保するので、
+    **山が行列の 2 倍**になる。28 日ぶんでは 8 GB が 16 GB になり、それだけで
+    ランナーに載らない（§12 の 168）。**書き方そのものを固定する。**
+    """
+    # **本体だけを見る。** docstring は「素直に書くと column_stack になる」と説明して
+    # いるので、そこまで含めると必ず引っかかる
+    body = inspect.getsource(matrix.build).replace(matrix.build.__doc__ or "", "")
+    assert "np.empty(" in body, "先に確保していません"
+    assert "column_stack" not in body, "column_stack は行列の 2 倍を持ちます"
 
 
 def test_null_becomes_nan_not_zero() -> None:

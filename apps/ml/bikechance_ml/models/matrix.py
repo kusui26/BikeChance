@@ -24,8 +24,9 @@ from typing import Final
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 
-from bikechance_ml.features.arrays import Float64
+from bikechance_ml.features.arrays import Bools, Float32, Float64
 from bikechance_ml.features.calendar import DAY_TYPES, DOW_TYPES
 from bikechance_ml.features.schema import SCHEMA, feature_columns
 
@@ -62,6 +63,25 @@ CATEGORICAL_COLUMNS: Final[tuple[str, ...]] = (
     "target_dow_type",
 )
 
+#: モデルに渡す行列の型。
+#:
+#: **`float32` にしてある。** 仮数 24 ビットで足りることを実データで確かめた
+#: （2026-09-19、117 万行）：**62 列のうち 60 列は float64 と完全に一致**し、
+#: 違うのは `lat` と `lon` だけで、往復の誤差は **7.6e-06 度（約 0.6 m）**・相対 5e-08。
+#: LightGBM は特徴量を高々 255 の区間に量子化するので、この差が分岐を変えることは
+#: 事実上ない（**変わらないことは当てはめて確かめる**——`--report` の指標を突き合わせる）。
+#:
+#: **学習と配信で同じ型を使う。** 別々にすると、当てはめた閾値と配信で比べる値の型が
+#: 違い、境界のすぐ近くで分岐が入れ替わる。`refuse_if_different` はそれを見張るが、
+#: **見張る前に型を揃えておくほうが確実である。**
+#:
+#: 28 日ぶんの行列は **8.1 GB → 4.05 GB** になる（W5 プラン §12 の 168）。
+DTYPE: Final[type[np.float32]] = np.float32
+
+#: 語彙外の値を報告するときに、何件まで名前を出すか。**全部は出さない**
+#: （1,640 万行のうち全部が語彙外なら、例外の文言そのものが巨大になる）。
+UNKNOWN_SAMPLE: Final[int] = 10
+
 #: 単調制約（開発プラン §7.2）。**当てる対象と同じ側の台数に対して非減少**にする。
 #: 「自転車が多いほど借りられる確率は下がらない」を構造として持たせ、異常な形を防ぐ。
 MONOTONE_COLUMNS: Final[Mapping[str, str]] = {"bike": "bikes", "dock": "docks"}
@@ -79,7 +99,8 @@ class UnknownCategoryError(ValueError):
 class Matrix:
     """モデルに渡す行列。**列の順序は `MODEL_COLUMNS` と同じ。**"""
 
-    values: Float64
+    #: **float32**（`DTYPE`）。行列そのものは 28 日で 4.05 GB になる
+    values: Float32
     columns: tuple[str, ...]
 
     def __len__(self) -> int:
@@ -97,14 +118,29 @@ def monotone_constraints(target: str, columns: Sequence[str] = MODEL_COLUMNS) ->
     return tuple(1 if name == wanted else 0 for name in columns)
 
 
-def build(table: pa.Table) -> Matrix:
+def build(table: pa.Table, keep: Bools | None = None) -> Matrix:
     """特徴量の表を行列にする。**学習の表でも推論の表でも同じ結果になる。**
 
     どちらも `MODEL_COLUMNS` を選ぶだけなので、学習の表に余分にある列（ラベル・重み）は
     自然に落ちる。**足りない列があれば pyarrow が例外にする**（黙って NaN で埋めない）。
+
+    `keep` を渡すと**その行だけ**を取る。`table.filter(...)` を先に通すのと同じ結果に
+    なるが、**表まるごとの写しを作らない**——28 日ぶんでは、その写しだけで 4.3 GB に
+    なる（W5 プラン §12 の 168）。**選ぶのは列ごと**なので、同時に生きるのは
+    「行列と 1 列と、その列の選んだぶん」に収まる。
+
+    **先に置き場所を確保して 1 列ずつ埋める。** 素直に書くと
+    `np.column_stack([_column(...) for ...])` になるが、それは **62 列ぶんの配列を
+    すべて作ってから、同じ大きさの結果をもう 1 つ確保する**——**山が行列の 2 倍**になる。
+    28 日ぶん（1,640 万行）では 8 GB が 16 GB になり、**それだけでランナーに載らない**。
     """
-    columns = [_column(table, name) for name in MODEL_COLUMNS]
-    return Matrix(values=np.column_stack(columns), columns=MODEL_COLUMNS)
+    rows = table.num_rows if keep is None else int(keep.sum())
+    values = np.empty((rows, len(MODEL_COLUMNS)), dtype=DTYPE)
+    for index, name in enumerate(MODEL_COLUMNS):
+        # **1 列ずつ書き写して、その列はすぐ捨てる**（次の周回で参照が切れる）
+        column = _column(table, name)
+        values[:, index] = column if keep is None else column[keep]
+    return Matrix(values=values, columns=MODEL_COLUMNS)
 
 
 def _column(table: pa.Table, name: str) -> Float64:
@@ -121,13 +157,25 @@ def _column(table: pa.Table, name: str) -> Float64:
 
 
 def _encoded(table: pa.Table, name: str) -> Float64:
-    """文字列を語彙の番号にする。**語彙に無い値は例外**（黙って落とさない）。"""
+    """文字列を語彙の番号にする。**語彙に無い値は例外**（黙って落とさない）。
+
+    **Python のリストを通さない。** `to_pylist()` は 1 列ぶんの Python オブジェクトを
+    全部作るので、1,640 万行では**その 1 列だけで 2 GB を超える**（W5 プラン §12 の 168）。
+    語彙は高々 4 語なので、**語ごとに当たる場所を塗る**ほうが速くて小さい。
+
+    **語彙外は最後にまとめて数える。** 「非 null なのにどの語にも当たらなかった」行が
+    あれば、そこに語彙外の値が居る。**何が居たかは、その行だけを取り出して見る**
+    （全行を Python に持ち上げない）。
+    """
     vocabulary = VOCABULARIES[name]
-    order = {value: index for index, value in enumerate(vocabulary)}
-    values = table.column(name).to_pylist()
-    unknown = {one for one in values if one is not None and one not in order}
-    if unknown:
-        raise UnknownCategoryError(f"{name} に語彙外の値: {sorted(unknown)}")
-    return np.array(
-        [np.nan if one is None else float(order[one]) for one in values], dtype=np.float64
-    )
+    values = table.column(name).combine_chunks()
+    codes = np.full(table.num_rows, np.nan, dtype=np.float64)
+    for index, word in enumerate(vocabulary):
+        hit = np.asarray(pc.fill_null(pc.equal(values, word), False).to_numpy(zero_copy_only=False))
+        codes[hit] = float(index)
+    missing = np.asarray(pc.is_null(values).to_numpy(zero_copy_only=False))
+    stray = np.flatnonzero(np.isnan(codes) & ~missing)
+    if stray.size:
+        found = sorted({values[int(one)].as_py() for one in stray[:UNKNOWN_SAMPLE]})
+        raise UnknownCategoryError(f"{name} に語彙外の値: {found}")
+    return codes

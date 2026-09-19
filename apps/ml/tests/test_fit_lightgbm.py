@@ -15,15 +15,16 @@ from pathlib import Path
 from typing import Final
 
 import numpy as np
+import pyarrow as pa
 import pytest
 
 from bikechance_ml.eval import harness
 from bikechance_ml.eval.split import DaySplit
 from bikechance_ml.features import coverage
-from bikechance_ml.features.arrays import Float64
+from bikechance_ml.features.arrays import Bools, Float32
 from bikechance_ml.features.schema import WEATHER_COLUMNS
 from bikechance_ml.jobs import fit_lightgbm as fit
-from bikechance_ml.jobs.evaluate_baselines import Loaded
+from bikechance_ml.jobs.evaluate_baselines import Loaded, load_days
 from bikechance_ml.models import matrix
 from tests import eval_fixture as eval_rows
 from tests.test_evaluate_baselines import write_samples
@@ -39,14 +40,16 @@ SPLIT: Final[DaySplit] = DaySplit(fit=(DAYS[0],), purge=(DAYS[1],), evaluate=(DA
 ROWS: Final[int] = 1_000
 
 
-def _values(rows: int = 400) -> Float64:
+def _values(rows: int = 400) -> Float32:
     return _features(rows, 4242)
 
 
 # ── 照合の門 ──────────────────────────────────────────────────
 def test_a_matching_forest_passes_and_reports_the_gap() -> None:
     """**通ったときも差を残す。** 「0 だったから書かなかった」を作らない。"""
-    checked = fit.refuse_if_different(BOOSTERS[TARGET], ARTIFACT.forests[TARGET], TARGET, _values())
+    checked = fit.refuse_if_different(
+        BOOSTERS[TARGET], ARTIFACT.forests[TARGET], TARGET, [_values()]
+    )
     assert checked.n_rows == 400
     assert checked.max_gap < fit.MAX_DISAGREEMENT
 
@@ -57,33 +60,42 @@ def test_a_forest_that_disagrees_is_refused() -> None:
     value = forest.value.copy()
     value[forest.left == np.arange(forest.n_nodes, dtype=np.int32)] += 0.5
     with pytest.raises(fit.ForestMismatchError, match=r"Booster\.predict"):
-        fit.refuse_if_different(BOOSTERS[TARGET], replace(forest, value=value), TARGET, _values())
+        fit.refuse_if_different(BOOSTERS[TARGET], replace(forest, value=value), TARGET, [_values()])
 
 
 def test_flatten_and_verify_returns_a_usable_forest() -> None:
-    forest, checked = fit.flatten_and_verify(BOOSTERS[TARGET], TARGET, _values())
+    forest, checked = fit.flatten_and_verify(BOOSTERS[TARGET], TARGET, [_values()])
     assert len(forest) == BOOSTERS[TARGET].num_trees()
     assert checked.max_gap < fit.MAX_DISAGREEMENT
 
 
 # ── 照合に使う行 ──────────────────────────────────────────────
-def test_the_verification_rows_add_the_branches_real_data_misses() -> None:
+def test_the_verification_blocks_add_the_branches_real_data_misses() -> None:
     """**全欠損・全 0・未知のカテゴリ**を、実データの後ろに足す。"""
     values = _values(50)
-    rows = fit.verification_rows(values)
-    assert len(rows) == 50 + 3 * 50  # 実データが少ないので仕込みも 50 行ずつ
+    real, missing, zero, unseen = fit.verification_blocks(values)
+    assert [len(one) for one in (real, missing, zero, unseen)] == [50, 50, 50, 50]
 
-    missing, zero, unseen = rows[50:100], rows[100:150], rows[150:]
     assert bool(np.isnan(missing).all()), "全欠損の行が入っていません"
     assert not zero.any(), "全 0 の行が入っていません"
     categorical = list(matrix.categorical_indices())
     assert (unseen[:, categorical] == fit.UNSEEN_CATEGORY).all(), "未知のカテゴリが入っていません"
 
 
+def test_the_blocks_are_not_concatenated() -> None:
+    """**つなげない。** つなげると実データぶんの写しができる（§12 の 168）。
+
+    実データのブロックは**渡した配列そのもの**（写しでない）でなければならない。
+    """
+    values = _values(50)
+    real = fit.verification_blocks(values)[0]
+    assert real is values, "実データが写されています"
+
+
 def test_the_unseen_rows_keep_the_numeric_columns() -> None:
     """**未知のカテゴリの行は、カテゴリ列だけ差し替える。** 数値の枝も一緒に通したい。"""
     values = _values(20)
-    unseen = fit.verification_rows(values)[60:]
+    unseen = fit.verification_blocks(values)[3]
     numeric = [one for one in range(N_COLUMNS) if one not in matrix.categorical_indices()]
     assert np.array_equal(unseen[:, numeric], values[:, numeric], equal_nan=True)
 
@@ -91,7 +103,8 @@ def test_the_unseen_rows_keep_the_numeric_columns() -> None:
 def test_the_stress_rows_are_capped_by_the_real_rows() -> None:
     """実データが `STRESS_ROWS` より多ければ、仕込みは `STRESS_ROWS` 行ずつ。"""
     values = _features(fit.STRESS_ROWS + 10, 9)
-    assert len(fit.verification_rows(values)) == fit.STRESS_ROWS + 10 + 3 * fit.STRESS_ROWS
+    blocks = fit.verification_blocks(values)
+    assert [len(one) for one in blocks] == [fit.STRESS_ROWS + 10, *([fit.STRESS_ROWS] * 3)]
 
 
 # ── 登録に残るもの ────────────────────────────────────────────
@@ -241,6 +254,40 @@ def test_the_gate_is_reached_from_the_command_line(
 
     with pytest.raises(coverage.MixedWeatherError):
         fit.run(["--from", f"{DAYS[0]}", "--to", f"{DAYS[2]}", "--local", str(root)])
+
+
+def test_the_fit_matrix_is_built_once_for_both_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**学習の行列は 1 度だけ作る**（検証ぶんと合わせて 2 回）。
+
+    ターゲットで違うのはラベルと重みだけで、特徴量は同じである。ターゲットごとに
+    作り直すと、**28 日ぶんで 4 GB の組み立てを 2 回**払うことになる（§12 の 168）。
+    **答えは変わらないので、数えないと気づけない。**
+
+    当てはめそのものは差し替える——ここで見たいのは**何回組み立てたか**だけで、
+    木の中身は他の検査が見ている。
+    """
+    root = write_samples(tmp_path, dict.fromkeys(DAYS, True))
+    loaded = load_days(None, list(DAYS), root, columns=None)
+    samples, split = fit.prepare(loaded, eval_days=1, purge_days=1, allow_mixed_weather=False)
+
+    calls: list[str] = []
+    original = matrix.build
+
+    def counted(table: pa.Table, keep: Bools | None = None) -> matrix.Matrix:
+        calls.append("検証" if keep is None or int(keep.sum()) == 0 else "行")
+        return original(table, keep)
+
+    monkeypatch.setattr(matrix, "build", counted)
+    monkeypatch.setattr(fit, "train_one", lambda *args: None)
+    monkeypatch.setattr(
+        fit, "flatten_and_verify", lambda *args: (ARTIFACT.forests["bike"], fit.Checked(0, 0.0))
+    )
+    monkeypatch.setattr(harness, "run", lambda *args, **kwargs: None)
+
+    fit.fit_and_score(loaded, samples, split)
+    assert len(calls) == 2, f"行列を {len(calls)} 回組み立てています（検証と学習で 2 回のはず）"
 
 
 def test_the_flag_is_on_the_command_line() -> None:

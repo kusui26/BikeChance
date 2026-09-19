@@ -22,6 +22,13 @@ type UInt64 = npt.NDArray[np.uint64]
 type Float32 = npt.NDArray[np.float32]
 type Float64 = npt.NDArray[np.float64]
 
+#: モデルに渡す特徴量の行列。**float32 でも float64 でもよい。**
+#:
+#: `models/matrix.py` は float32 を作るが（28 日ぶんで 8.1 → 4.05 GB。W5 プラン §12 の 168）、
+#: **木を歩く側は型を落とさない**——落とすと行列ぶんの写しができて、削った意味が消える。
+#: 閾値との比較は numpy が倍精度に上げてから行うので、どちらでも同じ答えになる。
+type Features = Float32 | Float64
+
 type Strings = npt.NDArray[np.str_]
 
 #: 配列の区間。素の `slice` は型引数が `Any` なので、ここで具体化しておく。
