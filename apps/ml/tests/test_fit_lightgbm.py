@@ -8,6 +8,7 @@
 未知のカテゴリを一度も通らないことがあり、**配信で最初に踏むのがその枝**では困る。
 """
 
+import inspect
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import date
@@ -18,11 +19,13 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
+from bikechance_ml.baselines.climatology import FromSamples
 from bikechance_ml.eval import harness
 from bikechance_ml.eval.split import DaySplit
 from bikechance_ml.features import coverage
 from bikechance_ml.features.arrays import Bools, Float32
 from bikechance_ml.features.schema import WEATHER_COLUMNS
+from bikechance_ml.jobs import climate as climate_module
 from bikechance_ml.jobs import fit_lightgbm as fit
 from bikechance_ml.jobs.evaluate_baselines import Loaded, load_days
 from bikechance_ml.models import matrix
@@ -286,8 +289,89 @@ def test_the_fit_matrix_is_built_once_for_both_targets(
     )
     monkeypatch.setattr(harness, "run", lambda *args, **kwargs: None)
 
-    fit.fit_and_score(loaded, samples, split)
+    fit.fit_and_score(loaded, samples, split, FromSamples())
     assert len(calls) == 2, f"行列を {len(calls)} 回組み立てています（検証と学習で 2 回のはず）"
+
+
+# ── 気候値の作り方（§12 の 166）──────────────────────────────
+def test_the_climate_source_has_no_default() -> None:
+    """**`harness.run` も `fit_and_score` も、B2 の作り方を既定値で決めない。**
+
+    既定値が在ったときに `fit_lightgbm` が渡し忘れ、**本番より弱いベースラインと
+    比べていた**——例外も警告も出ず、数字だけが静かに変わった。**渡さなければ
+    型検査で止まる**状態にしてある。
+    """
+    assert inspect.signature(harness.run).parameters["climate"].default is inspect.Parameter.empty
+    assert (
+        inspect.signature(fit.fit_and_score).parameters["climate_source"].default
+        is inspect.Parameter.empty
+    )
+
+
+def test_the_run_reads_the_profiles_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**既定はプロファイル**（本番と同じ）。学習期間の日だけを渡す。
+
+    **決めたものが当てはめに届くところまで留める。** 「呼んでいるが使っていない」が
+    通ると §12 の 166 はそのまま戻る——`source_for` を呼んだうえで結果を捨て、
+    `FromSamples()` を渡せば、**数字は壊れたまま検査は緑になる**。
+    """
+    root = write_samples(tmp_path, dict.fromkeys(DAYS, True))
+    monkeypatch.setattr(fit, "read_storage_config", lambda: None)
+    monkeypatch.setattr(fit, "open_storage", lambda config: nullcontext(None))
+    asked: list[tuple[tuple[date, ...], bool]] = []
+    decided = FromSamples()
+    handed: list[object] = []
+
+    def spy(source, days, local, ports, *, from_profiles):  # type: ignore[no-untyped-def]
+        asked.append((tuple(days), from_profiles))
+        return decided
+
+    def fitting(loaded, samples, split, climate_source):  # type: ignore[no-untyped-def]
+        handed.append(climate_source)
+        return _fitted(1.0, 1.0, 1.0)
+
+    monkeypatch.setattr(climate_module, "source_for", spy)
+    monkeypatch.setattr(fit, "fit_and_score", fitting)
+
+    fit.run(["--from", f"{DAYS[0]}", "--to", f"{DAYS[2]}", "--local", str(root)])
+    assert asked, "気候値の作り方を決めていません"
+    days, from_profiles = asked[0]
+    assert from_profiles is True, "既定でプロファイルを読んでいません"
+    assert days == (DAYS[0],), "学習期間の日だけを渡していません（検証日が混ざる）"
+    assert handed and handed[0] is decided, "決めた作り方を当てはめに渡していません"
+
+
+def test_the_no_profile_flag_falls_back_to_samples(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**逃げ道が届いていること。** 2026-09-19 より前の記録と比べるために要る。"""
+    root = write_samples(tmp_path, dict.fromkeys(DAYS, True))
+    monkeypatch.setattr(fit, "read_storage_config", lambda: None)
+    monkeypatch.setattr(fit, "open_storage", lambda config: nullcontext(None))
+    asked: list[bool] = []
+
+    def spy(source, days, local, ports, *, from_profiles):  # type: ignore[no-untyped-def]
+        asked.append(from_profiles)
+        return FromSamples()
+
+    monkeypatch.setattr(climate_module, "source_for", spy)
+    monkeypatch.setattr(fit, "fit_and_score", lambda *args: _fitted(1.0, 1.0, 1.0))
+
+    fit.run(["--from", f"{DAYS[0]}", "--to", f"{DAYS[2]}", "--local", str(root), "--no-profile"])
+    assert asked == [False]
+    assert fit._arguments(["--from", "2026-09-07", "--to", "2026-09-09"]).no_profile is False
+
+
+def test_the_registry_records_how_b2_was_made() -> None:
+    """**何を相手に測ったかを残す。** `feature_set` は B2 の作り方を語らない。
+
+    同じ `v3` でも、B2 を学習サンプルから作ったかプロファイルから作ったかで
+    **門の判定が変わる**（学習 3 日で 2 → 0。§12 の 166）。
+    """
+    fitted = _fitted(1.0, 1.0, 1.0)
+    assert fit.to_metrics(fitted)["climate"] == fitted.outcome.climate
 
 
 def test_the_flag_is_on_the_command_line() -> None:

@@ -43,6 +43,7 @@ from typing import Final
 import lightgbm as lgb
 import numpy as np
 
+from bikechance_ml.baselines import climatology
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import harness, report
 from bikechance_ml.eval.dataset import TARGETS, Samples, Target, to_samples
@@ -51,6 +52,7 @@ from bikechance_ml.features import coverage
 from bikechance_ml.features.arrays import Bools, Features, Float64
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.io.supabase import SupabaseIo, open_storage
+from bikechance_ml.jobs import climate
 from bikechance_ml.jobs.evaluate_baselines import Loaded, days_between, load_days
 from bikechance_ml.models import artifact as lightgbm_artifact
 from bikechance_ml.models import forest, matrix
@@ -232,8 +234,16 @@ class Fitted:
     weather: Mapping[date, coverage.Coverage]
 
 
-def fit_and_score(loaded: Loaded, samples: Samples, split: DaySplit) -> Fitted:
-    """当てはめて平たくして、**B3 と同じ検証行の上で**測る。"""
+def fit_and_score(
+    loaded: Loaded, samples: Samples, split: DaySplit, climate_source: climatology.Source
+) -> Fitted:
+    """当てはめて平たくして、**B3 と同じ検証行の上で**測る。
+
+    `climate_source` は **B2 の作り方**で、**既定値を置かない**（W5 プラン §12 の 166）。
+    置いていたときは渡し忘れたまま気づかず、**本番より弱いベースラインと比べていた**。
+    決め方は `jobs/climate.py` の `source_for` に 1 つだけある——**この名前が
+    `climate` でないのは、モジュール名を覆い隠さないため**である。
+    """
     table = loaded.table
     fit_mask = mask_of(samples, split.fit)
     built = matrix.build(table, mask_of(samples, split.evaluate))
@@ -250,7 +260,9 @@ def fit_and_score(loaded: Loaded, samples: Samples, split: DaySplit) -> Fitted:
     forests = {name: one for name, (one, _) in made.items()}
     return Fitted(
         forests=forests,
-        outcome=harness.run(samples, split, {MODEL_NAME: predict_on(forests, built)}),
+        outcome=harness.run(
+            samples, split, {MODEL_NAME: predict_on(forests, built)}, climate=climate_source
+        ),
         checks={name: check for name, (_, check) in made.items()},
         weather=loaded.weather,
     )
@@ -261,6 +273,9 @@ def to_metrics(fitted: Fitted) -> dict[str, object]:
 
     **照合の結果も残す**（W4-19）。配信は木を numpy で歩くので、「その森が
     `Booster.predict` と同じ値を出すことを何行で確かめたか」は**登録簿に残すべき事実**である。
+
+    **気候値の作り方も残す**（§12 の 166）。同じ `v3` でも、B2 を学習サンプルから
+    作ったかプロファイルから作ったかで**門の判定が変わる**（学習 3 日で 2 → 0）。
 
     **天気の被覆も残す**（PR I）。`feature_set` は列が在ることしか語らないので、
     **何割の行に天気が入っていたか**を日ごとに書く。`--allow-mixed-weather` で通した
@@ -274,6 +289,9 @@ def to_metrics(fitted: Fitted) -> dict[str, object]:
         "feature_set": FEATURE_SET,
         "num_boost_round": NUM_BOOST_ROUND,
         "brier_weighted": _to_brier_rows(outcome),
+        # **何を相手に測ったかを残す**（W5 プラン §12 の 166）。`v3` という
+        # `feature_set` は「列が在る」しか語らず、**B2 の作り方までは語らない**
+        "climate": outcome.climate,
         "forest_check": _to_check_rows(fitted.checks),
         "weather": _to_weather_rows(fitted),
         "caveat": "学習日が少ない。配線の確認であって精度の評価ではない（W4-07）",
@@ -381,6 +399,11 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--upload", action="store_true", help="成果物を Storage に置く")
     parser.add_argument("--register", action="store_true", help="model_versions に登録する")
     parser.add_argument(
+        "--no-profile",
+        action="store_true",
+        help="気候値を学習サンプルの行から作る（**2026-09-19 より前の記録と比べるとき**だけ）",
+    )
+    parser.add_argument(
         "--allow-mixed-weather",
         action="store_true",
         help="天気の被覆が日で違っても当てはめる（**登録簿に残る**。W4 プラン §8.5.3）",
@@ -447,7 +470,18 @@ def run(argv: Sequence[str] | None = None) -> int:
             purge_days=options.purge_days,
             allow_mixed_weather=options.allow_mixed_weather,
         )
-        fitted = fit_and_score(loaded, samples, split)
+        # **B2 は本番と同じ作り方にする**（`evaluate_baselines` と同じ 1 か所を通す）。
+        # 読むのは**学習期間の日だけ**——検証日の版を渡すと、B2 が検証日の観測を
+        # 見た状態で測ることになる（`jobs/climate.py`）
+        chosen = climate.source_for(
+            None if local else source,
+            split.fit,
+            local,
+            samples.ports,
+            from_profiles=not options.no_profile,
+        )
+        print(f"気候値（B2）の作り方: {chosen.describe()}", file=sys.stderr)
+        fitted = fit_and_score(loaded, samples, split, chosen)
         artifact = build_artifact(fitted.forests, split.fit)
         body = lightgbm_artifact.to_bytes(artifact)
         if options.upload:
