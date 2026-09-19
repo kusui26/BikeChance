@@ -1,7 +1,7 @@
 """B2 の材料（ポートプロファイル）を読む（W5 プラン §6.4 の PR D）。
 
-**当てはめる 2 つのジョブ（`fit_baseline` と `evaluate_baselines`）が同じ読み方をする**
-ための 1 か所。読むのは 2 種類だけ：
+**`harness.run` を呼ぶジョブが同じ読み方をする**ための 1 か所（`fit_baseline`・
+`evaluate_baselines`・`fit_lightgbm`）。読むのは 2 種類だけ：
 
   * `profiles/date=D/profile.parquet` … **学習の最終日 D の版**（D 当日までの累計）
   * `profiles/date=E/daily.parquet` … 学習の各日 E ぶん（**自分の日を引く**ため）
@@ -22,10 +22,36 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from bikechance_ml.baselines import profile_climatology
+from bikechance_ml.baselines import climatology, profile_climatology
 from bikechance_ml.features import profile
 from bikechance_ml.features.grid import profile_path
 from bikechance_ml.io.supabase import PARQUET_BUCKET, SupabaseIo
+
+
+def source_for(
+    source: SupabaseIo | None,
+    days: Sequence[date],
+    local: Path | None,
+    ports: Sequence[str],
+    *,
+    from_profiles: bool,
+) -> climatology.Source:
+    """**B2 をどう作るかを決める唯一の場所**（W5 プラン §12 の 166）。
+
+    `harness.run` を呼ぶジョブは 2 つある（`fit_lightgbm` と `evaluate_baselines`）。
+    **以前はここが無く、`harness.run` の既定値が決めていた**——`evaluate_baselines` は
+    プロファイルを渡し、`fit_lightgbm` は渡し忘れ、**同じ `v3` の同じ日で違う B2 が
+    出ていた**。学習 5 日の h=180 の改善は **+13.8% と +11.2%** に分かれ、学習 3 日では
+    門を越えた水平が **2 と 0** に分かれた。
+
+    **プロファイルが無ければ `FromSamples` に落ちる。** 収集を始めたばかりの日や、
+    プロファイルをまだ作っていない日のためである（§6.4 の完了条件 7）。**落ちたことは
+    `describe()` に出る**ので、報告書を読めば分かる。
+    """
+    if not from_profiles:
+        return climatology.FromSamples()
+    found = load(source, days, local, ports)
+    return found if found is not None else climatology.FromSamples()
 
 
 def read_bytes(source: SupabaseIo | None, path: str, local: Path | None) -> bytes | None:

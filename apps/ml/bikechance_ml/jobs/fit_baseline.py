@@ -163,11 +163,11 @@ def climate_source(
 
     読むのは**最後の学習日の版**（`climate.load`）。`fit_baseline` は期間を分けないので、
     その版は学習日をすべて含み、**配信を始める日は必ずそれより後**である。
+
+    **決め方そのものは `jobs/climate.py` に 1 つだけ置く**（W5 プラン §12 の 166）。
+    同じ条件が 3 か所に書かれていて、**そのうち 1 つが違う答えを出していた**。
     """
-    if no_profile:
-        return climatology.FromSamples()
-    found = climate.load(source, days, local, samples.ports)
-    return found if found is not None else climatology.FromSamples()
+    return climate.source_for(source, days, local, samples.ports, from_profiles=not no_profile)
 
 
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:

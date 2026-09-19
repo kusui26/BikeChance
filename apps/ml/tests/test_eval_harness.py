@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from bikechance_ml.baselines import climatology
+from bikechance_ml.baselines.climatology import FromSamples
 from bikechance_ml.eval import harness, report
 from bikechance_ml.eval.dataset import to_samples
 from bikechance_ml.eval.split import mask_of, split_days
@@ -54,7 +55,8 @@ SPLIT = split_days(fixture.DAYS, evaluate_days=1, purge_days=1)
 
 
 def build(rows: list[dict[str, object]]) -> harness.Outcome:
-    return harness.run(to_samples(fixture.to_table(rows)), SPLIT)
+    # **作り方は必ず書く。** 既定値を置いていたときに渡し忘れが起きた（§12 の 166）
+    return harness.run(to_samples(fixture.to_table(rows)), SPLIT, climate=FromSamples())
 
 
 def scenario() -> list[dict[str, object]]:
@@ -264,6 +266,7 @@ def _extra(outcome_rows: list[dict[str, object]], value: float) -> harness.Outco
         samples,
         split,
         {"LGBM": {name: np.full(n_eval, value) for name in ("bike", "dock")}},
+        climate=FromSamples(),
     )
 
 
@@ -293,7 +296,12 @@ def test_a_misaligned_extra_model_stops() -> None:
     samples = to_samples(fixture.to_table(scenario()))
     split = split_days(fixture.DAYS, evaluate_days=1, purge_days=1)
     with pytest.raises(harness.MisalignedPredictionError):
-        harness.run(samples, split, {"LGBM": {"bike": np.zeros(3), "dock": np.zeros(3)}})
+        harness.run(
+            samples,
+            split,
+            {"LGBM": {"bike": np.zeros(3), "dock": np.zeros(3)}},
+            climate=FromSamples(),
+        )
 
 
 def test_without_extras_the_tables_are_unchanged() -> None:

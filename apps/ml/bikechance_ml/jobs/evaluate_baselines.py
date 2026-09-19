@@ -141,11 +141,13 @@ def _climate(
     samples: Samples,
     no_profile: bool,
 ) -> climatology.Source:
-    """B2 の作り方を決める。**読むのは学習期間の日だけ**（検証日を混ぜない）。"""
-    if no_profile:
-        return climatology.FromSamples()
-    found = climate.load(source, split.fit, local, samples.ports)
-    return found if found is not None else climatology.FromSamples()
+    """B2 の作り方を決める。**読むのは学習期間の日だけ**（検証日を混ぜない）。
+
+    **決め方そのものは `jobs/climate.py` に 1 つだけ置く**（W5 プラン §12 の 166）。
+    ここで同じ条件を書き直すと、**片方だけ直したときに静かに食い違う**——実際に
+    `fit_lightgbm` がそうなっていた。
+    """
+    return climate.source_for(source, split.fit, local, samples.ports, from_profiles=not no_profile)
 
 
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:

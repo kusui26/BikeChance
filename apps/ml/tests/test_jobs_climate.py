@@ -14,6 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from bikechance_ml.baselines import climatology, profile_climatology
 from bikechance_ml.features import profile
 from bikechance_ml.features.grid import features_path, profile_path
 from bikechance_ml.jobs import climate
@@ -82,6 +83,54 @@ def test_no_profile_means_the_old_way(tmp_path: Path) -> None:
 def test_no_days_means_the_old_way(tmp_path: Path) -> None:
     """1 日も読めなかったとき。**`days[-1]` を引きに行かない。**"""
     assert climate.load(None, (), tmp_path, PORTS) is None
+
+
+# ── 作り方を決める 1 か所（§12 の 166）────────────────────────
+def test_source_for_reads_the_profiles_when_asked(tmp_path: Path) -> None:
+    """**`from_profiles` が真ならプロファイルから作る。**
+
+    以前はこの決め方が `evaluate_baselines` の中にだけ在り、`harness.run` の既定値が
+    もう 1 つの答えを持っていた。**`fit_lightgbm` は既定のまま**だったので、
+    同じ日の同じ `v3` で**違う B2** が出ていた（W5 プラン §12 の 166）。
+    """
+    put_day(tmp_path, DAY0, n_days=2)
+    made = climate.source_for(None, (DAY0,), tmp_path, PORTS, from_profiles=True)
+    assert isinstance(made, profile_climatology.FromProfile)
+    assert "プロファイル" in made.describe()
+
+
+def test_source_for_uses_the_samples_when_told_not_to(tmp_path: Path) -> None:
+    """**逃げ道。** 2026-09-19 より前の記録と比べるときに要る。
+
+    プロファイルが**在っても**読まない（「無いから落ちた」と区別できること）。
+    """
+    put_day(tmp_path, DAY0, n_days=2)
+    made = climate.source_for(None, (DAY0,), tmp_path, PORTS, from_profiles=False)
+    assert isinstance(made, climatology.FromSamples)
+
+
+def test_source_for_falls_back_when_there_is_no_profile(tmp_path: Path) -> None:
+    """**プロファイルが無ければ落ちる**（完了条件 7）。落ちたことは `describe()` に出る。"""
+    made = climate.source_for(None, (DAY0,), tmp_path, PORTS, from_profiles=True)
+    assert isinstance(made, climatology.FromSamples)
+    assert "学習サンプル" in made.describe()
+
+
+def test_only_one_place_decides_how_b2_is_made() -> None:
+    """**`FromSamples()` を作るのは `jobs/climate.py` だけ。**
+
+    同じ条件が 3 か所（`fit_baseline`・`evaluate_baselines`・`harness.run` の既定値）に
+    書かれていて、**そのうち 1 つが違う答えを出していた**のが §12 の 166 である。
+    同じ挙動の重複は検査で区別できないので、**「決める場所が 1 つであること」そのもの**を
+    留める。落ちたら、`climate.source_for` を呼ぶ形に直す。
+    """
+    root = Path(__file__).resolve().parents[1] / "bikechance_ml"
+    guilty = sorted(
+        one.relative_to(root).as_posix()
+        for one in root.rglob("*.py")
+        if "FromSamples()" in one.read_text(encoding="utf-8")
+    )
+    assert guilty == ["jobs/climate.py"], f"B2 の作り方を決めている場所が他にあります: {guilty}"
 
 
 def test_a_file_with_the_wrong_columns_is_refused(tmp_path: Path) -> None:

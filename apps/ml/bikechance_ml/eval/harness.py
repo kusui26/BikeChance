@@ -104,7 +104,8 @@ def run(
     samples: Samples,
     split: DaySplit,
     extra: ExtraModels | None = None,
-    climate: climatology.Source | None = None,
+    *,
+    climate: climatology.Source,
 ) -> Outcome:
     """分割にしたがって当てはめ、測る。
 
@@ -112,9 +113,12 @@ def run(
     上で測る**ために、行数が一致しなければ例外にする（§4.4 の 30b）。行の並びは
     `samples.take(eval_mask)` と同じでなければならない——呼ぶ側が `mask_of` で作る。
 
-    `climate` は **B2 の作り方**。省くと学習サンプルの行から作る（W3 からのやり方）。
+    `climate` は **B2 の作り方**。**必ず渡す**（既定値を置かない。W5 プラン §12 の 166）
+    ——置いていたときは `fit_lightgbm` が渡し忘れ、**同じ日の同じ `v3` で違う B2 が
+    出ていた**のに、例外も警告も出なかった。決め方は `jobs/climate.py` の `source_for`
+    に 1 つだけある。
     """
-    source = climate if climate is not None else climatology.FromSamples()
+    source = climate
     fit_mask = mask_of(samples, split.fit)
     eval_mask = mask_of(samples, split.evaluate)
     evaluated = samples.take(eval_mask)
