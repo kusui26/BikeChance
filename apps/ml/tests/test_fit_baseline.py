@@ -88,7 +88,7 @@ def test_from_and_days_cannot_be_combined() -> None:
 
 
 def test_a_backwards_window_is_refused() -> None:
-    """始まりが終わりより後なら止める（`load_days` は空の並びを黙って受ける）。"""
+    """始まりが終わりより後なら止める（`read_window` は空の並びを黙って受ける）。"""
     with pytest.raises(WindowError):
         window(start="2026-09-13", end="2026-09-12", days=None, now=MORNING)
 

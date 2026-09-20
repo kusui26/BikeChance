@@ -16,22 +16,22 @@ from pathlib import Path
 from typing import Final
 
 import numpy as np
-import pyarrow as pa
 import pytest
 
 from bikechance_ml.baselines.climatology import FromSamples
 from bikechance_ml.eval import harness
 from bikechance_ml.eval.split import DaySplit
 from bikechance_ml.features import coverage
-from bikechance_ml.features.arrays import Bools, Float32
+from bikechance_ml.features.arrays import Float32
 from bikechance_ml.features.schema import WEATHER_COLUMNS
 from bikechance_ml.jobs import climate as climate_module
 from bikechance_ml.jobs import fit_lightgbm as fit
-from bikechance_ml.jobs.evaluate_baselines import Loaded, load_days
+from bikechance_ml.jobs.build_features import to_parquet_bytes
+from bikechance_ml.jobs.window import Window
 from bikechance_ml.models import matrix
 from tests import eval_fixture as eval_rows
-from tests.test_evaluate_baselines import write_samples
 from tests.test_model_artifact import ARTIFACT, BOOSTERS, N_COLUMNS, _features
+from tests.test_window import read_local, write_distinct_sizes, write_samples
 
 TARGET: Final[str] = "bike"
 
@@ -200,15 +200,27 @@ def test_the_registration_normalises_the_card_path(tmp_path: Path) -> None:
 
 
 # ── 天気の門（W4 プラン §8.5.3、PR I）─────────────────────────
-def _loaded(*ratios: float) -> Loaded:
-    """`prepare` に渡す形。**表は小さいが本物**（`to_samples` を通る）。"""
-    rows = [
-        eval_rows.row(day, "hellocycling", station, horizon, 5, 5, 1, 1)
+def _window(*ratios: float) -> Window:
+    """`prepare` に渡す形。**中身は小さいが本物**（`samples_of` が実際に開く）。
+
+    **日ごとに 1 つ**置く。窓は表を持たないので、渡すのは**その日の Parquet**である。
+    """
+    tables = {
+        day: eval_rows.to_table(
+            [
+                eval_rows.row(day, "hellocycling", station, horizon, 5, 5, 1, 1)
+                for station in ("a", "b")
+                for horizon in (5, 60)
+            ]
+        )
         for day in DAYS
-        for station in ("a", "b")
-        for horizon in (5, 60)
-    ]
-    return Loaded(table=eval_rows.to_table(rows), days=DAYS, weather=_weather(*ratios))
+    }
+    return Window(
+        days=DAYS,
+        rows={day: table.num_rows for day, table in tables.items()},
+        weather=_weather(*ratios),
+        bodies={day: to_parquet_bytes(table) for day, table in tables.items()},
+    )
 
 
 def test_a_mixed_period_stops_before_fitting() -> None:
@@ -217,16 +229,28 @@ def test_a_mixed_period_stops_before_fitting() -> None:
     09-07（被覆 0%）と 09-09（被覆 100%）を一緒に渡すと、**当てはめる前に**止まる。
     """
     with pytest.raises(coverage.MixedWeatherError, match=r"100\.00 ポイント"):
-        fit.prepare(_loaded(0.0, 1.0, 1.0), eval_days=1, purge_days=1, allow_mixed_weather=False)
+        fit.prepare(_window(0.0, 1.0, 1.0), eval_days=1, purge_days=1, allow_mixed_weather=False)
 
 
 def test_the_flag_lets_a_mixed_period_through() -> None:
     """**承知のうえなら通す。** 通したことは登録簿に残る（下の検査）。"""
     samples, split = fit.prepare(
-        _loaded(0.0, 1.0, 1.0), eval_days=1, purge_days=1, allow_mixed_weather=True
+        _window(0.0, 1.0, 1.0), eval_days=1, purge_days=1, allow_mixed_weather=True
     )
     assert split.fit == (DAYS[0],)
     assert len(samples) > 0
+
+
+def test_the_gate_stops_before_any_table_is_opened() -> None:
+    """**止まるときは表を 1 つも開いていない**（§12 の 168 の 2 段目）。
+
+    窓の中身を**開けないバイト列**にしておく。門が先に通れば天気の例外で止まり、
+    順番が入れ替われば**その前に Parquet を開こうとして別の例外**になる。
+    「止まること」だけを見る検査では、この入れ替えは素通りした。
+    """
+    broken = replace(_window(0.0, 1.0, 1.0), bodies=dict.fromkeys(DAYS, b"this is not parquet"))
+    with pytest.raises(coverage.MixedWeatherError):
+        fit.prepare(broken, eval_days=1, purge_days=1, allow_mixed_weather=False)
 
 
 def test_a_day_that_is_only_purged_does_not_stop_the_fit() -> None:
@@ -235,11 +259,11 @@ def test_a_day_that_is_only_purged_does_not_stop_the_fit() -> None:
     ここが素通りするようだと、門は「読んだ日ぜんぶ」を見ていることになり、
     **鳴かなくてよいところで鳴く**。
     """
-    fit.prepare(_loaded(1.0, 0.0, 1.0), eval_days=1, purge_days=1, allow_mixed_weather=False)
+    fit.prepare(_window(1.0, 0.0, 1.0), eval_days=1, purge_days=1, allow_mixed_weather=False)
 
 
 def test_a_period_with_the_same_weather_passes() -> None:
-    fit.prepare(_loaded(1.0, 1.0, 1.0), eval_days=1, purge_days=1, allow_mixed_weather=False)
+    fit.prepare(_window(1.0, 1.0, 1.0), eval_days=1, purge_days=1, allow_mixed_weather=False)
 
 
 def test_the_gate_is_reached_from_the_command_line(
@@ -270,27 +294,33 @@ def test_the_fit_matrix_is_built_once_for_both_targets(
 
     当てはめそのものは差し替える——ここで見たいのは**何回組み立てたか**だけで、
     木の中身は他の検査が見ている。
+
+    **日ごとに行数を変える。** 同じ行数の日を並べると、**検証と学習を取り違えても
+    同じ数**になり、確保の回数しか見られない（故意に取り違えたら素通りした）。
     """
-    root = write_samples(tmp_path, dict.fromkeys(DAYS, True))
-    loaded = load_days(None, list(DAYS), root, columns=None)
-    samples, split = fit.prepare(loaded, eval_days=1, purge_days=1, allow_mixed_weather=False)
+    root = write_distinct_sizes(tmp_path)
+    opened = read_local(root, DAYS)
+    samples, split = fit.prepare(opened, eval_days=1, purge_days=1, allow_mixed_weather=False)
 
-    calls: list[str] = []
-    original = matrix.build
+    reserved: list[int] = []
+    original = matrix.empty
 
-    def counted(table: pa.Table, keep: Bools | None = None) -> matrix.Matrix:
-        calls.append("検証" if keep is None or int(keep.sum()) == 0 else "行")
-        return original(table, keep)
+    def counted(rows: int) -> matrix.Matrix:
+        reserved.append(rows)
+        return original(rows)
 
-    monkeypatch.setattr(matrix, "build", counted)
+    monkeypatch.setattr(matrix, "empty", counted)
     monkeypatch.setattr(fit, "train_one", lambda *args: None)
     monkeypatch.setattr(
         fit, "flatten_and_verify", lambda *args: (ARTIFACT.forests["bike"], fit.Checked(0, 0.0))
     )
     monkeypatch.setattr(harness, "run", lambda *args, **kwargs: None)
 
-    fit.fit_and_score(loaded, samples, split, FromSamples())
-    assert len(calls) == 2, f"行列を {len(calls)} 回組み立てています（検証と学習で 2 回のはず）"
+    fit.fit_and_score(opened, samples, split, FromSamples())
+    expected = [opened.rows[split.evaluate[0]], opened.rows[split.fit[0]]]
+    assert reserved == expected, (
+        f"行列を {len(reserved)} 回確保しています（検証と学習で 2 回のはず）"
+    )
 
 
 # ── 気候値の作り方（§12 の 166）──────────────────────────────

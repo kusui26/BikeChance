@@ -118,29 +118,74 @@ def monotone_constraints(target: str, columns: Sequence[str] = MODEL_COLUMNS) ->
     return tuple(1 if name == wanted else 0 for name in columns)
 
 
+class MatrixOverflowError(ValueError):
+    """確保した行数の外へ書こうとした。**黙って切り詰めない。**"""
+
+
+class UnfilledMatrixError(ValueError):
+    """確保したのに埋め残した行がある。**`np.empty` の中身は未定義である。**"""
+
+
+def empty(rows: int) -> Matrix:
+    """**先に置き場所を確保する。** 中身は未定義なので、必ず最後まで埋める。
+
+    **素直に書くと `np.column_stack([_column(...) for ...])` になる**が、それは
+    62 列ぶんの配列をすべて作ってから、同じ大きさの結果をもう 1 つ確保する
+    ——**山が行列の 2 倍**になる。28 日ぶん（1,688 万行）では 8 GB が 16 GB になり、
+    それだけでランナーに載らない（W5 プラン §12 の 168）。
+    """
+    return Matrix(values=np.empty((rows, len(MODEL_COLUMNS)), dtype=DTYPE), columns=MODEL_COLUMNS)
+
+
+def fill(into: Matrix, at: int, table: pa.Table, keep: Bools | None = None) -> int:
+    """`at` 行目からこの表のぶんを埋め、**次に埋める位置**を返す。
+
+    **日ごとに読んで区間を埋めるための口**である（`jobs/window.py`）。窓ぜんぶを
+    1 つの表にしてから埋めると、**行列と同じものを表の形でもう 1 つ持つ**ことになる
+    ——28 日ぶんで 4.59 GiB（§12 の 168 の「Linux で測った」）。
+
+    `keep` を渡すと**その行だけ**を取る。`table.filter(...)` を先に通すのと同じ結果に
+    なるが、**表まるごとの写しを作らない**——**選ぶのは列ごと**なので、同時に生きるのは
+    「行列と 1 列と、その列の選んだぶん」に収まる。
+    """
+    rows = _rows(table, keep)
+    if at + rows > len(into):
+        raise MatrixOverflowError(
+            f"{len(into):,} 行しか確保していないのに {at + rows:,} 行目まで埋めようとしています"
+        )
+    for index, name in enumerate(MODEL_COLUMNS):
+        # **1 列ずつ書き写して、その列はすぐ捨てる**（次の周回で参照が切れる）
+        column = _column(table, name)
+        into.values[at : at + rows, index] = column if keep is None else column[keep]
+    return at + rows
+
+
+def refuse_unfilled(built: Matrix, at: int) -> None:
+    """**埋め残しを許さない。** `np.empty` の中身は未定義で、例外は出ない。
+
+    埋め残した行は**ゴミのまま学習に入る**——確率だけが静かに変わる。
+    """
+    if at != len(built):
+        raise UnfilledMatrixError(f"{len(built):,} 行を確保して {at:,} 行しか埋めていません")
+
+
 def build(table: pa.Table, keep: Bools | None = None) -> Matrix:
     """特徴量の表を行列にする。**学習の表でも推論の表でも同じ結果になる。**
 
     どちらも `MODEL_COLUMNS` を選ぶだけなので、学習の表に余分にある列（ラベル・重み）は
     自然に落ちる。**足りない列があれば pyarrow が例外にする**（黙って NaN で埋めない）。
 
-    `keep` を渡すと**その行だけ**を取る。`table.filter(...)` を先に通すのと同じ結果に
-    なるが、**表まるごとの写しを作らない**——28 日ぶんでは、その写しだけで 4.3 GB に
-    なる（W5 プラン §12 の 168）。**選ぶのは列ごと**なので、同時に生きるのは
-    「行列と 1 列と、その列の選んだぶん」に収まる。
-
-    **先に置き場所を確保して 1 列ずつ埋める。** 素直に書くと
-    `np.column_stack([_column(...) for ...])` になるが、それは **62 列ぶんの配列を
-    すべて作ってから、同じ大きさの結果をもう 1 つ確保する**——**山が行列の 2 倍**になる。
-    28 日ぶん（1,640 万行）では 8 GB が 16 GB になり、**それだけでランナーに載らない**。
+    **`empty` に `fill` を 1 回だけ掛けたもの**である（配信はこちらを通る。表が 1 つ
+    しかないので分ける意味が無い）。**組み立て方の正は `fill` の 1 か所**にある。
     """
-    rows = table.num_rows if keep is None else int(keep.sum())
-    values = np.empty((rows, len(MODEL_COLUMNS)), dtype=DTYPE)
-    for index, name in enumerate(MODEL_COLUMNS):
-        # **1 列ずつ書き写して、その列はすぐ捨てる**（次の周回で参照が切れる）
-        column = _column(table, name)
-        values[:, index] = column if keep is None else column[keep]
-    return Matrix(values=values, columns=MODEL_COLUMNS)
+    built = empty(_rows(table, keep))
+    fill(built, 0, table, keep)
+    return built
+
+
+def _rows(table: pa.Table, keep: Bools | None) -> int:
+    """この表から取る行数。"""
+    return table.num_rows if keep is None else int(keep.sum())
 
 
 def _column(table: pa.Table, name: str) -> Float64:

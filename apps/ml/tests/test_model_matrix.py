@@ -150,12 +150,17 @@ def test_building_does_not_hold_twice_the_matrix() -> None:
     素直に書くと 62 列ぶんの配列を全部作ってから同じ大きさの結果を確保するので、
     **山が行列の 2 倍**になる。28 日ぶんでは 8 GB が 16 GB になり、それだけで
     ランナーに載らない（§12 の 168）。**書き方そのものを固定する。**
+
+    **見るのは `empty` と `fill` である**（2026-09-20 に分けた。§12 の 168 の 2 段目）。
+    `build` はその 2 つを 1 回ずつ呼ぶだけになり、**確保も書き込みもしていない。**
     """
     # **本体だけを見る。** docstring は「素直に書くと column_stack になる」と説明して
     # いるので、そこまで含めると必ず引っかかる
-    body = inspect.getsource(matrix.build).replace(matrix.build.__doc__ or "", "")
-    assert "np.empty(" in body, "先に確保していません"
-    assert "column_stack" not in body, "column_stack は行列の 2 倍を持ちます"
+    reserve = inspect.getsource(matrix.empty).replace(matrix.empty.__doc__ or "", "")
+    write = inspect.getsource(matrix.fill).replace(matrix.fill.__doc__ or "", "")
+    assert "np.empty(" in reserve, "先に確保していません"
+    assert "column_stack" not in write, "column_stack は行列の 2 倍を持ちます"
+    assert "np.empty(" not in write, "埋めるところで確保し直しています"
 
 
 def test_null_becomes_nan_not_zero() -> None:
@@ -198,3 +203,51 @@ def test_nan_is_not_confused_with_a_category() -> None:
     """語彙の中に `None` が混ざらない。**欠損は NaN のまま。**"""
     values = matrix.build(BUILT).values[:, matrix.MODEL_COLUMNS.index("muni_code")]
     assert all(math.isnan(one) or one >= 0 for one in values.tolist())
+
+
+# ── 先に確保して日ごとに埋める（W5 プラン §12 の 168 の 2 段目）──────
+def test_filling_in_two_goes_matches_building_at_once() -> None:
+    """**区間に分けて埋めても、まとめて作ったのと同じ値になる。**
+
+    ここが崩れると、**日ごとに読む**書き換えが確率を変える。答えが変わらないことを
+    突き合わせで留める。
+    """
+    half = BUILT.num_rows // 2
+    built = matrix.empty(BUILT.num_rows)
+    at = matrix.fill(built, 0, BUILT.slice(0, half))
+    at = matrix.fill(built, at, BUILT.slice(half))
+
+    assert at == BUILT.num_rows
+    assert np.array_equal(built.values, matrix.build(BUILT).values, equal_nan=True)
+
+
+def test_filling_past_the_end_stops() -> None:
+    """**確保した外へは書かない。** 黙って切り詰めると、どの行が落ちたか分からない。"""
+    built = matrix.empty(BUILT.num_rows)
+    matrix.fill(built, 0, BUILT)
+    with pytest.raises(matrix.MatrixOverflowError):
+        matrix.fill(built, BUILT.num_rows, BUILT.slice(0, 1))
+
+
+def test_an_unfilled_matrix_is_refused() -> None:
+    """**埋め残しは例外にする。** `np.empty` の中身は未定義で、例外は出ない。"""
+    built = matrix.empty(BUILT.num_rows + 1)
+    at = matrix.fill(built, 0, BUILT)
+    with pytest.raises(matrix.UnfilledMatrixError):
+        matrix.refuse_unfilled(built, at)
+
+
+def test_a_full_matrix_passes_the_check() -> None:
+    built = matrix.build(BUILT)
+    matrix.refuse_unfilled(built, len(built))
+
+
+def test_filling_with_a_mask_takes_only_those_rows() -> None:
+    """`keep` を渡したときも、**埋めるのは選んだ行数ぶんだけ**。"""
+    keep = np.zeros(BUILT.num_rows, dtype=np.bool_)
+    keep[::2] = True
+    built = matrix.empty(int(keep.sum()))
+    at = matrix.fill(built, 0, BUILT, keep)
+
+    assert at == int(keep.sum())
+    assert np.array_equal(built.values, matrix.build(BUILT, keep).values, equal_nan=True)

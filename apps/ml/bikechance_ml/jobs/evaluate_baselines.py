@@ -24,93 +24,27 @@
 """
 
 import argparse
-import io
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
-
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from bikechance_ml.baselines import climatology
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import harness, report
-from bikechance_ml.eval.dataset import NEEDED_COLUMNS, Samples, concat, to_samples
+from bikechance_ml.eval.dataset import Samples
 from bikechance_ml.eval.split import DaySplit, split_days
-from bikechance_ml.features import coverage
-from bikechance_ml.features.grid import features_path
 from bikechance_ml.io.supabase import SupabaseIo, open_storage
 from bikechance_ml.jobs import climate
-
-
-class NoSamplesError(RuntimeError):
-    """1 日ぶんも読めなかった。"""
-
-
-@dataclass(frozen=True)
-class Loaded:
-    """読めた学習サンプル。**表と、読めた日と、日ごとの天気の被覆。**
-
-    **被覆を一緒に返すのは、読んだ人にしか測れないからである。** 組み立てたときの数は
-    どこにも保存されておらず、`feature_set` は「列が在る」しか語らない（§8.5.3）。
-    ここで数えておけば、**すでに在る日**にも効き、作り直しても食い違わない。
-    """
-
-    table: pa.Table
-    #: 実際に読めた日（無い日は飛ばしてある）。**分割はこれで切る。**
-    days: tuple[date, ...]
-    #: 日ごとの天気の被覆。**読む列を絞る前**の表から数える
-    weather: Mapping[date, coverage.Coverage]
-
-
-def days_between(start: date, end: date) -> tuple[date, ...]:
-    """両端を含む JST の暦日。"""
-    return tuple(start + timedelta(days=offset) for offset in range((end - start).days + 1))
-
-
-def load_days(
-    source: SupabaseIo | None,
-    days: Sequence[date],
-    local: Path | None,
-    columns: Sequence[str] | None = NEEDED_COLUMNS,
-) -> Loaded:
-    """日ごとのサンプルを読む。**無い日は飛ばし、読めた日を返す。**
-
-    `columns` を `None` にすると**全列**を返す。ベースラインが読むのは 11 列だけだが、
-    LightGBM は 62 列を使う（`jobs/fit_lightgbm.py`）。
-
-    **被覆は列を絞る前に数える。** 絞ったあとの表には天気の列が無く、そこで数えると
-    「絞ったから 0」と「本当に 0」が区別できない。絞る側に移したら
-    `coverage.measure` が `MissingWeatherColumnsError` で止める。
-    """
-    tables: list[pa.Table] = []
-    found: list[date] = []
-    weather: dict[date, coverage.Coverage] = {}
-    for day in days:
-        body = _one_day(source, day, local)
-        if body is None:
-            continue
-        table = pq.read_table(io.BytesIO(body))
-        tables.append(table)
-        found.append(day)
-        weather[day] = coverage.measure(table)
-    if not tables:
-        raise NoSamplesError("学習サンプルが 1 日ぶんも見つかりません")
-    return Loaded(table=concat(tables, columns), days=tuple(found), weather=weather)
-
-
-def _one_day(source: SupabaseIo | None, day: date, local: Path | None) -> bytes | None:
-    """1 日ぶんの学習サンプル。**プロファイルと同じ読み方**（`jobs/climate.py`）。"""
-    return climate.read_bytes(source, features_path(day), local)
+from bikechance_ml.jobs.window import Window, day_reader, days_between, read_window, samples_of
 
 
 @dataclass(frozen=True)
 class Prepared:
     """読んで、日を分け、**B2 の作り方まで決めたところ**。Storage を閉じたあとに使う。"""
 
-    loaded: Loaded
+    window: Window
     samples: Samples
     split: DaySplit
     climate: climatology.Source
@@ -122,12 +56,16 @@ def prepare(
     local: Path | None,
     options: argparse.Namespace,
 ) -> Prepared:
-    """読み込みを 1 か所にまとめる。**Storage を開いていても手元でも同じ順**で進む。"""
-    loaded = load_days(source, days, local)
-    samples = to_samples(loaded.table)
-    split = split_days(loaded.days, options.eval_days, options.purge_days)
+    """読み込みを 1 か所にまとめる。**Storage を開いていても手元でも同じ順**で進む。
+
+    **窓は表を持たない**（`jobs/window.py`）。日ごとに開いてサンプルにするので、
+    ベースラインでも「全日を 1 つの表につないでから開く」をしない。
+    """
+    window = read_window(day_reader(source, local), days)
+    samples = samples_of(window)
+    split = split_days(window.days, options.eval_days, options.purge_days)
     return Prepared(
-        loaded=loaded,
+        window=window,
         samples=samples,
         split=split,
         climate=_climate(source, split, local, samples, options.no_profile),
@@ -182,7 +120,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     # （`NEEDED_COLUMNS` に無い）ので、混ざっても B0〜B3 の数字は変わらない。
     # 止めるのは成果物を書く `fit_lightgbm` だけである（W4 プラン §6.8 の PR I）
     text = report.render_markdown(
-        outcome, options.title, options.note, weather=prepared.loaded.weather
+        outcome, options.title, options.note, weather=prepared.window.weather
     )
 
     if options.out is None:

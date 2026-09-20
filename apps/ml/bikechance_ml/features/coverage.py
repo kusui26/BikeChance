@@ -110,7 +110,18 @@ def measure(table: pa.Table) -> Coverage:
 
 def refuse_a_table_without_weather(table: pa.Table) -> None:
     """**天気の列が無ければ止める。** 読む列を絞ったのを 0% と読み違えないため。"""
-    missing = tuple(name for name in WEATHER_COLUMNS if name not in table.column_names)
+    refuse_missing_weather(table.column_names)
+
+
+def refuse_missing_weather(names: Iterable[str]) -> None:
+    """列の**名前だけ**で同じ判定をする。**Parquet の見出しだけで止められる。**
+
+    日ごとに読む経路（`jobs/window.py`）は天気の 4 列しか開かないので、
+    **開く前に**見出しを見る。ここを別に書くと**同じ規約が 2 か所に無名で在る**
+    ことになるので、上の判定もこれを通す（W5 プラン §12 の 132・142）。
+    """
+    known = set(names)
+    missing = tuple(name for name in WEATHER_COLUMNS if name not in known)
     if missing:
         raise MissingWeatherColumnsError(f"天気の列が表にありません: {', '.join(missing)}")
 
