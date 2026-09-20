@@ -55,12 +55,12 @@ from bikechance_ml.baselines.artifact import (
     to_bytes,
 )
 from bikechance_ml.config import read_storage_config
-from bikechance_ml.eval.dataset import TARGETS, Samples, Target, to_samples
+from bikechance_ml.eval.dataset import TARGETS, Samples, Target
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.features.grid import jst_yesterday
 from bikechance_ml.io.supabase import SupabaseIo, open_storage
 from bikechance_ml.jobs import climate
-from bikechance_ml.jobs.evaluate_baselines import days_between, load_days
+from bikechance_ml.jobs.window import day_reader, days_between, read_window, samples_of
 from bikechance_ml.models.registry import MODEL_BUCKET
 
 #: 成果物の Content-Type。gzip した JSON。
@@ -95,7 +95,7 @@ def window(
     しているのと同じ理由）。
 
     **`--to` の既定が「今日」ではなく「昨日」**なのは、**当日の `features/` がまだ
-    無いから**である（日次ジョブが翌朝に作る）。今日を渡しても `load_days` が黙って
+    無いから**である（日次ジョブが翌朝に作る）。今日を渡しても `read_window` が黙って
     飛ばすので害は無いが、**既定は実在する日にしておく**。
     """
     if start is not None and days is not None:
@@ -203,7 +203,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         return 2
     days = days_between(first, last)
     # **どの期間で当てはめたかを最初に言う。** 既定で走らせたときに、何日ぶんを
-    # 読もうとしているかが目で分かる（読めなかった日は `load_days` が別に言う）
+    # 読もうとしているかが目で分かる（読めなかった日は `read_window` が別に言う）
     print(f"学習期間 {first} 〜 {last}（{len(days)} 日）", file=sys.stderr)
     return _fit(options, days)
 
@@ -212,12 +212,13 @@ def _fit(options: argparse.Namespace, days: Sequence[date]) -> int:
     local = Path(options.local) if options.local else None
     with open_storage(read_storage_config()) as source:
         reader = None if local else source
-        loaded = load_days(reader, days, local)
-        samples = to_samples(loaded.table)
-        chosen = climate_source(reader, loaded.days, local, samples, options.no_profile)
+        # **名前を `window` にしない**——この上に期間を決める `window()` が在る
+        opened = read_window(day_reader(reader, local), days)
+        samples = samples_of(opened)
+        chosen = climate_source(reader, opened.days, local, samples, options.no_profile)
         # **天気の被覆は見ない。** ベースラインが読むのは 6 列で、天気はその中に無い
         # （`baselines/` は `Samples` しか触らない）。混ざっても値が変わらない
-        artifact = build_artifact(samples, loaded.days, chosen)
+        artifact = build_artifact(samples, opened.days, chosen)
         body = to_bytes(artifact)
         if options.upload:
             source.upload(MODEL_BUCKET, artifact_path(artifact.model_version), body, CONTENT_TYPE)

@@ -4,14 +4,20 @@
 `station_id` はシステムを跨いで衝突する（実測 2,608 件）。
 """
 
+from datetime import date
+
 import numpy as np
+import pyarrow as pa
 import pytest
 
 from bikechance_ml.eval.dataset import (
     BUCKET_LABELS,
     TARGETS,
+    NoChunksError,
     bucket_index,
     days_in,
+    merge,
+    to_chunk,
     to_samples,
 )
 from tests import eval_fixture as fixture
@@ -108,3 +114,50 @@ def test_bucket_boundaries() -> None:
     counts = np.array([0, 1, 2, 3, 5, 6, 10, 11, 999], dtype=np.int16)
     labels = [BUCKET_LABELS[one] for one in bucket_index(counts)]
     assert labels == ["0", "1", "2", "3-5", "3-5", "6-10", "6-10", "11+", "11+"]
+
+
+# ── 日ごとに開いて合流させる（W5 プラン §12 の 168 の 2 段目）──────
+def _day(day: date, *stations: str) -> pa.Table:
+    """1 日ぶんの表。**ポートの集合を日ごとに変えられる**ようにしてある。"""
+    return fixture.to_table(
+        [fixture.row(day, "hellocycling", one, 5, 3, 3, 1, 1) for one in stations]
+    )
+
+
+def test_merging_two_chunks_matches_the_whole_table() -> None:
+    """**この PR の主題。** 日ごとに開いて合流させても、つないだ表と同じ答えになる。
+
+    **ポートの集合を日ごとに変える**——同じポートしか出てこない日を並べると、
+    番号を振り直さなくても一致してしまい、**合流が効いているか分からない**。
+    """
+    first, second = _day(fixture.DAYS[0], "b", "c"), _day(fixture.DAYS[1], "a", "b")
+
+    merged = merge([to_chunk(first), to_chunk(second)])
+    whole = to_samples(pa.concat_tables([first, second]))
+
+    assert merged.ports == whole.ports
+    assert merged.port.tolist() == whole.port.tolist()
+    assert merged.day.tolist() == whole.day.tolist()
+    assert merged.systems == whole.systems
+
+
+def test_a_port_that_appears_only_later_gets_a_global_number() -> None:
+    """**2 日目にしか出ないポートも語彙に入る。** 番号は合流後の並びで振り直す。"""
+    merged = merge([to_chunk(_day(fixture.DAYS[0], "b")), to_chunk(_day(fixture.DAYS[1], "a"))])
+    assert merged.ports == ("hellocycling/a", "hellocycling/b")
+    # 1 日目の "b" は、合流後は 1 番である（その日のうちは 0 番だった）
+    assert merged.port.tolist() == [1, 0]
+
+
+def test_an_empty_day_does_not_shift_the_numbers() -> None:
+    """**0 行の日が混ざっても壊れない。** 飛ばさずに受け取れる形にしておく。"""
+    empty = fixture.to_table([])
+    merged = merge([to_chunk(empty), to_chunk(_day(fixture.DAYS[0], "a"))])
+    assert len(merged) == 1
+    assert merged.ports == ("hellocycling/a",)
+
+
+def test_merging_nothing_is_loud() -> None:
+    """**空の `Samples` を黙って作らない。**"""
+    with pytest.raises(NoChunksError):
+        merge([])

@@ -46,14 +46,21 @@ import numpy as np
 from bikechance_ml.baselines import climatology
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import harness, report
-from bikechance_ml.eval.dataset import TARGETS, Samples, Target, to_samples
+from bikechance_ml.eval.dataset import TARGETS, Samples, Target
 from bikechance_ml.eval.split import DaySplit, mask_of, split_days
 from bikechance_ml.features import coverage
 from bikechance_ml.features.arrays import Bools, Features, Float64
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.io.supabase import SupabaseIo, open_storage
 from bikechance_ml.jobs import climate
-from bikechance_ml.jobs.evaluate_baselines import Loaded, days_between, load_days
+from bikechance_ml.jobs.window import (
+    Window,
+    day_reader,
+    days_between,
+    matrix_of,
+    read_window,
+    samples_of,
+)
 from bikechance_ml.models import artifact as lightgbm_artifact
 from bikechance_ml.models import forest, matrix
 from bikechance_ml.models.registry import LIGHTGBM_KIND, MODEL_BUCKET
@@ -235,7 +242,7 @@ class Fitted:
 
 
 def fit_and_score(
-    loaded: Loaded, samples: Samples, split: DaySplit, climate_source: climatology.Source
+    window: Window, samples: Samples, split: DaySplit, climate_source: climatology.Source
 ) -> Fitted:
     """当てはめて平たくして、**B3 と同じ検証行の上で**測る。
 
@@ -243,13 +250,16 @@ def fit_and_score(
     置いていたときは渡し忘れたまま気づかず、**本番より弱いベースラインと比べていた**。
     決め方は `jobs/climate.py` の `source_for` に 1 つだけある——**この名前が
     `climate` でないのは、モジュール名を覆い隠さないため**である。
+
+    **行列は日ごとに埋める**（`jobs/window.py` の `matrix_of`）。窓ぜんぶを 1 つの表に
+    してから選ぶと、**行列と同じものを表の形でもう 1 つ持つ**ことになる——28 日ぶんで
+    4.59 GiB（§12 の 168 の「Linux で測った」）。
     """
-    table = loaded.table
     fit_mask = mask_of(samples, split.fit)
-    built = matrix.build(table, mask_of(samples, split.evaluate))
+    built = matrix_of(window, split.evaluate)
     blocks = verification_blocks(built.values)
     # **学習の行列は 1 度だけ作る**（ターゲットで違うのはラベルと重みだけ）
-    fitting = matrix.build(table, fit_mask)
+    fitting = matrix_of(window, split.fit)
     made = {
         target.name: flatten_and_verify(
             train_one(fitting, samples, fit_mask, target), target.name, blocks
@@ -264,7 +274,7 @@ def fit_and_score(
             samples, split, {MODEL_NAME: predict_on(forests, built)}, climate=climate_source
         ),
         checks={name: check for name, (_, check) in made.items()},
-        weather=loaded.weather,
+        weather=window.weather,
     )
 
 
@@ -430,20 +440,21 @@ def refuse_mixed_weather(
 
 
 def prepare(
-    loaded: Loaded, *, eval_days: int, purge_days: int, allow_mixed_weather: bool
+    window: Window, *, eval_days: int, purge_days: int, allow_mixed_weather: bool
 ) -> tuple[Samples, DaySplit]:
     """分割を決め、**当てはめの前に天気の門を通す**（PR I）。
 
     門を `run` の中に直書きしないのは、**呼び出し側が呼ぶのをやめても気づけない**
     からである（PR E′ で 1 度そうなった）。ここを通す限り、検査は本物の経路を見る。
 
-    **開く順も意味を持つ。** 分割 → 門 → `to_samples` の順にするのは、止めるなら
+    **開く順も意味を持つ。** 分割 → 門 → サンプルの順にするのは、止めるなら
     行を整数に直す前に止めたいため（3 日ぶんで 618 万行。実測では **1.1 秒**で止まる）。
+    **窓は表を持たない**ので、ここで止まるときは**表を 1 つも開いていない**。
     """
-    split = split_days(loaded.days, eval_days, purge_days)
-    print(f"天気の被覆: {coverage.describe(loaded.weather)}", file=sys.stderr)
-    refuse_mixed_weather(loaded.weather, split, allowed=allow_mixed_weather)
-    samples = to_samples(loaded.table)
+    split = split_days(window.days, eval_days, purge_days)
+    print(f"天気の被覆: {coverage.describe(window.weather)}", file=sys.stderr)
+    refuse_mixed_weather(window.weather, split, allowed=allow_mixed_weather)
+    samples = samples_of(window)
     print(f"{split.describe()} / 全 {len(samples):,} 行", file=sys.stderr)
     return samples, split
 
@@ -463,9 +474,9 @@ def run(argv: Sequence[str] | None = None) -> int:
     local = Path(options.local) if options.local else None
 
     with open_storage(read_storage_config()) as source:
-        loaded = _load(source, days, local)
+        window = _load(source, days, local)
         samples, split = prepare(
-            loaded,
+            window,
             eval_days=options.eval_days,
             purge_days=options.purge_days,
             allow_mixed_weather=options.allow_mixed_weather,
@@ -481,7 +492,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             from_profiles=not options.no_profile,
         )
         print(f"気候値（B2）の作り方: {chosen.describe()}", file=sys.stderr)
-        fitted = fit_and_score(loaded, samples, split, chosen)
+        fitted = fit_and_score(window, samples, split, chosen)
         artifact = build_artifact(fitted.forests, split.fit)
         body = lightgbm_artifact.to_bytes(artifact)
         if options.upload:
@@ -508,9 +519,9 @@ def run(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _load(source: SupabaseIo, days: Sequence[date], local: Path | None) -> Loaded:
-    """**全列を読む。** `evaluate_baselines` は 11 列に絞るが、LightGBM は 62 列を使う。"""
-    return load_days(None if local else source, days, local, columns=None)
+def _load(source: SupabaseIo, days: Sequence[date], local: Path | None) -> Window:
+    """窓を開く。**表は作らない**——日ごとの中身と素性だけを持つ（`jobs/window.py`）。"""
+    return read_window(day_reader(None if local else source, local), days)
 
 
 def _title(artifact: lightgbm_artifact.LightGbmArtifact) -> str:

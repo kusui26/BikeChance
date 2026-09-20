@@ -23,13 +23,26 @@ from datetime import date
 from typing import Final
 
 import numpy as np
+import numpy.typing as npt
 import pyarrow as pa
 
-from bikechance_ml.features.arrays import Bools, Float32, Int8, Int16, Int32, Strings
+from bikechance_ml.features.arrays import (
+    Bools,
+    Float32,
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    ScalarT,
+    Strings,
+)
 from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 from bikechance_ml.features.grid import JST_OFFSET_MS
 
 _MS_PER_DAY: Final[int] = 86_400_000
+
+#: 合流させる列。**要素型を並べて書く**（`npt.NDArray[np.generic]` は不変なので受からない）。
+type Column = Int8 | Int16 | Int32 | Int64 | Float32
 
 
 @dataclass(frozen=True)
@@ -131,17 +144,48 @@ class Samples:
         )
 
 
-def to_samples(table: pa.Table) -> Samples:
-    """Parquet の表を開く。`t` は **JST の暦日**（`day`）に直す。"""
+@dataclass(frozen=True)
+class Chunk:
+    """**表 1 つぶん**の素材。語彙はその表に出たものだけで、行は番号で持つ。
+
+    **日ごとに開いて、あとで合流させるため**に分けてある（`jobs/window.py`）。
+    窓ぜんぶを 1 つの表にしてから開くと、`_strings` が `system_id` と
+    `station_id` を**窓ぜんぶぶんの Python の文字列**にする——1,800 万行では
+    それだけで数 GB になり、**山はそこで立っていた**（W5 プラン §12 の 168）。
+    1 日ぶん（約 60 万行）なら数十 MB で済み、**残るのは語彙と番号だけ**である。
+    """
+
+    systems: Strings
+    system: Int8
+    ports: Strings
+    port: Int32
+    day: Int32
+    h_min: Int16
+    minute_of_day: Int16
+    dow_type: Int8
+    weight: Float32
+    labels: dict[str, Int8]
+    counts: dict[str, Int16]
+
+    def __len__(self) -> int:
+        return len(self.h_min)
+
+
+class NoChunksError(ValueError):
+    """合流させる素材が 1 つも無い。**空の `Samples` を黙って作らない。**"""
+
+
+def to_chunk(table: pa.Table) -> Chunk:
+    """Parquet の表 1 つぶんを開く。`t` は **JST の暦日**（`day`）に直す。"""
     system_id = _strings(table, "system_id")
     systems, system = np.unique(system_id, return_inverse=True)
     ports, port = np.unique(
         port_keys(system_id, _strings(table, "station_id")), return_inverse=True
     )
-    return Samples(
-        systems=tuple(str(one) for one in systems),
-        ports=tuple(str(one) for one in ports),
+    return Chunk(
+        systems=systems,
         system=np.asarray(system, dtype=np.int8),
+        ports=ports,
         port=np.asarray(port, dtype=np.int32),
         day=jst_ordinal(table.column("t")),
         h_min=_int16(table, "h_min"),
@@ -154,6 +198,75 @@ def to_samples(table: pa.Table) -> Samples:
         labels={target.label: _int8(table, target.label) for target in TARGETS},
         counts={target.counts: _int16(table, target.counts) for target in TARGETS},
     )
+
+
+def merge(chunks: Sequence[Chunk]) -> Samples:
+    """素材を 1 つの `Samples` にする。**語彙を合流させ、番号を振り直す。**
+
+    **全行に `np.unique` を 1 度掛けたのと同じ答えになる**——語彙は昇順の集合で、
+    昇順の集合の和集合は「全部を並べて一意にしたもの」と一致するからである。
+    **行の並びは渡された順**（＝日の順）で、表をつないだときと変わらない。
+    """
+    if not chunks:
+        raise NoChunksError("サンプルの素材が 1 つもありません")
+    systems = _merged_vocabulary([one.systems for one in chunks])
+    ports = _merged_vocabulary([one.ports for one in chunks])
+    return Samples(
+        systems=tuple(str(one) for one in systems),
+        ports=tuple(str(one) for one in ports),
+        system=_joined([_remapped(systems, one.systems, one.system) for one in chunks], np.int8),
+        port=_joined([_remapped(ports, one.ports, one.port) for one in chunks], np.int32),
+        day=_joined([one.day for one in chunks], np.int32),
+        h_min=_joined([one.h_min for one in chunks], np.int16),
+        minute_of_day=_joined([one.minute_of_day for one in chunks], np.int16),
+        dow_type=_joined([one.dow_type for one in chunks], np.int8),
+        weight=_joined([one.weight for one in chunks], np.float32),
+        labels=_merged_labels(chunks),
+        counts=_merged_counts(chunks),
+    )
+
+
+def to_samples(table: pa.Table) -> Samples:
+    """表 1 つをそのままサンプルにする。**素材が 1 つだけの `merge` である。**
+
+    **2 つの入り口を持たない。** 日ごとに読む経路（`jobs/window.py`）と別々に
+    書くと、**同じ規約が 2 か所に無名で在る**ことになる（§12 の 132・142）。
+    """
+    return merge((to_chunk(table),))
+
+
+def _merged_vocabulary(pieces: Sequence[Strings]) -> Strings:
+    """語彙の和集合（昇順）。**全行に `np.unique` を掛けたのと同じ並び。**"""
+    return np.asarray(np.unique(np.concatenate(list(pieces))), dtype=np.str_)
+
+
+def _remapped(vocabulary: Strings, words: Strings, codes: Int32 | Int8) -> Int64:
+    """その表の番号を、合流させた語彙の番号に振り直す。
+
+    `words` は昇順なので `searchsorted` でそのまま位置が出る。**語彙に無い語は
+    起こり得ない**（和集合を取ってあるので）。
+    """
+    moved = np.asarray(np.searchsorted(vocabulary, words), dtype=np.int64)
+    return np.asarray(moved[codes], dtype=np.int64)
+
+
+def _merged_labels(chunks: Sequence[Chunk]) -> dict[str, Int8]:
+    return {
+        target.label: _joined([one.labels[target.label] for one in chunks], np.int8)
+        for target in TARGETS
+    }
+
+
+def _merged_counts(chunks: Sequence[Chunk]) -> dict[str, Int16]:
+    return {
+        target.counts: _joined([one.counts[target.counts] for one in chunks], np.int16)
+        for target in TARGETS
+    }
+
+
+def _joined(pieces: Sequence[Column], dtype: type[ScalarT]) -> npt.NDArray[ScalarT]:
+    """日ごとの列を 1 本にする。**並びは渡された順。**"""
+    return np.asarray(np.concatenate(list(pieces)), dtype=dtype)
 
 
 def port_keys(system_id: Strings, station_id: Strings) -> Strings:
@@ -213,13 +326,3 @@ def _int16(table: pa.Table, name: str) -> Int16:
     return np.asarray(
         table.column(name).combine_chunks().to_numpy(zero_copy_only=False), dtype=np.int16
     )
-
-
-def concat(tables: Sequence[pa.Table], columns: Sequence[str] | None = NEEDED_COLUMNS) -> pa.Table:
-    """日ごとのファイルを 1 つにする。**既定では `NEEDED_COLUMNS` に絞る。**
-
-    `columns` を `None` にすると全列を残す（LightGBM は 62 列を使う）。
-    """
-    if columns is None:
-        return pa.concat_tables(list(tables))
-    return pa.concat_tables([table.select(list(columns)) for table in tables])
