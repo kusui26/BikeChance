@@ -71,7 +71,7 @@ def fit(
     *,
     ports: Sequence[str],
     target: Target,
-    min_samples: int = climatology.MIN_CELL_SAMPLES,
+    min_samples: int = climatology.MIN_CELL_POINTS,
     min_days: int = climatology.MIN_CELL_DAYS,
 ) -> climatology.Table:
     """プロファイルの累計を B2 の表にする。**下限と率の決め方は `table_of` に任せる。**

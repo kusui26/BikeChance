@@ -95,7 +95,8 @@ def scenario() -> list[dict[str, object]]:
 
 def artifact() -> Artifact:
     samples = to_samples(fixture.to_table(scenario()))
-    return build_artifact(samples, fixture.DAYS, FromSamples())
+    # **下限は 2 に下げる**（既定の 30 行はフィクスチャでは立たない。§12 の 167）
+    return build_artifact(samples, fixture.DAYS, FromSamples(min_samples=2))
 
 
 ARTIFACT = artifact()
