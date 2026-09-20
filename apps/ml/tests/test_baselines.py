@@ -113,7 +113,11 @@ def test_b1_falls_back_and_counts_unseen_cells() -> None:
 
 # ── B2：気候値 ────────────────────────────────────────────────
 def test_b2_needs_at_least_two_samples_per_cell() -> None:
-    """**1 サンプルの平均は「その日の観測」でしかない**（W3-17）。"""
+    """**1 サンプルの平均は「その日の観測」でしかない**（W3-17）。
+
+    **ここは仕組みを見る検査なので下限を 2 に下げている。** 学習サンプルから作るときの
+    既定は **30 行**（`MIN_CELL_ROWS`。§12 の 167）で、それは別の検査で留める。
+    """
     rows = [
         fixture.row(DAY0, "hellocycling", "a", 5, 0, 9, 1, 1),
         fixture.row(DAY1, "hellocycling", "a", 5, 0, 9, 1, 1),
@@ -121,7 +125,7 @@ def test_b2_needs_at_least_two_samples_per_cell() -> None:
     ]
     samples = samples_of(rows)
     fit = np.array([True, True, True])
-    table = climatology.fit(samples, BIKE, fit)
+    table = climatology.fit(samples, BIKE, fit, min_samples=2)
     assert table.cells == 1  # a の 1 セルだけが 2 サンプルに達する
     fallback = np.full(3, 0.5)
     applied = climatology.predict(table, samples, fallback)
@@ -139,7 +143,7 @@ def test_b2_cells_are_keyed_on_the_arrival_slot() -> None:
     samples = samples_of(rows)
     # 600+5 = 605 と 590+15 = 605 → どちらも枠 40（605 // 15）
     assert climatology.slot15(samples).tolist() == [40, 40]
-    table = climatology.fit(samples, BIKE, all_rows(2))
+    table = climatology.fit(samples, BIKE, all_rows(2), min_samples=2)
     assert table.cells == 1
 
 
@@ -150,7 +154,7 @@ def test_b2_does_not_mix_stations_with_the_same_id() -> None:
         fixture.row(DAY0, "docomo-cycle", "1", 5, 0, 9, 0, 1),
     ]
     samples = samples_of(rows)
-    table = climatology.fit(samples, BIKE, all_rows(3))
+    table = climatology.fit(samples, BIKE, all_rows(3), min_samples=2)
     applied = climatology.predict(table, samples, np.full(3, 0.5))
     assert applied.probability.tolist() == pytest.approx([1.0, 1.0, 0.5])
 
@@ -168,7 +172,7 @@ def test_b2_does_not_borrow_the_last_ports_cell_for_an_unknown_port() -> None:
         fixture.row(DAY1, "hellocycling", "a", 5, 0, 9, 1, 1),
     ]
     known = samples_of(rows)
-    table = climatology.fit(known, BIKE, all_rows(2))
+    table = climatology.fit(known, BIKE, all_rows(2), min_samples=2)
     assert table.cells == 1, "回り込む先に使えるセルが無いと、この検査は何も見ていない"
 
     unknown = replace(known, port=np.full(len(known), -1, dtype=np.int32))
@@ -185,7 +189,7 @@ def test_b2_leave_one_out_also_ignores_an_unknown_port() -> None:
     """
     rows = [fixture.row(day, "hellocycling", "a", 5, 0, 9, 1, 1) for day in (DAY0, DAY1, DAY2)]
     known = samples_of(rows)
-    table = climatology.fit(known, BIKE, all_rows(3))
+    table = climatology.fit(known, BIKE, all_rows(3), min_samples=2)
     assert int(table.counted.max()) == 3
 
     unknown = replace(known, port=np.full(len(known), -1, dtype=np.int32))
@@ -204,7 +208,7 @@ def test_b2_says_it_was_used_without_comparing_probabilities() -> None:
     """
     rows = [fixture.row(day, "hellocycling", "a", 5, 0, 9, 1, 1) for day in (DAY0, DAY1)]
     samples = samples_of(rows)
-    table = climatology.fit(samples, BIKE, all_rows(2))
+    table = climatology.fit(samples, BIKE, all_rows(2), min_samples=2)
     applied = climatology.predict(table, samples, np.ones(2))  # B1 も 1.0
     assert applied.probability.tolist() == pytest.approx([1.0, 1.0])
     assert applied.used.tolist() == [True, True], "確率が同じでも引けている"
@@ -214,7 +218,7 @@ def test_b2_says_it_was_used_without_comparing_probabilities() -> None:
 def test_b2_keeps_the_day_count_behind_usable() -> None:
     """**`usable` の根拠を捨てない。** 引いたあとに下限を判定し直すのに要る。"""
     rows = [fixture.row(day, "hellocycling", "a", 5, 0, 9, 1, 1) for day in (DAY0, DAY1)]
-    table = climatology.fit(samples_of(rows), BIKE, all_rows(2))
+    table = climatology.fit(samples_of(rows), BIKE, all_rows(2), min_samples=2)
     assert int(table.days.max()) == 2
     assert int(table.counted.max()) == 2
 
@@ -231,7 +235,7 @@ def test_b2_leave_one_out_also_wants_two_days() -> None:
         fixture.row(DAY0, "hellocycling", "a", 15, 0, 9, 1, 1, minute_of_day=590),
     ]
     samples = samples_of(rows)
-    table = climatology.fit(samples, BIKE, all_rows(3))
+    table = climatology.fit(samples, BIKE, all_rows(3), min_samples=2)
     assert int(table.counted.max()) == 3, "同じセルに 3 行入っている"
     assert table.cells == 0, "1 日しか無いので配信では使わない"
     applied = climatology.predict_leave_one_out(table, samples, BIKE, np.full(3, 0.25))
@@ -296,3 +300,59 @@ def test_blend_floors_the_standardisation_scale() -> None:
     assert model.scale[2] == 1.0
     assert model.scale[0] > blend.SCALE_FLOOR
     assert np.all(np.isfinite(blend.predict(model, x)))
+
+
+# ── B2 の下限（§12 の 167）────────────────────────────────────
+def _cell_rows(count: int, *, days: int) -> Samples:
+    """1 セルに `count` 行を入れる（日数は `days`）。**下限だけを見るための材料。**"""
+    return samples_of(
+        [
+            fixture.row(fixture.DAYS[one % days], "hellocycling", "a", 5, 0, 9, 1, 1)
+            for one in range(count)
+        ]
+    )
+
+
+def test_the_floor_for_samples_is_rows_not_points() -> None:
+    """**学習サンプルから作るときの下限は 30 行**（§12 の 167。2026-09-20 に 2 → 30）。
+
+    **プロファイルの下限（2 点）と同じ数にしない。** プロファイルは 1 セルに 1 日 3 点
+    入るが、抽出済みの行は 1 日 0.3 行しか来ない。**同じ「2」が違うものを数えていた**
+    のが 167 である。
+    """
+    assert climatology.MIN_CELL_ROWS == 30
+    assert climatology.MIN_CELL_POINTS == 2
+    assert climatology.MIN_CELL_ROWS > climatology.MIN_CELL_POINTS
+
+
+def test_a_thin_cell_is_not_usable_by_default() -> None:
+    """**既定では 29 行のセルは使わない。** 30 行で初めて使う。"""
+    assert climatology.fit(_cell_rows(29, days=2), BIKE, all_rows(29)).cells == 0
+    assert climatology.fit(_cell_rows(30, days=2), BIKE, all_rows(30)).cells == 1
+
+
+def test_the_floor_reaches_the_table_through_the_source() -> None:
+    """**`FromSamples` が下限を当てはめに渡している。**
+
+    定数を上げても `table()` が渡さなければ何も変わらない——**決めた値が効くところ
+    まで**見る（§12 の 166 で同じ形の抜けを踏んだ）。
+    """
+    samples = _cell_rows(30, days=2)
+    keep = all_rows(30)
+    assert climatology.FromSamples().table(samples, BIKE, keep).min_samples == 30
+    assert climatology.FromSamples(min_samples=2).table(samples, BIKE, keep).min_samples == 2
+
+
+def test_the_floor_is_written_into_the_report_line() -> None:
+    """**下限は報告書と登録簿に残る。** 「どこまで信じた表か」が後から読めること。"""
+    assert climatology.FromSamples().describe() == "学習サンプル（features/、下限 30 行 2 日）"
+    assert "下限 2 行" in climatology.FromSamples(min_samples=2).describe()
+
+
+def test_the_thin_cell_falls_back_to_b1() -> None:
+    """**使えないセルは B1 に落ちる**（黙って 0.5 を返さない）。"""
+    samples = _cell_rows(4, days=2)
+    table = climatology.fit(samples, BIKE, all_rows(4))
+    applied = climatology.predict(table, samples, np.full(4, 0.25))
+    assert applied.probability.tolist() == pytest.approx([0.25] * 4)
+    assert applied.fallback_ratio == 1.0

@@ -20,7 +20,7 @@ import pyarrow as pa
 import pytest
 
 from bikechance_ml.baselines import climatology, profile_climatology
-from bikechance_ml.baselines.climatology import MIN_CELL_DAYS, MIN_CELL_SAMPLES, SLOTS_PER_DAY
+from bikechance_ml.baselines.climatology import MIN_CELL_DAYS, MIN_CELL_POINTS, SLOTS_PER_DAY
 from bikechance_ml.eval.dataset import TARGETS, Samples, to_samples
 from bikechance_ml.features import profile
 from bikechance_ml.features.arrays import Bools
@@ -209,10 +209,14 @@ def test_one_day_is_not_enough() -> None:
 
 
 def test_the_floors_are_the_same_ones_the_report_quotes() -> None:
-    """**プロファイル側で下限を持ち直さない。** 配信と報告が同じ数を見る。"""
+    """**プロファイル側で下限を持ち直さない。** 配信と報告が同じ数を見る。
+
+    **数えるものが違うので下限も別の定数である**（§12 の 167）——こちらは
+    **格子点**（1 日 3 点）、学習サンプルのほうは**行**（1 日 0.3 行）である。
+    """
     samples = samples_of([one_sample()])
     table = profile_climatology.fit(to_profile([cell_row()]), ports=samples.ports, target=BIKE)
-    assert (table.min_samples, table.min_days) == (MIN_CELL_SAMPLES, MIN_CELL_DAYS)
+    assert (table.min_samples, table.min_days) == (MIN_CELL_POINTS, MIN_CELL_DAYS)
 
 
 def test_a_higher_floor_can_be_asked_for() -> None:

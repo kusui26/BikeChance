@@ -32,10 +32,33 @@ from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 #: 1 日を 15 分で割った枠の数。
 SLOTS_PER_DAY: Final[int] = 24 * 60 // 15
 
-#: セルを使う最小サンプル数（W3-17）。1 サンプルの平均は「その日の観測」でしかない。
-MIN_CELL_SAMPLES: Final[int] = 2
+#: セルを使う最小の数（**プロファイルの格子点**。W3-17）。1 セルには 1 日 3 点入る
+#: （`features/profile.py` の `GRID_POINTS_PER_SLOT`）ので、2 日で 6 点になる。
+#: 1 点の平均は「その日その枠の観測」でしかない。
+MIN_CELL_POINTS: Final[int] = 2
 
-#: セルに寄与していなければならない**日数**（§12 の 101）。行数だけでは 1 日で満たせる。
+#: セルを使う最小の数（**学習サンプルの行**）。**2026-09-20 に 2 → 30 にした**（§12 の 167）。
+#:
+#: **同じ「2」でも、数えているものが違った。** プロファイルは 1 セルに 1 日 3 点入るが、
+#: 抽出済みの行は **1 セル 1 日 0.3 行**しか来ない。2 行しかないセルの率は
+#: **0・0.5・1 の 3 通り**しか取れず、気候値ではなく**その 2 行そのもの**である。
+#:
+#: **下限は「入れてよいか」ではなく「信じてよいか」で決める。** n 行から出した率の
+#: 標準誤差は高々 `0.5/√n` で、**n = 25 で 0.1、n = 30 で 0.091**。B2 が B1 に足そうと
+#: している差（ポートごとの癖）がその程度なので、**30 行より薄いセルは足せるものより
+#: 誤差のほうが大きい**。
+#:
+#: **実測（2026-09-20、一様 1% の 9 日）**：学習 3 日で下限 2 にすると B3 は
+#: **0.04332**（B1 は 0.04111）、6 日で下限 2 なら **0.04156**（B1 0.04117）、
+#: 下限 5 でも **0.04215** と悪化する。**下限 10 以上では使えるセルがほぼ立たず、
+#: B3 は 0.04112 で B1 をわずかに下回る**（混合が B1 を測り直すぶん）。
+#:
+#: **いまの抽出では 30 行に届くセルはまず無い**（6 日で 0 個）。つまりこの下限は
+#: 「**プロファイルが無い日は気候値を作らない**」と言っているのに等しく、**それが
+#: 正しい状態である**。抽出率が上がれば、同じ規則のまま自然に効き始める。
+MIN_CELL_ROWS: Final[int] = 30
+
+#: セルに寄与していなければならない**日数**（§12 の 101）。件数だけでは 1 日で満たせる。
 MIN_CELL_DAYS: Final[int] = 2
 
 _MINUTES_PER_DAY: Final[int] = 24 * 60
@@ -127,10 +150,14 @@ def fit(
     samples: Samples,
     target: Target,
     keep: Bools,
-    min_samples: int = MIN_CELL_SAMPLES,
+    min_samples: int = MIN_CELL_ROWS,
     min_days: int = MIN_CELL_DAYS,
 ) -> Table:
-    """学習期間の行からセルを作る。**下限に満たないセルは使えない印を付ける。**"""
+    """学習期間の**行**からセルを作る。**下限に満たないセルは使えない印を付ける。**
+
+    既定は `MIN_CELL_ROWS`（**行**の下限）である——ここが数えるのは抽出された行で、
+    プロファイルの格子点ではない（§12 の 167）。
+    """
     fitted = samples.take(keep)
     key = _key(fitted)
     size = samples.n_ports * len(DOW_TYPE_ORDER) * SLOTS_PER_DAY
@@ -331,15 +358,23 @@ class Source(Protocol):
 
 @dataclass(frozen=True)
 class FromSamples:
-    """**学習サンプルの行から作る**（W3 からのやり方）。プロファイルが無いときの既定。
+    """**学習サンプルの行から作る**（W3 からのやり方）。プロファイルが無いときの退避路。
 
-    1 セル 1 日あたり 1.62 行（中央 1）しか無く、**下限 2 件 2 日を満たすセルが
-    ほとんど無い**（実測。W5 プラン §2.3d）。プロファイルが在るなら
-    `profile_climatology.FromProfile` を使う。
+    **ここは「作れないときに作らない」ための道である**（§12 の 167）。抽出済みの行は
+    1 セル 1 日 0.3 行しか来ないので、下限（`MIN_CELL_ROWS` ＝ 30 行）に届くセルは
+    いまの抽出ではまず立たない——**実質すべて B1 に落ちる**。2〜9 行のセルを入れると
+    **B3 が確実に悪くなる**ことは測ってある（実測 2026-09-20）。
+
+    プロファイルが在るなら `profile_climatology.FromProfile` を使う（そちらは格子点を
+    数えるので、2 日で 6 点入る）。
     """
 
+    #: 行の下限。**変えられるようにしてあるのは測るためで、配る側は既定を使う**
+    min_samples: int = MIN_CELL_ROWS
+    min_days: int = MIN_CELL_DAYS
+
     def table(self, samples: Samples, target: Target, keep: Bools) -> Table:
-        return fit(samples, target, keep)
+        return fit(samples, target, keep, min_samples=self.min_samples, min_days=self.min_days)
 
     def leave_out(
         self, table: Table, samples: Samples, target: Target, fallback: Float64
@@ -351,4 +386,9 @@ class FromSamples:
         return np.ones(len(samples), dtype=np.bool_)
 
     def describe(self) -> str:
-        return "学習サンプル（features/）"
+        """**下限も一緒に言う。** 報告書と `model_versions.metrics.climate` に残る。
+
+        「学習サンプルから作った」だけでは、**どこまで信じた表か**が後から読めない
+        （§12 の 166 で「作り方」を残すようにしたのと同じ理由）。
+        """
+        return f"学習サンプル（features/、下限 {self.min_samples} 行 {self.min_days} 日）"
