@@ -1961,11 +1961,11 @@ for day in 09-07 … （当日の前日）:
 
 | 計器 | 値 |
 |---|---:|
-| `ru_maxrss`（Linux の `ru_maxrss` に対応） | **0.59 GiB** |
+| macOS の `ru_maxrss`（**圧縮したページを数えない**） | **0.59 GiB** |
 | **`peak memory footprint`** | **1.58 GB** |
 | 所要 | 8.2 秒 |
 
-**本番の P95（1.64 GB）と一致するのは `peak memory footprint` のほうである。** `ru_maxrss` は 2.6 倍低く出る——**macOS は圧縮したページを `ru_maxrss` に数えない**（§12 の 168 と同じ罠）。**これで、どちらの計器を信じるかが本番の数字で決まった。**
+**本番の P95（1.64 GB）と一致するのは `peak memory footprint` のほうである。** macOS の `ru_maxrss` は 2.6 倍低く出る。**§12 の 168 は「Linux に圧縮は無いので、macOS の footprint と比べられるのは Linux の `ru_maxrss` だ」と推論で置いていた**——**今日、本番（Linux）の数字でその裏が取れた**。**手元の macOS で配信のメモリを見積もるときは footprint を読む。**
 
 **つまり、2 GB の枠の 96% を「28.5 MB の gzip JSON を Python の辞書に開く」ことが使っている**（§12 の 176）。
 
