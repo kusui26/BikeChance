@@ -49,11 +49,6 @@ PROFILE_DAYS: Final[int] = 28
 #: 表の形の版。**列や意味を変えたら上げる**（`REFERENCE_SET` と同じ作法）。
 PROFILE_SET: Final[str] = "p0"
 
-#: 読む側が下限に使う既定（`baselines/climatology.py` の `MIN_CELL_DAYS` と同じ考え方）。
-#: **ここでは切らない**——切ると転がし（`profile(D-1) + daily(D) - daily(D-28)`）で
-#: 落としたセルの累計が戻らなくなる。
-MIN_CELL_DAYS: Final[int] = 2
-
 #: 出力ファイルの名前。パスは `grid.profile_path` が組み立てる。
 DAILY_NAME: Final[str] = "daily"
 PROFILE_NAME: Final[str] = "profile"
@@ -92,7 +87,9 @@ def _schema(*, with_days: bool) -> pa.Schema:
         pa.field("slot15", pa.int16(), nullable=False),
     ]
     if with_days:
-        # **セルに寄与した日数。** 読む側の下限（`MIN_CELL_DAYS`）はこれで判定する
+        # **セルに寄与した日数。** 読む側の下限（`baselines/climatology.py` の
+        # `MIN_CELL_DAYS`）はこれで判定する。**ここでは切らない**——切ると転がし
+        # （`profile(D-1) + daily(D) - daily(D-28)`）で落としたセルの累計が戻らなくなる
         fields.append(pa.field("n_days", pa.int16(), nullable=False))
     fields.extend(pa.field(name, SUM_TYPES[name], nullable=False) for name in SUM_COLUMNS)
     return pa.schema(fields)
@@ -387,8 +384,13 @@ def require_schema(table: pa.Table, schema: pa.Schema) -> None:
 
 
 # ── 読む（純粋）────────────────────────────────────────────────
-def summarize(profile: pa.Table, *, min_days: int = MIN_CELL_DAYS) -> dict[str, object]:
-    """報告用の要約。**読む側が実際に使えるセルの数**を中心に出す。"""
+def summarize(profile: pa.Table, *, min_days: int) -> dict[str, object]:
+    """報告用の要約。**読む側が実際に使えるセルの数**を中心に出す。
+
+    **下限は受け取る**（既定を持たない）。下限を決めるのは読む側
+    （`baselines/climatology.py` の `MIN_CELL_DAYS`）で、ここに既定を置くと
+    **同じ数が 2 か所に在る**ことになる——以前はそうで、検査で等しさを縛っていた。
+    """
     if profile.num_rows == 0:
         return {"cells": 0, "usable_cells": 0, "ports": 0}
     days = profile.column("n_days")

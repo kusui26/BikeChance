@@ -40,6 +40,7 @@ from typing import Final, Protocol
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from bikechance_ml.baselines import climatology
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.features import profile
 from bikechance_ml.features.grid import jst_yesterday, parquet_hours, profile_path
@@ -127,7 +128,8 @@ def _summary(
         "missing_hours": len(missing),
         # **前日の版が無ければ当日だけで作っている**（さかのぼるときに効く）
         "carried": previous is not None,
-        **profile.summarize(rolled),
+        # **使えるセルは当てはめと同じ下限で数える**（持ち主は読む側。W5-03）
+        **profile.summarize(rolled, min_days=climatology.MIN_CELL_DAYS),
     }
 
 

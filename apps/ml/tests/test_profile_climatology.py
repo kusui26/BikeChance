@@ -47,9 +47,13 @@ def cell_row(
     n: int = 6,
     n_bike_ok: int = 3,
     n_dock_ok: int = 6,
-    n_days: int = 2,
+    n_days: int = 3,
 ) -> dict[str, object]:
-    """1 セルぶん。**流量と台数の列は 0 で埋める**（B2 は読まない）。"""
+    """1 セルぶん。**流量と台数の列は 0 で埋める**（B2 は読まない）。
+
+    **既定は本番の下限を満たすセル**（3 日。D-30）。下限そのものを見る検査は
+    `n_days` を明示して渡す。
+    """
     return {
         "system_id": system,
         "station_id": station,
@@ -220,11 +224,37 @@ def test_the_floors_are_the_same_ones_the_report_quotes() -> None:
 
 
 def test_a_higher_floor_can_be_asked_for() -> None:
-    """**下限を上げるかは 09-23 に決める**（PR K）。渡せるようにはしておく。"""
+    """**既定より高い下限も渡せる**（測るため。配る側は既定を使う）。
+
+    下限を上げるかは 09-23 に決めた（PR K）——**2 → 3 日**（D-30）。この検査は
+    「既定で使えるセルが、もっと高い下限では落ちる」ことを見る。
+    """
     ports = samples_of([one_sample()]).ports
-    built = to_profile([cell_row(n=6, n_days=2)])
+    built = to_profile([cell_row(n=6, n_days=3)])
+    assert profile_climatology.fit(built, ports=ports, target=BIKE).cells == 1
     assert profile_climatology.fit(built, ports=ports, target=BIKE, min_samples=8).cells == 0
-    assert profile_climatology.fit(built, ports=ports, target=BIKE, min_days=3).cells == 0
+    assert profile_climatology.fit(built, ports=ports, target=BIKE, min_days=4).cells == 0
+
+
+def test_two_days_are_no_longer_enough() -> None:
+    """**2 日のセルは使わない**（2026-09-23 に 2 → 3 日。D-30、W5 プラン §12 の 177）。
+
+    **2 日ぶんの B2 は、配らないほうが当たっていた。** 1 セル最大 6 点の率は 13 値しか
+    取らず、祝日に配った確率を B2 を落とした確率に置き換えると Brier −7.59% だった。
+    """
+    ports = samples_of([one_sample()]).ports
+    assert (
+        profile_climatology.fit(
+            to_profile([cell_row(n=6, n_days=2)]), ports=ports, target=BIKE
+        ).cells
+        == 0
+    )
+    assert (
+        profile_climatology.fit(
+            to_profile([cell_row(n=9, n_days=3)]), ports=ports, target=BIKE
+        ).cells
+        == 1
+    )
 
 
 def test_a_table_with_the_wrong_columns_is_refused() -> None:
@@ -235,29 +265,33 @@ def test_a_table_with_the_wrong_columns_is_refused() -> None:
 
 # ── 自分の日を引く ────────────────────────────────────────────
 def test_the_rows_own_day_is_taken_out() -> None:
-    """3 日ぶん（9 点・当たり 6）から自分の日（3 点・当たり 3）を引くと 3/6 になる。"""
+    """4 日ぶん（12 点・当たり 9）から自分の日（3 点・当たり 3）を引くと 6/9 になる。
+
+    **引いたあとも下限（3 日）を満たすよう 4 日にしてある。**
+    """
     samples = samples_of([one_sample(DAY0)])
     source = source_of(
         samples,
-        [cell_row(n=9, n_bike_ok=6, n_days=3)],
+        [cell_row(n=12, n_bike_ok=9, n_days=4)],
         {DAY0: to_daily([cell_row(n=3, n_bike_ok=3)])},
     )
     table = source.table(samples, BIKE, only(samples))
     applied = source.leave_out(table, samples, BIKE, np.full(1, 0.9))
-    assert applied.probability.tolist() == pytest.approx([0.5])
+    assert applied.probability.tolist() == pytest.approx([6 / 9])
     assert applied.used.tolist() == [True]
 
 
-def test_two_days_are_not_enough_once_your_own_day_is_gone() -> None:
-    """**下限は引いたあとで判定する。** 残り 1 日の平均は「別の日の観測」でしかない。"""
+def test_three_days_are_not_enough_once_your_own_day_is_gone() -> None:
+    """**下限は引いたあとで判定する。** 引く前は 3 日で使えるが、残り 2 日では使わない。"""
     samples = samples_of([one_sample(DAY0)])
     source = source_of(
         samples,
-        [cell_row(n=6, n_bike_ok=6, n_days=2)],
+        [cell_row(n=9, n_bike_ok=9, n_days=3)],
         {DAY0: to_daily([cell_row(n=3, n_bike_ok=3)])},
         day=DAY1,
     )
     table = source.table(samples, BIKE, only(samples))
+    assert table.cells == 1, "引く前は使える——下限を引いたあとで判定していることを見る"
     applied = source.leave_out(table, samples, BIKE, np.full(1, 0.9))
     assert applied.probability.tolist() == pytest.approx([0.9])
     assert applied.fell_back == 1
@@ -269,12 +303,12 @@ def test_the_sampling_weight_is_not_subtracted() -> None:
     行ごとの leave-one-out をそのまま当てると分母が負になり、**B2 が全行 B1 に落ちた
     まま B3 の係数が決まる**。配信では B2 が効くので、そこが train/serve skew になる。
     """
-    rows = [cell_row(n=9, n_bike_ok=6, n_days=3)]
+    rows = [cell_row(n=12, n_bike_ok=9, n_days=4)]
     samples = samples_of([one_sample(DAY0, weight=100.0)])
     table = profile_climatology.fit(to_profile(rows), ports=samples.ports, target=BIKE)
 
     by_row = climatology.predict_leave_one_out(table, samples, BIKE, np.full(1, 0.9))
-    assert by_row.fell_back == 1, "重みを引くと 9 − 100 で分母が負になる"
+    assert by_row.fell_back == 1, "重みを引くと 12 − 100 で分母が負になる"
 
     source = source_of(samples, rows, {DAY0: to_daily([cell_row(n=3, n_bike_ok=3)])})
     assert source.leave_out(table, samples, BIKE, np.full(1, 0.9)).fell_back == 0
@@ -285,7 +319,7 @@ def test_a_cell_the_day_did_not_touch_subtracts_nothing() -> None:
     samples = samples_of([one_sample(DAY0)])
     source = source_of(
         samples,
-        [cell_row(n=6, n_bike_ok=3, n_days=2)],
+        [cell_row(n=6, n_bike_ok=3, n_days=3)],
         {DAY0: to_daily([cell_row(slot=SLOT + 1, n=3, n_bike_ok=3)])},
     )
     table = source.table(samples, BIKE, only(samples))
@@ -304,7 +338,7 @@ def test_an_empty_daily_subtracts_nothing() -> None:
     """観測が 1 つも無かった日。**落ちずに 0 を引く。**"""
     samples = samples_of([one_sample(DAY0)])
     source = source_of(
-        samples, [cell_row(n=6, n_bike_ok=3, n_days=2)], {DAY0: profile.DAILY_SCHEMA.empty_table()}
+        samples, [cell_row(n=6, n_bike_ok=3, n_days=3)], {DAY0: profile.DAILY_SCHEMA.empty_table()}
     )
     table = source.table(samples, BIKE, only(samples))
     applied = source.leave_out(table, samples, BIKE, np.full(1, 0.9))
@@ -327,16 +361,43 @@ def test_describe_names_the_version_and_the_days() -> None:
     assert "2026-09-08" in source.describe()
 
 
+def test_the_floor_reaches_the_table_through_the_source() -> None:
+    """**`FromProfile` が自分の下限を当てはめに渡している。**
+
+    `describe()` が正しくても、`table()` が既定を使っていれば報告と中身が食い違う
+    ——**決めた値が効くところまで**見る（§12 の 166 と同じ抜けを塞ぐ）。
+    """
+    samples = samples_of([one_sample()])
+    source = source_of(samples, [cell_row(n=6, n_days=3)])
+    assert source.table(samples, BIKE, only(samples)).min_days == MIN_CELL_DAYS
+    assert source.table(samples, BIKE, only(samples)).cells == 1
+    higher = replace(source, min_days=4)
+    assert higher.table(samples, BIKE, only(samples)).min_days == 4
+    assert higher.table(samples, BIKE, only(samples)).cells == 0
+    assert replace(source, min_points=7).table(samples, BIKE, only(samples)).min_samples == 7
+
+
+def test_describe_quotes_the_floor() -> None:
+    """**どの下限で作った B2 かが報告書と登録簿に残る**（§12 の 167 と同じ作法）。
+
+    当てはめ直した報告書にこれが出ることが、**下限を上げたことが効いた証拠**になる（D-30）。
+    """
+    samples = samples_of([one_sample()])
+    source = source_of(samples, [cell_row()], {DAY0: to_daily([cell_row()])}, day=DAY1)
+    assert source.describe().endswith(f"下限 {MIN_CELL_POINTS} 点 {MIN_CELL_DAYS} 日）")
+    assert "下限 2 点 4 日" in replace(source, min_days=4).describe()
+
+
 # ── 端から端まで（PR B と PR D の接ぎ目）──────────────────────
 def test_the_rate_is_the_share_of_grid_points_where_you_could_rent() -> None:
     """観測 → `build_day` → `roll` → B2 の表 → 予測。**1 本つながっていること。**
 
     ポート a は 1 日じゅう 3 台あり（借りられる）、b は 0 台（借りられない）。
-    2 日ぶん転がせば、**B2 の率は 1.0 と 0.0** になる。
+    **3 日ぶん**転がせば（下限 3 日。D-30）、**B2 の率は 1.0 と 0.0** になる。
     """
     rolled = _rolled(
         [("hellocycling", "a", 3, 6, pf.OPEN), ("hellocycling", "b", 0, 9, pf.OPEN)],
-        [pf.OPEN, pf.OPEN],
+        [pf.OPEN, pf.OPEN, pf.OPEN],
     )
     samples = samples_of([one_sample(DAY1, station="a"), one_sample(DAY1, station="b")])
     table = profile_climatology.fit(rolled, ports=samples.ports, target=BIKE)
@@ -348,19 +409,19 @@ def test_the_rate_is_the_share_of_grid_points_where_you_could_rent() -> None:
 def test_a_suspended_port_counts_against_the_rate() -> None:
     """**休止していた時間は分母に入る。** 借りられなかったのは利用者にとって同じである。
 
-    a は 1 日目だけ休止（台数はある）。2 日ぶんでは 6 点のうち 3 点しか借りられない。
+    a は 1 日目だけ休止（台数はある）。3 日ぶんでは 9 点のうち 6 点しか借りられない。
     """
-    rolled = _rolled([("hellocycling", "a", 3, 6, pf.OPEN)], [pf.SUSPENDED, pf.OPEN])
+    rolled = _rolled([("hellocycling", "a", 3, 6, pf.OPEN)], [pf.SUSPENDED, pf.OPEN, pf.OPEN])
     samples = samples_of([one_sample(DAY1, station="a")])
     table = profile_climatology.fit(rolled, ports=samples.ports, target=BIKE)
     applied = climatology.predict(table, samples, np.full(1, 0.9))
-    assert applied.probability.tolist() == pytest.approx([0.5])
+    assert applied.probability.tolist() == pytest.approx([6 / 9])
 
 
 def _rolled(ports: list[tuple[str, str, int, int, int]], flags_per_day: list[int]) -> pa.Table:
-    """2 日ぶんを観測から組み立てて転がす。`flags_per_day` は日ごとの `flags`。"""
+    """3 日ぶんを観測から組み立てて転がす。`flags_per_day` は日ごとの `flags`。"""
     rolled: pa.Table | None = None
-    for day, flags in zip((DAY0, DAY1), flags_per_day, strict=True):
+    for day, flags in zip((DAY0, DAY1, DAY2), flags_per_day, strict=True):
         rows = [
             (system, station, bikes, docks, flags) for system, station, bikes, docks, _ in ports
         ]

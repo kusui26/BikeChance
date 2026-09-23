@@ -109,9 +109,12 @@ def test_unknown_format_version_is_refused() -> None:
         from_bytes(body)
 
 
-def test_climatology_needs_two_days() -> None:
-    """フィクスチャは 3 日あるので、セルが立つ（W3 プラン §12 の 101）。"""
-    assert ARTIFACT.targets["bike"].b2.min_days == 2
+def test_climatology_needs_enough_days() -> None:
+    """フィクスチャは 3 日あるので、下限（3 日。D-30）でもセルが立つ（W3 プラン §12 の 101）。
+
+    **下限は成果物に書かれる**——どの下限で作った B2 かが、配ったあとも読める。
+    """
+    assert ARTIFACT.targets["bike"].b2.min_days == climatology.MIN_CELL_DAYS
     assert ARTIFACT.targets["bike"].b2.cells > 0
 
 

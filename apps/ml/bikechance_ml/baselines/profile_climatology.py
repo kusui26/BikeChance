@@ -190,12 +190,22 @@ class FromProfile:
     dailies: Dailies
     #: `dailies` を作ったときのポートの並び。**サンプルと違えば例外にする**
     ports: tuple[str, ...]
+    #: 下限（格子点と日数）。**変えられるようにしてあるのは測るためで、配る側は既定を使う**。
+    #: **報告書に出す**（`describe`）——どの下限で作った B2 かが後から読めるように（§12 の 167）
+    min_points: int = climatology.MIN_CELL_POINTS
+    min_days: int = climatology.MIN_CELL_DAYS
 
     def table(self, samples: Samples, target: Target, keep: Bools) -> climatology.Table:  # noqa: ARG002
         """**`keep` は見ない。** どの日までを含むかはプロファイルの版が決めている。"""
         if samples.ports != self.ports:
             raise PortsMismatchError("プロファイルを読んだときとポートの並びが違います")
-        return fit(self.profile, ports=self.ports, target=target)
+        return fit(
+            self.profile,
+            ports=self.ports,
+            target=target,
+            min_samples=self.min_points,
+            min_days=self.min_days,
+        )
 
     def leave_out(
         self,
@@ -212,7 +222,10 @@ class FromProfile:
         return self.dailies.covers(samples)
 
     def describe(self) -> str:
-        return f"プロファイル（profiles/date={self.day}、引ける日 {len(self.dailies.by_day)}）"
+        return (
+            f"プロファイル（profiles/date={self.day}、引ける日 {len(self.dailies.by_day)}、"
+            f"下限 {self.min_points} 点 {self.min_days} 日）"
+        )
 
 
 def _strings(table: pa.Table, name: str) -> Strings:

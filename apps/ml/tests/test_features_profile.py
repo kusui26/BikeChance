@@ -18,6 +18,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
+from bikechance_ml.baselines import climatology
 from bikechance_ml.features import asof, exclude, profile
 from bikechance_ml.features.constants import GRID_POINTS_PER_DAY, MISSING
 from bikechance_ml.features.grid import JST, build_grid, profile_path
@@ -235,22 +236,30 @@ def test_a_cell_that_only_the_expired_day_had_disappears() -> None:
 
 
 def test_the_day_count_says_how_much_is_behind_a_cell() -> None:
-    """**28 日を待たない**（W5-03）。足りないことは `n_days` に出る。"""
+    """**28 日を待たない**（W5-03）。足りないことは `n_days` に出る。
+
+    **使えるのは 3 日目から**（D-30。2 日ぶんの B2 は配らないほうが当たっていた）。
+    下限は読む側のものを渡す——**プロファイルは切らない**。
+    """
     one = daily(observations([("hellocycling", "a", 3, 4, OPEN)]))
     first = profile.roll(None, one, None)
     second = profile.roll(first, one, None)
+    third = profile.roll(second, one, None)
     assert set(first.column("n_days").to_pylist()) == {1}
     assert set(second.column("n_days").to_pylist()) == {2}
-    assert profile.summarize(first)["usable_cells"] == 0
-    assert profile.summarize(second)["usable_cells"] == second.num_rows
+    assert set(third.column("n_days").to_pylist()) == {3}
+    floor = climatology.MIN_CELL_DAYS
+    assert profile.summarize(first, min_days=floor)["usable_cells"] == 0
+    assert profile.summarize(second, min_days=floor)["usable_cells"] == 0
+    assert profile.summarize(third, min_days=floor)["usable_cells"] == third.num_rows
 
 
 def test_a_new_dow_type_starts_at_zero_days() -> None:
-    """**土曜は土曜の 2 日目まで効かない**（W5 プラン §7.2 の日付の算数）。"""
+    """**土曜は土曜の 3 日目まで効かない**（W5 プラン §7.2 の日付の算数、D-30）。"""
     weekday = daily(observations([("hellocycling", "a", 3, 4, OPEN)]))
     saturday = daily(observations([("hellocycling", "a", 3, 4, OPEN)], day=SATURDAY), day=SATURDAY)
     mixed = profile.roll(profile.roll(None, weekday, None), saturday, None)
-    counted = profile.summarize(mixed)["by_dow_type"]
+    counted = profile.summarize(mixed, min_days=climatology.MIN_CELL_DAYS)["by_dow_type"]
     assert isinstance(counted, dict)
     assert counted["weekday"]["days_max"] == 1
     assert counted["sat"]["days_max"] == 1
@@ -317,9 +326,18 @@ def test_the_window_is_twenty_eight_days() -> None:
     assert profile.PROFILE_DAYS == 28
 
 
-def test_the_floor_matches_the_climatology() -> None:
-    """**B2 と同じ下限**（`baselines/climatology.py`）。別の数にすると答えが 2 つ出る。"""
-    from bikechance_ml.baselines.climatology import MIN_CELL_DAYS, SLOTS_PER_DAY
+def test_the_slots_match_the_climatology() -> None:
+    """**B2 と同じ 15 分枠**（`baselines/climatology.py`）。別の数にすると別のセルを指す。
 
-    assert profile.MIN_CELL_DAYS == MIN_CELL_DAYS
-    assert profile.SLOTS_PER_DAY == SLOTS_PER_DAY
+    下限（`MIN_CELL_DAYS`）はもう縛らない——**プロファイル側から消した**ので、
+    持ち主は読む側の 1 か所だけである（D-30）。
+    """
+    assert profile.SLOTS_PER_DAY == climatology.SLOTS_PER_DAY
+
+
+def test_the_profile_no_longer_holds_a_floor() -> None:
+    """**同じ数を 2 か所に置かない**（§12 の 132・142）。
+
+    プロファイルは切らないので、下限を持たない。持ち主は読む側（D-30）。
+    """
+    assert not hasattr(profile, "MIN_CELL_DAYS")
