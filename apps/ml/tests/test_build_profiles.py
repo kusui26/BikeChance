@@ -23,6 +23,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from bikechance_ml.baselines import climatology
 from bikechance_ml.features import profile
 from bikechance_ml.features.grid import day_start, jst_yesterday, parquet_hours, profile_path
 from bikechance_ml.jobs import build_profiles as job
@@ -207,16 +208,22 @@ def test_the_first_day_has_nothing_to_carry() -> None:
     port = FakePort()
     made = build_and_upload(port, DAY)
     assert made.summary["carried"] is False
-    assert _int_of(made.summary, "usable_cells") == 0, "1 日では下限（2 日）に届かない"
+    assert _int_of(made.summary, "usable_cells") == 0, "1 日では下限（3 日）に届かない"
 
 
 def test_the_summary_says_how_many_cells_are_usable() -> None:
-    """**読む側が実際に使えるセルの数**を出す。0 のままなら気候値は B1 に落ちる。"""
-    port = FakePort()
+    """**読む側が実際に使えるセルの数**を出す。0 のままなら気候値は B1 に落ちる。
+
+    **2 日目ではまだ使えず、3 日目で使える**（D-30。2 日ぶんの B2 は配らないほうが当たっていた）。
+    """
+    port = FakePort(days=(DAY, DAY + timedelta(days=1), DAY + timedelta(days=2)))
     build_and_upload(port, DAY)
-    made = build_and_upload(port, DAY + timedelta(days=1))
+    second = build_and_upload(port, DAY + timedelta(days=1))
+    assert _int_of(second.summary, "usable_cells") == 0, "2 日では下限（3 日）に届かない"
+    made = build_and_upload(port, DAY + timedelta(days=2))
     assert _int_of(made.summary, "usable_cells") == made.profile.num_rows
-    assert made.summary["min_days"] == profile.MIN_CELL_DAYS
+    # **使えるセルは当てはめと同じ下限で数える**（持ち主は読む側。D-30）
+    assert made.summary["min_days"] == climatology.MIN_CELL_DAYS
 
 
 # ── 記録 ──────────────────────────────────────────────────────
