@@ -27,6 +27,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from bikechance_ml.features.grid import features_path, jst_yesterday
+from bikechance_ml.features.profile import SchemaMismatchError
 from bikechance_ml.features.reference_snapshot import (
     NEIGHBORS_NAME,
     STATIONS_NAME,
@@ -61,6 +62,8 @@ def _reference_bodies() -> dict[str, bytes]:
 
 REFERENCE: Final[dict[str, bytes]] = _reference_bodies()
 SNAPSHOTS: Final[bytes] = snapshot_bytes(fixture.load_snapshots())
+#: 前日の版のプロファイル（**本物の Parquet**。読み直しまで通す）
+PROFILE: Final[bytes] = snapshot_bytes(fixture.load_profile())
 
 
 class FakePort:
@@ -75,10 +78,16 @@ class FakePort:
         self.fail_job_finished = False
         self.no_reference = False
         self._served_snapshots = False
+        #: 置いてあるプロファイル（None なら「無い」）。**読みに来たパス**は下に残る
+        self.profile_body: bytes | None = PROFILE
+        self.profile_reads: list[str] = []
 
     def download(self, bucket: str, path: str) -> bytes | None:
         if path.startswith("reference/"):
             return None if self.no_reference else REFERENCE[path.split("/")[-1].split(".")[0]]
+        if path.startswith("profiles/"):
+            self.profile_reads.append(path)
+            return self.profile_body
         # **観測は 1 時間ぶんだけ返す。** 残りは「その時間帯が無い」＝欠損（補間しない）
         if self._served_snapshots:
             return None
@@ -173,6 +182,8 @@ MUST_BE_RECORDED: Final[Mapping[str, str]] = {
     "stations_without_weather": "気象格子に当たらなかったポート数",
     "excluded": "理由ごとの除外件数。行が減ったときの内訳",
     "feature_set": "どの版で作ったか",
+    "profile_date": "`prof_*` をどの日の版から引いたか（前日。無ければ null）",
+    "profile_coverage": "`prof_*` が入っていた割合（PR J1）。版は「列が在る」しか語らない",
 }
 
 
@@ -292,3 +303,47 @@ def test_run_without_a_date_builds_yesterday(monkeypatch: pytest.MonkeyPatch) ->
     assert job.run(["--upload"]) == 0
     _, _, detail = port.finished[0]
     assert detail["date"] == jst_yesterday(datetime.now(UTC)).isoformat()
+
+
+# ── ポートプロファイル（W5 プラン §6.10 の PR J1）────────────────
+def test_the_job_reads_the_profile_of_the_day_before() -> None:
+    """**読むのは前日の版だけ**（`profile.source_day`）。当日の版を読むと答えを見る。"""
+    port = FakePort()
+    summary = _upload(port)
+    assert port.profile_reads == ["profiles/date=2026-09-06/profile.parquet"]
+    assert summary["profile_date"] == "2026-09-06"
+    coverage = summary["profile_coverage"]
+    assert isinstance(coverage, dict)
+    assert 0 < coverage["ratio"] < 1
+
+
+def test_the_job_goes_on_without_a_profile() -> None:
+    """**前日の版が無くても作り切る**（`prof_*` は NULL）。**無かったことは記録に出る。**
+
+    天気と同じ扱いである——止めると、プロファイルの 1 日の失敗が学習サンプルの
+    欠けに化ける。前々日の版には落ちない（黙って古いものを使わない）。
+    """
+    port = FakePort()
+    port.profile_body = None
+    made = build_and_upload(port, DAY)
+    table = pq.read_table(pa.BufferReader(made.body))
+    assert table.num_rows > 0
+    assert set(table.column("prof_n_days").to_pylist()) == {0}
+    assert port.profile_reads == ["profiles/date=2026-09-06/profile.parquet"]
+    _, status, detail = port.finished[0]
+    assert status == "ok"
+    assert detail["profile_date"] is None
+    coverage = detail["profile_coverage"]
+    assert isinstance(coverage, dict)
+    assert coverage["covered"] == 0
+
+
+def test_a_profile_of_another_shape_stops_the_job() -> None:
+    """**形の違う表は読まない**（`require_schema`）。失敗は記録してから投げ直す。"""
+    port = FakePort()
+    port.profile_body = REFERENCE[STATIONS_NAME]
+    with pytest.raises(SchemaMismatchError):
+        build_and_upload(port, DAY)
+    _, status, detail = port.finished[0]
+    assert (status, detail["error"]) == ("failed", "SchemaMismatchError")
+    assert port.uploads == []

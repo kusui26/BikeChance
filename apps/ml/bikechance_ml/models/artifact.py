@@ -179,10 +179,10 @@ def build(
 class LightGbmPredictor:
     """LightGBM の版。**学習と同じ `models/matrix.py` を通して予測する。**
 
-    **`feature_set` が一致しなければ配れない。** LightGBM は 62 列すべてを読むので、
-    版が違えば「同じ名前で意味の違う列」を見る（v1 は容量まわり、v2 は
-    `minutes_since_last_change`、v3 は天気が変わった）。ベースラインと違って
-    ここは厳密に照合する（`models/registry.py`）。
+    **`feature_set` が一致しなければ配れない。** LightGBM は `MODEL_COLUMNS`
+    （v4 で 69 列）すべてを読むので、版が違えば「同じ名前で意味の違う列」を見る
+    （v1 は容量まわり、v2 は `minutes_since_last_change`、v3 は天気、v4 はプロファイルが
+    変わった）。ベースラインと違ってここは厳密に照合する（`models/registry.py`）。
     """
 
     artifact: LightGbmArtifact

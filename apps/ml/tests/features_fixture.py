@@ -15,6 +15,10 @@
 
 `fetched_at` は `observed_at + 40 秒`。**5 分グリッドの各点で as-of が 1 つ前の観測を
 指す**ので、`fetched_at` で切っていることがそのまま出力に現れる（W3-13）。
+
+**プロファイル**（`profile.csv`）は `profile(2026-09-06)` の代わりで、`prof_*` の源になる
+（v4。W5 プラン §6.10 の PR J1）。仕込みは `gen_golden._profile_cells` に書いてある
+（`p1` の枠の穴・薄い `p2`・`p1` の土曜のセル・台帳に無いポート）。
 """
 
 import csv
@@ -25,7 +29,7 @@ from typing import Final
 
 import pyarrow as pa
 
-from bikechance_ml.features import build, neighbors, static, weather
+from bikechance_ml.features import build, neighbors, profile, static, weather
 from bikechance_ml.features.grid import JST
 from bikechance_ml.features.reference import (
     NeighborRow,
@@ -40,10 +44,14 @@ DIRECTORY: Final[Path] = Path(__file__).resolve().parent / "fixtures" / "feature
 SNAPSHOTS: Final[Path] = DIRECTORY / "snapshots.csv"
 REFERENCE: Final[Path] = DIRECTORY / "reference.json"
 WEATHER: Final[Path] = DIRECTORY / "weather.json"
+PROFILE: Final[Path] = DIRECTORY / "profile.csv"
 EXPECTED: Final[Path] = DIRECTORY / "expected.csv"
 
 #: 基準日（JST）。2026-09-07 は月曜。
 DAY: Final[date] = date(2026, 9, 7)
+
+#: 仕込んだプロファイルの版の日付。**基準日の前日**（`profile.source_day`）。
+PROFILE_DAY: Final[date] = profile.source_day(DAY)
 
 #: 観測の範囲（JST）。当日の朝から夕方までと、前日の同時刻を少しだけ。
 FROM: Final[datetime] = datetime(2026, 9, 7, 8, 0, tzinfo=JST)
@@ -174,8 +182,38 @@ def load_weather_rows() -> tuple[WeatherRow, ...]:
     )
 
 
-def build_inputs() -> build.DayInputs:
-    """フィクスチャから組み立ての入力を作る。**テストと生成器で同じ道を通す。**"""
+def load_profile() -> pa.Table:
+    """`profile.csv` を `profile.parquet` と同じ形の表にする（**列の型も契約どおり**）。"""
+    lines = [
+        line
+        for line in PROFILE.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    rows = list(csv.DictReader(lines))
+    columns = {
+        field.name: pa.array(
+            [
+                row[field.name] if pa.types.is_string(field.type) else int(row[field.name])
+                for row in rows
+            ],
+            type=field.type,
+        )
+        for field in profile.PROFILE_SCHEMA
+    }
+    return pa.table(columns, schema=profile.PROFILE_SCHEMA)
+
+
+def edition() -> profile.Edition:
+    """仕込んだプロファイルを**前日の版**として渡す形にする。"""
+    return profile.Edition(day=PROFILE_DAY, table=load_profile())
+
+
+def build_inputs(*, with_profile: bool = True) -> build.DayInputs:
+    """フィクスチャから組み立ての入力を作る。**テストと生成器で同じ道を通す。**
+
+    **既定はプロファイルを渡す**（ゴールデンは `prof_*` まで固定する。J1 の完了条件 1）。
+    `with_profile=False` は「前日の版が無い日」（2026-09-07 の本番と同じ）。
+    """
     systems, estimates, holidays = load_reference()
     facts = static.to_facts(systems, estimates)
     links = neighbors.to_links(systems, facts.station_keys())
@@ -184,4 +222,5 @@ def build_inputs() -> build.DayInputs:
         reference=build.Reference(facts=facts, links=links, holidays=holidays),
         table=load_snapshots(),
         weather=weather.to_weather(load_weather_rows()),
+        profile=edition() if with_profile else None,
     )

@@ -139,11 +139,12 @@ def _refuse_a_lying_row(registered: Registered, model_feature_set: str) -> None:
 def _refuse_another_feature_set(model_feature_set: str, model_version: str) -> None:
     """**LightGBM は特徴量の版が一致しなければ配らない**（CLAUDE.md §2 の原則 4）。
 
-    62 列すべてを読むので、版が違えば「同じ名前で意味の違う列」を見る（v1 は容量まわり、
-    v2 は `minutes_since_last_change`、v3 は天気）。**例外は出ず、確率だけが静かに変わる。**
+    `MODEL_COLUMNS` をすべて読むので、版が違えば「同じ名前で意味の違う列」を見る
+    （v1 は容量まわり、v2 は `minutes_since_last_change`、v3 は天気、v4 はプロファイル）。
+    **例外は出ず、確率だけが静かに変わる。**
 
     ベースラインには掛けない。あちらが読むのは 6 列（システム・ポート・日・水平・
-    日内分・目標の曜日種別）で、**v0 から v3 まで 1 つも変わっていない**。
+    日内分・目標の曜日種別）で、**v0 から v4 まで 1 つも変わっていない**。
     「特徴量の表を読むモデルだけが版に縛られる」という区別である。
     """
     if model_feature_set != FEATURE_SET:

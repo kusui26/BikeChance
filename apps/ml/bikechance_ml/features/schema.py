@@ -5,7 +5,7 @@
 
 v0 に**入れていない**もの（W3 プラン §8）：
 
-  * 履歴プロファイル（`prof_*`）── 過去 28 日の集計。9 月の時点で日数が足りない（W4〜W5）
+  * ~~履歴プロファイル（`prof_*`）~~ → **v4 で入れた**（W5 の PR J1。下の `_PROFILE`）
   * 再配置（`minutes_since_rebalance` ほか）── 検知規則は W4
   * `bikes_same_time_7d` ── 7 日前がまだ無い
   * `is_limited_port` ── 過去 30 日の観測が要る
@@ -141,6 +141,26 @@ _WEATHER: Final[list[pa.Field]] = [
 #: 列を足したときに片方だけが増える。
 WEATHER_COLUMNS: Final[tuple[str, ...]] = tuple(field.name for field in _WEATHER)
 
+_PROFILE: Final[list[pa.Field]] = [
+    # **目標時刻（`t + h`）のセル** `(ポート, 目標の曜日種別, 15 分枠)` を**前日の版**の
+    # プロファイルから引く（`features/profile.py` の `Lookup`）。**B2（気候値）と同じセル・
+    # 同じ表**である（W5-01）。セルが無ければ 6 つとも NULL で、`prof_n_days` が 0 になる
+    pa.field("prof_p_bike", pa.float32(), nullable=True),
+    pa.field("prof_p_dock", pa.float32(), nullable=True),
+    pa.field("prof_mean_bikes", pa.float32(), nullable=True),
+    pa.field("prof_std_bikes", pa.float32(), nullable=True),
+    # **60 分の窓の和を格子点の数で割ったもの**（`sum_rentals_60 / n`）。窓が 60 分なので
+    # 値は「1 時間あたり」で、引くのは他の列と同じ目標時刻の枠である（W5 プラン §6.10）
+    pa.field("prof_rentals_per_hour", pa.float32(), nullable=True),
+    pa.field("prof_returns_per_hour", pa.float32(), nullable=True),
+    # **セルに寄与した日数。NULL にしない**（0 ＝ 履歴が無い）。同じ `prof_p_bike` でも
+    # 「2 日から」と「28 日から」では意味が違うので、木に厚みを見せる（D-27）
+    pa.field("prof_n_days", pa.int16(), nullable=False),
+]
+
+#: プロファイルの列名。**`_PROFILE` から引く**（天気と同じ理由）。
+PROFILE_COLUMNS: Final[tuple[str, ...]] = tuple(field.name for field in _PROFILE)
+
 SCHEMA: Final[pa.Schema] = pa.schema(
     [
         *_KEYS,
@@ -154,6 +174,7 @@ SCHEMA: Final[pa.Schema] = pa.schema(
         *_HISTORY,
         *_NEIGHBORS,
         *_WEATHER,
+        *_PROFILE,
     ]
 )
 

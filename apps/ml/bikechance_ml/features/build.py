@@ -32,6 +32,7 @@ from bikechance_ml.features import (
     flow,
     labels,
     neighbors,
+    profile,
     sample,
     static,
     weather,
@@ -47,7 +48,7 @@ from bikechance_ml.features.arrays import (
     Strings,
     UInt64,
 )
-from bikechance_ml.features.calendar import DayType, day_type, dow_type
+from bikechance_ml.features.calendar import DOW_TYPE_ORDER, DayType, DowType, day_type, dow_type
 from bikechance_ml.features.calendar import (
     is_day_before_holiday as calendar_is_day_before_holiday,
 )
@@ -122,6 +123,14 @@ class Inputs(Protocol):
         サンプルは天気の 4 列が NULL になる（§5.4）。`weather.empty()` を渡す。
         """
 
+    @property
+    def profile(self) -> profile.Edition | None:
+        """**基準時刻の前日の版**のプロファイル（`profile.source_day`）。`prof_*` の源。
+
+        **無ければ `None` を渡す**——`prof_*` の 6 列が NULL、`prof_n_days` が 0 になる。
+        2026-09-07 は前日の版が無い。**推論は J2 までこちら**（W5 プラン §6.10、契約 29）。
+        """
+
 
 @dataclass(frozen=True)
 class DayInputs:
@@ -132,6 +141,8 @@ class DayInputs:
     table: pa.Table
     #: **既定を持たせない。** 天気が無い日は `weather.empty()` を明示して渡す
     weather: weather.Weather
+    #: **既定を持たせない。** 前日の版が無い日は `None` を明示して渡す
+    profile: profile.Edition | None
 
 
 @dataclass(frozen=True)
@@ -151,6 +162,8 @@ class NowInputs:
     reference: Reference
     table: pa.Table
     weather: weather.Weather
+    #: **J1 の推論は `None` を渡す**（まだ読まない。W5 プラン §6.10、契約 29）
+    profile: profile.Edition | None
 
     @property
     def day(self) -> date:
@@ -183,6 +196,10 @@ class DayStats:
     #: 天気 4 列が**入っている行の割合**。`feature_set` はここまで語らない
     #: （§8.5.3。同じ `v3` でも 0% の日と 99.98% の日がある）
     weather_coverage: coverage.Coverage
+    #: **読んだプロファイルの版**（`profile(D-1)`）。無ければ None（`prof_*` は全行 NULL）
+    profile_date: str | None
+    #: `prof_*` が**入っている行の割合**（`prof_n_days > 0`）。版は「列が在る」しか語らない
+    profile_coverage: coverage.Coverage
 
     def as_dict(self) -> dict[str, object]:
         """JSON に出す形。"""
@@ -199,6 +216,8 @@ class DayStats:
             "weather_issues": self.weather_issues,
             "stations_without_weather": self.stations_without_weather,
             "weather_coverage": self.weather_coverage.as_dict(),
+            "profile_date": self.profile_date,
+            "profile_coverage": self.profile_coverage.as_dict(),
         }
 
 
@@ -228,6 +247,8 @@ class NowStats:
     weather_issues: int
     #: 気象格子に当たらなかったポート数（自系統ぶんではなく台帳ぜんぶ。**理由は 3 つある**）
     stations_without_weather: int
+    #: **読んだプロファイルの版**。**J1 の推論は読まないので None**（J2 で日付が出る。契約 29）
+    profile_date: str | None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -240,6 +261,7 @@ class NowStats:
             "excluded": dict(sorted(self.excluded.items())),
             "weather_issues": self.weather_issues,
             "stations_without_weather": self.stations_without_weather,
+            "profile_date": self.profile_date,
         }
 
 
@@ -343,7 +365,8 @@ def build_now(inputs: NowInputs) -> Ready:
       * **目標時刻の除外をしない**（ラベルが無い）
       * **抽出をしない**（全件を出す）
 
-    出るのは `SERVING_SCHEMA` の 65 列で、そのうち 61 列が特徴量である。
+    出るのは `SERVING_SCHEMA` の 72 列で、そのうち 68 列が特徴量である（v4。`prof_*` の
+    7 列を含む。**プロファイルを渡さなければ 6 列が NULL・`prof_n_days` が 0**）。
     """
     grid = build_point_grid(inputs.at, serving_shifts())
     # **ラベルは作らない。** 推論に未来は無い（§9 の契約 5）
@@ -396,7 +419,13 @@ def _now_stats(
         excluded=base.counts,
         weather_issues=inputs.weather.n_issues,
         stations_without_weather=without_weather,
+        profile_date=_profile_date(inputs),
     )
+
+
+def _profile_date(inputs: Inputs) -> str | None:
+    """読んだプロファイルの版の日付。**渡されなければ None**（記録に「読んでいない」と出る）。"""
+    return None if inputs.profile is None else inputs.profile.day.isoformat()
 
 
 def _without_weather(weather_cell: Int32) -> int:
@@ -521,6 +550,8 @@ class Precomputed:
     weather_cell: Int32
     #: 基準時刻ごとに使ってよい予報の発行の添字（無ければ -1）
     weather_issue: Int32
+    #: `prof_*` を引く表（**台帳の並び**で番号を振ってある）。渡されなければ空
+    profile: profile.Lookup
 
 
 def _precompute(inputs: Inputs, grid: Grid, state: GridState) -> Precomputed:
@@ -546,6 +577,8 @@ def _precompute(inputs: Inputs, grid: Grid, state: GridState) -> Precomputed:
         weather_cell=inputs.weather.cell_at(facts.lat, facts.lon),
         # **基準時刻ごとに 1 度だけ決める。** 引くのは `available_at <= t` の最新
         weather_issue=inputs.weather.issue_at(np.asarray(grid.day_times_ms(), dtype=np.int64)),
+        # **組み立ての行と同じ台帳の番号で引く**（`StationFacts.station_keys()` の並び）
+        profile=profile.lookup(inputs.profile, facts.station_keys()),
     )
 
 
@@ -713,7 +746,7 @@ def _accept(seeds: UInt64, index: int, n_grid: int) -> Bools:
 def _feature_columns(
     inputs: Inputs, grid: Grid, state: GridState, pre: Precomputed, picked: Picked
 ) -> dict[str, pa.Array]:
-    """**学習と推論で共通の 65 列。** ラベルと抽出はここに入れない。
+    """**学習と推論で共通の 72 列。** ラベルと抽出はここに入れない。
 
     共有しているのは呼び出しの並びではなく**この関数そのもの**である。片方だけ直せば
     ゴールデン（`tests/test_features_parity.py`）が落ちる（W4 プラン §4 の W4-04）。
@@ -729,6 +762,7 @@ def _feature_columns(
     columns.update(_history_columns(state, grid, pre, picked))
     columns.update(_neighbor_columns(pre, picked))
     columns.update(_weather_columns(inputs, grid, pre, picked))
+    columns.update(_profile_columns(inputs, grid, pre, picked))
     return columns
 
 
@@ -848,10 +882,40 @@ def _cos(minute: Int32) -> Float32:
 
 def _target_dow_type(inputs: Inputs, total_minute: Int32) -> Strings:
     """目標時刻の曜日種別。**水平は最長 180 分なので、跨ぐのは翌日まで。**"""
+    today, tomorrow = _today_and_tomorrow(inputs)
+    return np.asarray(np.where(_crosses_midnight(total_minute), tomorrow, today), dtype=np.str_)
+
+
+def _target_dow_index(inputs: Inputs, total_minute: Int32) -> Int64:
+    """目標時刻の曜日種別の **`DOW_TYPE_ORDER` の番号**。`_target_dow_type` と同じ規則。
+
+    **列（`target_dow_type`）と同じ 2 つの部品を通す**ので、名前と番号が食い違わない。
+    B2 は列の名前から番号を引き（`eval/dataset.dow_type_indices`）、`prof_*` はここで
+    番号を作る——**どちらも `DOW_TYPE_ORDER` の位置**である。
+    """
+    today, tomorrow = _today_and_tomorrow(inputs)
+    return np.asarray(
+        np.where(
+            _crosses_midnight(total_minute),
+            DOW_TYPE_ORDER.index(tomorrow),
+            DOW_TYPE_ORDER.index(today),
+        ),
+        dtype=np.int64,
+    )
+
+
+def _today_and_tomorrow(inputs: Inputs) -> tuple[DowType, DowType]:
+    """基準日と翌日の曜日種別。**目標時刻が取りうるのはこの 2 つだけ。**"""
     holidays = inputs.reference.holidays
-    today = dow_type(day_type(inputs.day, holidays))
-    tomorrow = dow_type(day_type(inputs.day + _ONE_DAY, holidays))
-    return np.asarray(np.where(total_minute >= _MINUTES_PER_DAY, tomorrow, today), dtype=np.str_)
+    return (
+        dow_type(day_type(inputs.day, holidays)),
+        dow_type(day_type(inputs.day + _ONE_DAY, holidays)),
+    )
+
+
+def _crosses_midnight(total_minute: Int32) -> Bools:
+    """目標時刻が翌日に入るか（`t` の日内分と水平の和が 1 日を超える）。"""
+    return np.asarray(total_minute >= _MINUTES_PER_DAY, dtype=np.bool_)
 
 
 def _static_columns(
@@ -1004,6 +1068,32 @@ def _weather_columns(
     }
 
 
+def _profile_columns(
+    inputs: Inputs, grid: Grid, pre: Precomputed, picked: Picked
+) -> dict[str, pa.Array]:
+    """ポートプロファイル（W5 プラン §6.10 の PR J1）。**目標時刻のセルを前日の版から引く。**
+
+    セルは `(ポート, 目標の曜日種別, 目標の 15 分枠)` で、**B2 と同じ規則**である（W5-01）。
+    枠は `profile.target_slot`（B2 の `slot15` も同じ関数）、曜日種別は `target_dow_type` と
+    同じ部品から作る。**セルが無ければ値は NULL、日数は 0**（0 で埋めない）。
+
+    **水平で値が変わる**（目標時刻が動くので引くセルが変わる）。天気の `precip_mm_target` と
+    同じく、列は行ごとに作る。
+    """
+    times = np.asarray(grid.day_times_ms(), dtype=np.int64)[picked.points]
+    minute = _jst_minute_of_day(times)
+    cells = pre.profile.take(
+        picked.stations.astype(np.int64),
+        _target_dow_index(inputs, minute + picked.horizon_min),
+        profile.target_slot(minute, picked.horizon_min),
+    )
+    columns: dict[str, pa.Array] = {}
+    for name, values in cells.values.items():
+        columns.update(_float_column(name, values))
+    columns[profile.DAYS_COLUMN] = _col(cells.n_days, profile.DAYS_COLUMN)
+    return columns
+
+
 # ── まとめ ────────────────────────────────────────────────────
 def _concat(parts: Sequence[pa.Table]) -> pa.Table:
     """水平ごとの表をつなぎ、**決定的な順**に並べる。
@@ -1043,4 +1133,8 @@ def _stats(
         # **作った表そのものから数える。** 発行が在っても格子が当たらなければ NULL に
         # なるので、`weather_issues` では被覆を語れない（§8.5.3）
         weather_coverage=coverage.measure(table),
+        profile_date=_profile_date(inputs),
+        # **これも表そのものから数える。** 版が在っても、その曜日種別をまだ観測していない
+        # セルは引けない（初めての土曜など）ので、日付だけでは被覆を語れない
+        profile_coverage=coverage.measure_profile(table),
     )

@@ -21,7 +21,7 @@ import pytest
 
 from bikechance_ml.eval.dataset import NEEDED_COLUMNS
 from bikechance_ml.features import coverage
-from bikechance_ml.features.schema import WEATHER_COLUMNS
+from bikechance_ml.features.schema import PROFILE_COLUMNS, WEATHER_COLUMNS
 
 #: 実測（2026-09-11、`.cache/features` の 3 日ぶん）。**§8.5.3 の表そのもの。**
 OBSERVED: Final[Mapping[str, float]] = {
@@ -208,3 +208,40 @@ def test_restrict_keeps_only_the_days_asked_for() -> None:
 
 def test_restrict_ignores_days_that_were_not_read() -> None:
     assert coverage.restrict(_days(1.0), [date(2026, 12, 25)]) == {}
+
+
+# ── プロファイルの被覆（W5 プラン §6.10 の PR J1）───────────────────
+def _profile_rows(days: Sequence[int]) -> pa.Table:
+    """`prof_*` の 7 列だけの表。**日数 0 の行は値が NULL**（組み立てと同じ形）。"""
+    values = [name for name in PROFILE_COLUMNS if name != "prof_n_days"]
+    columns: dict[str, pa.Array] = {
+        name: pa.array([0.5 if one > 0 else None for one in days], type=pa.float32())
+        for name in values
+    }
+    columns["prof_n_days"] = pa.array(list(days), type=pa.int16())
+    return pa.table(columns)
+
+
+def test_the_profile_coverage_counts_rows_with_days() -> None:
+    """**入っているとは `prof_n_days > 0`。** 版（v4）は「列が在る」しか語らない。"""
+    measured = coverage.measure_profile(_profile_rows([0, 3, 5, 0]))
+    assert (measured.rows, measured.covered) == (4, 2)
+    assert measured.ratio == pytest.approx(0.5)
+    assert measured.is_uniform, "日数と値は同じ行で揃うはず"
+
+
+def test_the_profile_coverage_notices_values_without_days() -> None:
+    """**日数と値が揃っていなければ見える**（引き方が壊れている合図）。"""
+    table = _profile_rows([0, 3])
+    broken = table.set_column(
+        table.schema.get_field_index("prof_p_bike"),
+        "prof_p_bike",
+        pa.array([0.1, 0.2], type=pa.float32()),
+    )
+    assert not coverage.measure_profile(broken).is_uniform
+
+
+def test_a_day_without_a_profile_is_not_covered() -> None:
+    """**前日の版が無い日は 0%**（2026-09-07 の本番）。空の表も 0% として扱う。"""
+    assert coverage.measure_profile(_profile_rows([0, 0, 0])).ratio == 0.0
+    assert coverage.measure_profile(_profile_rows([])).ratio == 0.0

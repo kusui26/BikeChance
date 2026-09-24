@@ -22,10 +22,11 @@ import pytest
 from bikechance_ml.baselines import climatology, profile_climatology
 from bikechance_ml.baselines.climatology import MIN_CELL_DAYS, MIN_CELL_POINTS, SLOTS_PER_DAY
 from bikechance_ml.eval.dataset import TARGETS, Samples, to_samples
-from bikechance_ml.features import profile
+from bikechance_ml.features import build, profile
 from bikechance_ml.features.arrays import Bools
 from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 from tests import eval_fixture as fixture
+from tests import features_fixture
 from tests import profile_fixture as pf
 
 BIKE, DOCK = TARGETS
@@ -428,3 +429,34 @@ def _rolled(ports: list[tuple[str, str, int, int, int]], flags_per_day: list[int
         rolled = profile.roll(rolled, pf.daily(pf.observations(rows, day=day), day=day), None)
     assert rolled is not None
     return rolled
+
+
+# ── 特徴量の `prof_p_*` と同じ量であること（W5-01、W5 プラン §6.10 の PR J1）────
+def test_prof_p_is_the_b2_rate_of_the_same_cell() -> None:
+    """**`prof_p_bike` / `prof_p_dock` は B2 の率そのもの**（W5-01）。同じ行から同じ値が出る。
+
+    特徴量（`features/build.py` → `profile.Lookup`）と B2（`fit` → `climatology.predict`）は
+    **別の道**でセルを引く。下限を 1 点 1 日に下げれば、**B2 が引けた行と `prof_n_days > 0` の
+    行が一致し、率もビット単位で一致する**——しなければ、どちらかが別のセルを指している
+    （枠・曜日種別・ポートの番号のどれか）。
+    """
+    built = build.build_day(features_fixture.build_inputs()).table
+    samples = to_samples(built)
+    days = np.asarray(built.column("prof_n_days").to_numpy(), dtype=np.int64)
+    assert 0 < int((days > 0).sum()) < len(days), "引ける行と引けない行の両方が要る"
+    for target in TARGETS:
+        table = profile_climatology.fit(
+            features_fixture.load_profile(),
+            ports=samples.ports,
+            target=target,
+            min_samples=1,
+            min_days=1,
+        )
+        applied = climatology.predict(table, samples, np.full(len(samples), -1.0))
+        assert applied.used.tolist() == (days > 0).tolist(), target.name
+        feature = built.column(f"prof_p_{target.name}").to_numpy(zero_copy_only=False)
+        rate = np.asarray(applied.probability, dtype=np.float32)
+        assert (
+            rate[applied.used].tobytes()
+            == np.asarray(feature[applied.used], dtype=np.float32).tobytes()
+        ), target.name

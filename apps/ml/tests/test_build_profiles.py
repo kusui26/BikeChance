@@ -10,6 +10,9 @@
   * **記録の不調でジョブを落とさない**（置けたことのほうが大事）
   * **置かないときは記録しない**（手元の試し打ちで `job_runs` を汚さない）
 
+**`daily` から作り直す入口**（`--from-dailies`）も、ここで固定する——作り直した版が
+**転がして置いた版とバイト単位で一致する**こと（W5 プラン §6.10 の J1 の完了条件 7）。
+
 **読む時間帯は学習より短い。** ラベルも同時刻履歴も要らないので、25 時間ではなく
 2 時間の余白で足りる（`features/profile.LOOKBACK_HOURS`）。**読みすぎていないこと**も
 ここで固定する——1 日あたり 46 ファイル（学習）と 6 ファイルでは費用が違う。
@@ -27,6 +30,7 @@ from bikechance_ml.baselines import climatology
 from bikechance_ml.features import profile
 from bikechance_ml.features.grid import day_start, jst_yesterday, parquet_hours, profile_path
 from bikechance_ml.jobs import build_profiles as job
+from bikechance_ml.jobs.build_features import to_parquet_bytes
 from bikechance_ml.jobs.build_profiles import JOB_NAME, build_and_upload, build_one_day
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from bikechance_ml.jobs.snapshot_table import to_parquet_bytes as snapshot_bytes
@@ -312,3 +316,85 @@ def test_the_default_day_is_yesterday() -> None:
 def test_the_module_has_a_job_name_so_recording_covers_it() -> None:
     """`tests/test_recording.py` が `JOB_NAME` を持つモジュールを数え上げている。"""
     assert job.JOB_NAME == JOB_NAME
+
+
+# ── `daily` から作り直す（`profile.sum_dailies` の入口。W5 プラン §6.10 の J1、D-28）──
+def _rolled(days: int) -> tuple[FakePort, date]:
+    """`days` 日ぶん**転がして**置いた状態を作り、最後の日を返す（古い日から順に）。"""
+    covered = tuple(DAY + timedelta(days=offset) for offset in range(days))
+    port = FakePort(days=covered)
+    for one in covered:
+        build_and_upload(port, one)
+    return port, covered[-1]
+
+
+def test_the_window_is_the_rolls() -> None:
+    """**作り直す窓は転がしの窓と同じ 28 日**（`day - 27 … day`）。"""
+    days = job.window_days(date(2026, 9, 30))
+    assert len(days) == profile.PROFILE_DAYS
+    assert (days[0], days[-1]) == (date(2026, 9, 3), date(2026, 9, 30))
+
+
+def test_summing_the_dailies_gives_the_stored_bytes() -> None:
+    """**`daily` を足して作り直した版が、転がして置いた版とバイト単位で一致する**。
+
+    J1 の完了条件 7。
+
+    一致するから、`profile.parquet` は `daily` から作り直せる派生物だと言える——
+    **掃除（35 日）を入れてよい前提はこれだけである**（D-22 と同じ作法）。
+    """
+    port, last = _rolled(4)
+    summed = job.sum_from_dailies(port, last)
+    assert summed.days == tuple(DAY + timedelta(days=offset) for offset in range(4))
+    compared = job.compare_with_stored(port, last, summed)
+    assert compared["identical"] is True
+    assert compared["stored_bytes"] == compared["summed_bytes"]
+
+
+def test_summing_matches_across_the_expiry() -> None:
+    """**28 日を越えて古い日が引かれたあとも一致する**（転がしが `daily(D-28)` を引く境目）。"""
+    port, last = _rolled(profile.PROFILE_DAYS + 2)
+    summed = job.sum_from_dailies(port, last)
+    assert len(summed.days) == profile.PROFILE_DAYS
+    assert summed.days[0] == DAY + timedelta(days=2)
+    assert job.compare_with_stored(port, last, summed)["identical"] is True
+
+
+def test_a_changed_daily_is_caught() -> None:
+    """**`daily` と `profile` が食い違えば一致しない**（突き合わせが空回りしていない）。"""
+    port, last = _rolled(3)
+    path = profile_path(DAY + timedelta(days=1), profile.DAILY_NAME)
+    daily = pq.read_table(pa.BufferReader(port.stored[path]))
+    port.stored[path] = to_parquet_bytes(daily.slice(0, daily.num_rows - 1))
+    summed = job.sum_from_dailies(port, last)
+    assert job.compare_with_stored(port, last, summed)["identical"] is False
+
+
+def test_a_missing_stored_profile_is_not_identical() -> None:
+    """**置いてある版が無ければ「一致」とは言わない**（無いものと比べて通さない）。"""
+    port, last = _rolled(2)
+    del port.stored[profile_path(last, profile.PROFILE_NAME)]
+    compared = job.compare_with_stored(port, last, job.sum_from_dailies(port, last))
+    assert compared["identical"] is False
+    assert compared["stored_bytes"] is None
+
+
+def test_summing_reads_only_the_dailies() -> None:
+    """**読むのは置いてある `daily` だけ**（毎時の観測も、前日の `profile` も読まない）。"""
+    port, last = _rolled(2)
+    port.reads.clear()
+    job.sum_from_dailies(port, last)
+    assert port.reads, "何も読んでいない"
+    assert all(path.endswith("/daily.parquet") for path in port.reads)
+    assert len(port.reads) == profile.PROFILE_DAYS
+
+
+@pytest.mark.parametrize("argv", [["--compare"], ["--from-dailies", "--upload"]])
+def test_the_from_dailies_mode_refuses_a_wrong_combination(argv: list[str]) -> None:
+    """**作り直した版は置かない**（置くのは掃除を入れるときに決める）。
+
+    `--compare` は単独で使わない。
+
+    どちらも Storage を開く前に止まる（ここで Storage に触れる道が無い）。
+    """
+    assert job.run(["--date", "2026-09-23", *argv]) == 2

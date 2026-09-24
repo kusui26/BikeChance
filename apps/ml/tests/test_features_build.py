@@ -12,13 +12,14 @@ import csv
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import fields, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Final
 
 import pyarrow as pa
 import pytest
 
-from bikechance_ml.features import build, coverage
+from bikechance_ml.features import build, coverage, profile, static
+from bikechance_ml.features import neighbors as neighbors_module
 from bikechance_ml.features import weather as weather_module
 from bikechance_ml.features.constants import (
     FEATURE_SET,
@@ -29,10 +30,19 @@ from bikechance_ml.features.constants import (
     SAMPLE_WEIGHT,
     STRATUM_UNIFORM,
 )
+from bikechance_ml.features.grid import JST
+from bikechance_ml.features.reference import StationAttributeRow, StationGeoRow, SystemReference
 from bikechance_ml.features.sample import counter, station_seed, uniform
-from bikechance_ml.features.schema import SCHEMA, MissingColumnError, feature_columns, to_table
+from bikechance_ml.features.schema import (
+    PROFILE_COLUMNS,
+    SCHEMA,
+    MissingColumnError,
+    feature_columns,
+    to_table,
+)
 from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs.build_features import to_parquet_bytes
+from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from tests import features_fixture as fixture
 from tests.gen_golden import to_csv
 
@@ -307,6 +317,7 @@ def test_a_day_without_observations_produces_an_empty_table() -> None:
         reference=inputs.reference,
         table=inputs.table.schema.empty_table(),
         weather=inputs.weather,
+        profile=inputs.profile,
     )
     built = build.build_day(empty)
     assert built.table.num_rows == 0
@@ -463,3 +474,208 @@ def test_the_target_weather_moves_with_the_horizon() -> None:
     for row in ROWS:
         by_time[row["t"]].add(float(row["precip_mm_target"]))
     assert any(len(values) > 1 for values in by_time.values()), "水平で動いていない"
+
+
+# ── ポートプロファイル（W5 プラン §6.10 の PR J1）────────────────
+def _naive_profile_values(row: dict[str, object]) -> tuple[dict[str, float], int] | None:
+    """**素朴な再計算**：`profile.csv` を辞書で引き、Python の浮動小数で割る。
+
+    組み立て（`profile.Lookup`）とは別の道で同じ値を出す。目標時刻は `t + h` を
+    **JST に直してから**枠と曜日種別を決める（フィクスチャの日は月曜、翌日も平日）。
+    """
+    stamp = row["t"]
+    assert isinstance(stamp, datetime)
+    horizon = row["h_min"]
+    assert isinstance(horizon, int)
+    target = stamp.replace(tzinfo=UTC).astimezone(JST) + timedelta(minutes=horizon)
+    slot = (target.hour * 60 + target.minute) // 15
+    kind = "weekday" if target.weekday() < 5 else "sat"
+    found = [
+        one
+        for one in fixture.load_profile().to_pylist()
+        if (one["system_id"], one["station_id"], one["dow_type"], one["slot15"])
+        == (row["system_id"], row["station_id"], kind, slot)
+    ]
+    if not found:
+        return None
+    cell = found[0]
+    points = float(cell["n"])
+    mean = cell["sum_bikes"] / points
+    return (
+        {
+            "prof_p_bike": cell["n_bike_ok"] / points,
+            "prof_p_dock": cell["n_dock_ok"] / points,
+            "prof_mean_bikes": mean,
+            "prof_std_bikes": max(cell["sum_bikes_sq"] / points - mean * mean, 0.0) ** 0.5,
+            "prof_rentals_per_hour": cell["sum_rentals_60"] / points,
+            "prof_returns_per_hour": cell["sum_returns_60"] / points,
+        },
+        int(cell["n_days"]),
+    )
+
+
+def test_the_profile_columns_match_a_naive_lookup() -> None:
+    """**目標時刻のセルを、前日の版から引いている**（素朴な再計算で検算する）。"""
+    checked = found = 0
+    for row in ROWS:
+        expected = _naive_profile_values(row)
+        checked += 1
+        if expected is None:
+            assert row["prof_n_days"] == 0, row
+            assert all(row[name] is None for name in profile.VALUE_COLUMNS), row
+            continue
+        values, days = expected
+        found += 1
+        assert row["prof_n_days"] == days, row
+        for name, value in values.items():
+            assert row[name] == pytest.approx(value, rel=1e-6), (name, row)
+    # **空回りしていない**：引けた行も、引けなかった行も在る
+    assert found > 0, "引けた行が 1 つも無い（仕込みを疑う）"
+    assert found < checked, "引けなかった行が 1 つも無い（穴が効いていない）"
+
+
+def test_the_weekday_rows_never_read_saturday_cells() -> None:
+    """**曜日種別も鍵のうち。** `p1` には土曜のセル（日数 8）も在るが、月曜の行は拾わない。"""
+    p1 = [row for row in ROWS if row["station_id"] == "p1" and row["prof_n_days"] != 0]
+    assert p1, "p1 の行が無い（仕込みを疑う）"
+    assert {row["prof_n_days"] for row in p1} == {5}
+
+
+def test_a_day_without_a_profile_has_null_profile_columns() -> None:
+    """**前日の版が無い日でも作れる**（J1 の完了条件 3）。値は NULL、日数は 0。
+
+    2026-09-07 の本番がこれに当たる（`profile(09-06)` が無い）。**推論は J2 まで
+    こちらを通る。** 0 で埋めると「日数 0 なのに率が 0」という嘘の行ができる。
+    """
+    built = build.build_day(fixture.build_inputs(with_profile=False))
+    assert built.table.num_rows == TABLE.num_rows
+    for name in profile.VALUE_COLUMNS:
+        assert built.table.column(name).null_count == built.table.num_rows, name
+    assert set(built.table.column(profile.DAYS_COLUMN).to_pylist()) == {0}
+    assert built.stats.profile_date is None
+    assert built.stats.profile_coverage.covered == 0
+
+
+def test_the_profile_does_not_touch_any_other_column() -> None:
+    """**プロファイルを渡しても、他の 69 列は 1 つも動かない**（行も抽出も同じ）。"""
+    without = build.build_day(fixture.build_inputs(with_profile=False)).table
+    others = [name for name in SCHEMA.names if name not in PROFILE_COLUMNS]
+    assert TABLE.select(others).equals(without.select(others))
+
+
+def test_the_profile_date_and_coverage_are_recorded() -> None:
+    """**どの版を読み、何割の行に入ったか**を内訳に出す（版は「列が在る」しか語らない）。"""
+    stats = BUILT.stats
+    assert stats.profile_date == "2026-09-06"
+    assert stats.profile_coverage.rows == TABLE.num_rows
+    covered = sum(1 for row in ROWS if row["prof_n_days"] > 0)
+    assert stats.profile_coverage.covered == covered
+    assert 0 < stats.profile_coverage.ratio < 1, "穴の行と引けた行の両方が在るはず"
+    # **日数と値は同じ行で揃う**（揃っていなければ引き方が壊れている）
+    assert stats.profile_coverage.is_uniform
+    recorded = stats.as_dict()
+    assert recorded["profile_date"] == "2026-09-06"
+    assert recorded["profile_coverage"] == stats.profile_coverage.as_dict()
+
+
+# ── 日をまたぐ行は翌日の曜日種別で引く ──────────────────────────
+#: 金曜（翌日は土曜）。**目標時刻が 0 時を越えた行だけ土曜のセルを引く。**
+_FRIDAY: Final[date] = date(2026, 9, 11)
+_NIGHT_AT: Final[datetime] = datetime(2026, 9, 11, 23, 0, tzinfo=JST).astimezone(UTC)
+
+
+def _night_inputs() -> build.NowInputs:
+    """金曜 23:00 JST に 1 ポートだけ動いている入力。**プロファイルは平日と土曜で日数を変える。**"""
+    start = datetime(2026, 9, 11, 19, 0, tzinfo=JST).astimezone(UTC)
+    rows = [
+        {
+            "system_id": "hellocycling",
+            "station_id": "night",
+            "observed_at": start + timedelta(minutes=5 * step),
+            "fetched_at": start + timedelta(minutes=5 * step, seconds=40),
+            "bikes": 3 + step % 4,
+            "docks": 6,
+            "flags": 7,
+            "reported_age_s": 30,
+        }
+        for step in range(4 * 12)
+    ]
+    systems = (
+        SystemReference(
+            system_id="hellocycling",
+            geo=(
+                StationGeoRow(
+                    station_id="night",
+                    first_seen_at=datetime(2026, 8, 1, tzinfo=UTC),
+                    pref_code=13,
+                    muni_code=13101,
+                ),
+            ),
+            attributes=(
+                StationAttributeRow(
+                    station_id="night",
+                    lat=35.68,
+                    lon=139.76,
+                    capacity=12,
+                    is_charging_station=False,
+                    region_id=None,
+                ),
+            ),
+            neighbors=(),
+        ),
+    )
+    facts = static.to_facts(systems, {})
+    cells = [
+        {
+            "system_id": "hellocycling",
+            "station_id": "night",
+            "dow_type": kind,
+            "slot15": slot,
+            "n_days": days,
+            "n": 3 * days,
+            "n_bike_ok": 3 * days,
+            "n_dock_ok": 3 * days,
+        }
+        for kind, days in (("weekday", 7), ("sat", 2))
+        for slot in range(profile.SLOTS_PER_DAY)
+    ]
+    table = pa.Table.from_pylist(
+        [{name: one.get(name, 0) for name in profile.PROFILE_SCHEMA.names} for one in cells],
+        schema=profile.PROFILE_SCHEMA,
+    )
+    return build.NowInputs(
+        at=_NIGHT_AT,
+        system_id="hellocycling",
+        reference=build.Reference(
+            facts=facts,
+            links=neighbors_module.to_links(systems, facts.station_keys()),
+            holidays=frozenset(),
+        ),
+        table=pa.Table.from_pylist(rows, schema=SNAPSHOT_SCHEMA),
+        weather=weather_module.empty(),
+        profile=profile.Edition(day=_FRIDAY - timedelta(days=1), table=table),
+    )
+
+
+def test_a_row_that_crosses_midnight_reads_the_next_days_cells() -> None:
+    """**目標時刻が 0 時を越えたら、翌日（土曜）のセルを引く**（`target_dow_type` と同じ規則）。
+
+    金曜 23:00 から 60 分以上先は土曜に入る。平日のセルは 7 日、土曜のセルは 2 日にしてあるので、
+    **日数で「どちらを引いたか」が読める。**
+    """
+    table = build.build_now(_night_inputs()).table
+    days = dict(
+        zip(table.column("h_min").to_pylist(), table.column("prof_n_days").to_pylist(), strict=True)
+    )
+    kinds = dict(
+        zip(
+            table.column("h_min").to_pylist(),
+            table.column("target_dow_type").to_pylist(),
+            strict=True,
+        )
+    )
+    assert sorted(days) == list(HORIZONS_MIN), "10 水平すべての行が在るはず"
+    for horizon in HORIZONS_MIN:
+        crosses = horizon >= 60
+        assert kinds[horizon] == ("sat" if crosses else "weekday"), horizon
+        assert days[horizon] == (2 if crosses else 7), horizon

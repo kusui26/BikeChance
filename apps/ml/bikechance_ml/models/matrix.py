@@ -6,8 +6,8 @@
 
 決めていること。
 
-  * **列は `MODEL_COLUMNS` の順**。`features/schema.py` の `feature_columns()`（61 列）に
-    `system_id` を足した 62 列である。`station_id` は入れない（21,000 カテゴリになる。
+  * **列は `MODEL_COLUMNS` の順**。`features/schema.py` の `feature_columns()`（v4 で 68 列）に
+    `system_id` を足した 69 列である。`station_id` は入れない（21,000 カテゴリになる。
     ポート固有性は近傍と履歴プロファイルで表す。開発プラン §7.2）
   * **カテゴリは順序を持たない列**。文字列 4 つと、順序に意味の無い整数の ID 2 つ。
     `pref_code` は入れない（実測で近傍の残差に足すものが無く、`muni_code` のほうが
