@@ -26,10 +26,10 @@ BUILT: Final[pa.Table] = build.build_day(fixture.build_inputs()).table
 
 # ── 列の並び ──────────────────────────────────────────────────
 def test_columns_are_the_feature_set_plus_system() -> None:
-    """**62 列。** `feature_columns()` の 61 に `system_id` を足したもの。"""
+    """**69 列。** `feature_columns()` の 68（v4）に `system_id` を足したもの。"""
     assert matrix.MODEL_COLUMNS[0] == "system_id"
     assert matrix.MODEL_COLUMNS[1:] == feature_columns()
-    assert len(matrix.MODEL_COLUMNS) == 62
+    assert len(matrix.MODEL_COLUMNS) == 69
 
 
 def test_station_id_is_not_a_feature() -> None:

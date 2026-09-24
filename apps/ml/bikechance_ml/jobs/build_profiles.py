@@ -5,8 +5,9 @@
 （CLAUDE.md §3）。
 
 **毎日 GitHub Actions が前日ぶんを作る**（`build_features` と同じワークフロー、
-**その前**に走る）。順番に意味がある：PR J で `features/` が `prof_*` を読むように
-なったとき、**同じ回の中で先にプロファイルが揃っている**必要がある。
+**その後**に走る）。**同じ回の中の順序は依存関係ではない**——`features/` が読むのは
+**前日の版**（`profile.source_day`）で、それは前の回に置かれている（PR J1 から）。
+順序は「取り返しがつかない順」で決めてある（`.github/workflows/build-features.yml`）。
 
 **置くのは 2 つ。**
 
@@ -26,19 +27,27 @@
 
 `--date` は **JST の暦日**（省略すると昨日）。**さかのぼって作るときは古い日から順に**
 ——転がしが前日の版を読むためである。
+
+**`--from-dailies` は転がさずに作り直す**（`profile.sum_dailies` の入口。D-28、W5 プラン
+§6.10 の J1）。Storage に置いてある `daily` を窓ぶん（28 日）読んで素直に足す。
+**`--compare` を付けると、置いてある `profile.parquet` とバイト単位で突き合わせる**
+（一致しなければ終了コード 1）。`profile` は `daily` から作り直せる派生物である——
+**それを確かめるまで `profiles/` の掃除は入れない**（D-22 と同じ作法）。
+
+    ./.venv/bin/python -m bikechance_ml.jobs.build_profiles \\
+        --date 2026-09-23 --from-dailies --compare
 """
 
 import argparse
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Final, Protocol
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from bikechance_ml.baselines import climatology
 from bikechance_ml.config import read_storage_config
@@ -46,7 +55,12 @@ from bikechance_ml.features import profile
 from bikechance_ml.features.grid import jst_yesterday, parquet_hours, profile_path
 from bikechance_ml.io.supabase import PARQUET_BUCKET, open_storage
 from bikechance_ml.jobs import recording
-from bikechance_ml.jobs.build_features import ReadsStorage, load_snapshots, to_parquet_bytes
+from bikechance_ml.jobs.build_features import (
+    ReadsStorage,
+    load_snapshots,
+    read_profile_table,
+    to_parquet_bytes,
+)
 
 #: `job_runs` と `monitored_jobs` に載る名前。**毎日 1 回**（GitHub Actions）。
 JOB_NAME: Final[str] = "build_profiles"
@@ -92,24 +106,16 @@ def read_day(
     return load_snapshots(source, day, cache, hours)
 
 
-def read_table(source: ReadsStorage, day: date, name: str, schema: pa.Schema) -> pa.Table | None:
-    """置いてある版を読む。**無ければ None**（初日と、欠けた日のため）。"""
-    body = source.download(PARQUET_BUCKET, profile_path(day, name))
-    if body is None:
-        return None
-    table = pq.read_table(pa.BufferReader(body))
-    profile.require_schema(table, schema)
-    return table
-
-
 def build_one_day(source: ProfilesPort, day: date, cache: Path | None = None) -> Made:
     """1 日ぶんを作る。**置かない**（副作用は呼ぶ側が決める）。"""
     table, missing = read_day(source, day, cache)
     daily = profile.build_day(
         profile.DayInputs(day=day, table=table, holidays=frozenset(source.list_holidays()))
     )
-    previous = read_table(source, day - _ONE_DAY, profile.PROFILE_NAME, profile.PROFILE_SCHEMA)
-    expired = read_table(
+    previous = read_profile_table(
+        source, day - _ONE_DAY, profile.PROFILE_NAME, profile.PROFILE_SCHEMA
+    )
+    expired = read_profile_table(
         source, day - _ONE_DAY * profile.PROFILE_DAYS, profile.DAILY_NAME, profile.DAILY_SCHEMA
     )
     rolled = profile.roll(previous, daily, expired)
@@ -163,6 +169,58 @@ def build_and_upload(source: ProfilesPort, day: date, cache: Path | None = None)
     return made
 
 
+# ── `daily` から作り直す（`profile.sum_dailies` の入口。D-28）──────────
+@dataclass(frozen=True)
+class Summed:
+    """`daily` を足して作り直した版と、**実際に足した日**。"""
+
+    profile: pa.Table
+    days: tuple[date, ...]
+
+    def body(self) -> bytes:
+        return to_parquet_bytes(self.profile)
+
+
+def window_days(day: date) -> tuple[date, ...]:
+    """`profile(day)` に入る日（`day - 27 … day`）。**転がしの窓と同じ**（`PROFILE_DAYS`）。"""
+    return tuple(day - _ONE_DAY * back for back in range(profile.PROFILE_DAYS - 1, -1, -1))
+
+
+def sum_from_dailies(source: ReadsStorage, day: date) -> Summed:
+    """**置いてある `daily` だけから** `profile(day)` を作り直す。毎時の観測は読まない。
+
+    **無い日は飛ばす**（転がしと同じ。収集を始める前の日には `daily` が無い）。足した日は
+    `days` に残るので、窓に穴があれば数で分かる。**読んだそばから畳む**（`sum_dailies` に
+    生成器を渡す）ので、28 日ぶんを一度に抱えない。
+    """
+    found: list[date] = []
+
+    def dailies() -> Iterator[pa.Table]:
+        for one in window_days(day):
+            table = read_profile_table(source, one, profile.DAILY_NAME, profile.DAILY_SCHEMA)
+            if table is not None:
+                found.append(one)
+                yield table
+
+    summed = profile.sum_dailies(dailies())
+    return Summed(profile=summed, days=tuple(found))
+
+
+def compare_with_stored(source: ReadsStorage, day: date, summed: Summed) -> dict[str, object]:
+    """作り直した版を、**置いてある `profile.parquet` とバイト単位で**突き合わせる。
+
+    **読み直した表どうしではなく、置いてあるバイト列そのもの**と比べる——同じ表から
+    同じバイト列が出ること（`to_parquet_bytes`）まで含めて確かめるためである。
+    """
+    stored = source.download(PARQUET_BUCKET, profile_path(day, profile.PROFILE_NAME))
+    body = summed.body()
+    return {
+        "identical": stored is not None and stored == body,
+        "stored_bytes": None if stored is None else len(stored),
+        "summed_bytes": len(body),
+    }
+
+
 # ── 実行 ──────────────────────────────────────────────────────
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ポートプロファイルを 1 日ぶん作る")
@@ -170,12 +228,24 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--cache", default=None, help="毎時 Parquet の置き場")
     parser.add_argument("--out", default=None, help="書き出し先のディレクトリ")
     parser.add_argument("--upload", action="store_true", help="Storage に置く")
+    parser.add_argument(
+        "--from-dailies",
+        action="store_true",
+        help="転がさず、置いてある daily を 28 日ぶん足して作り直す（置かない）",
+    )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="--from-dailies の結果を置いてある profile.parquet とバイト単位で比べる",
+    )
     return parser.parse_args(argv)
 
 
 def run(argv: Sequence[str] | None = None) -> int:
     args = _arguments(argv)
     day = date.fromisoformat(args.date) if args.date else jst_yesterday(datetime.now(UTC))
+    if args.from_dailies or args.compare:
+        return _run_from_dailies(args, day)
     with open_storage(read_storage_config()) as source:
         made = (
             build_and_upload(source, day, _path(args.cache))
@@ -185,6 +255,36 @@ def run(argv: Sequence[str] | None = None) -> int:
     _write(args.out, made)
     print(json.dumps({"date": day.isoformat(), **made.summary}, ensure_ascii=False))
     return 0
+
+
+def _run_from_dailies(args: argparse.Namespace, day: date) -> int:
+    """`--from-dailies` の道。**置かない**——作り直した版を置くのは掃除を入れるときに決める。"""
+    if not args.from_dailies:
+        print("--compare は --from-dailies と一緒に使います", file=sys.stderr)
+        return 2
+    if args.upload:
+        print(
+            "--from-dailies は置きません（作り直した版を置くのは掃除を入れるときに決める。D-28）",
+            file=sys.stderr,
+        )
+        return 2
+    with open_storage(read_storage_config()) as source:
+        summed = sum_from_dailies(source, day)
+        compared = compare_with_stored(source, day, summed) if args.compare else {}
+    if args.out:
+        directory = Path(args.out)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{profile.PROFILE_NAME}.parquet").write_bytes(summed.body())
+    summary = {
+        "date": day.isoformat(),
+        "from_dailies": True,
+        "dailies": len(summed.days),
+        "first_day": summed.days[0].isoformat() if summed.days else None,
+        **profile.summarize(summed.profile, min_days=climatology.MIN_CELL_DAYS),
+        **compared,
+    }
+    print(json.dumps(summary, ensure_ascii=False))
+    return 1 if args.compare and not compared.get("identical") else 0
 
 
 def _path(value: str | None) -> Path | None:

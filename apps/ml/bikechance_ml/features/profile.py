@@ -18,29 +18,39 @@
 判断で、そのために `n_suspended` を別に数えてある。
 
 **ここは純粋な部分だけを持つ。** Parquet を読むのも置くのも `jobs/build_profiles.py`。
+
+**特徴量（`prof_*`）もここから引く**（W5 プラン §6.10 の PR J1）。引き方は `Lookup` の 1 つで、
+学習（`build_day`）も推論（`build_now`）も同じものを通る。
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Final
 
 import numpy as np
+import numpy.typing as npt
 import pyarrow as pa
 import pyarrow.compute as pc
 
 from bikechance_ml.features import asof, exclude, flow, labels
-from bikechance_ml.features.arrays import Bools, Int16, Int32, Int64
-from bikechance_ml.features.calendar import DowType, day_type, dow_type
+from bikechance_ml.features.arrays import Bools, Float32, Float64, Int16, Int32, Int64
+from bikechance_ml.features.calendar import DOW_TYPE_ORDER, DowType, day_type, dow_type
 from bikechance_ml.features.constants import GRID_MINUTES, MISSING
 from bikechance_ml.features.grid import Grid, build_grid
+from bikechance_ml.features.schema import PROFILE_COLUMNS
+
+_MINUTES_PER_DAY: Final[int] = 24 * 60
+
+#: 1 枠の長さ（分）。
+SLOT_MINUTES: Final[int] = 15
 
 #: 1 日を 15 分で割った枠の数。**`baselines/climatology.py` の `SLOTS_PER_DAY` と同じ値**
 #: でなければ、B2 のセルとプロファイルのセルが別のものになる（W5-01）。
-SLOTS_PER_DAY: Final[int] = 24 * 60 // 15
+SLOTS_PER_DAY: Final[int] = _MINUTES_PER_DAY // SLOT_MINUTES
 
 #: 1 枠に入る 5 分格子点の数。**3**（15 ÷ 5）。`daily` の `n` の上限でもある。
-GRID_POINTS_PER_SLOT: Final[int] = 15 // GRID_MINUTES
+GRID_POINTS_PER_SLOT: Final[int] = SLOT_MINUTES // GRID_MINUTES
 
 #: プロファイルの窓（日）。開発プラン §6.3 の「過去 28 日（前日まで）」。
 #: **待つための数ではなく、忘れるための数である**（W5-03）。
@@ -331,15 +341,26 @@ def roll(previous: pa.Table | None, today: pa.Table, expired: pa.Table | None) -
     return _fold(parts)
 
 
-def sum_dailies(dailies: Sequence[pa.Table]) -> pa.Table:
-    """`daily` を素直に足し合わせる。**転がしの答え合わせ**（検算）に使う。
+def sum_dailies(dailies: Iterable[pa.Table]) -> pa.Table:
+    """`daily` を素直に足し合わせる。**転がしの答え合わせ**（検算）と、作り直しに使う。
 
-    転がし（`roll`）と結果が食い違えば、どこかで足し引きが崩れている。
-    **本番では使わない**（28 ファイルを読むことになる）。
+    転がし（`roll`）と結果が食い違えば、どこかで足し引きが崩れている。**毎日の転がしには
+    使わない**（28 ファイルを読むことになる）。入口は `build_profiles --from-dailies`（D-28）。
+
+    **1 日ずつ畳む。** 全日を 1 つの表につないでから畳むと、17 日ぶんで山が **11.7 GB**
+    になった（2026-09-24、手元の `peak memory footprint`）。1 日ずつなら **5.7 GB**（7 日ぶんで
+    4.2 GB）。残る山は**文字列 3 列を鍵にした `group_by` の 1 段ぶん**で、毎日の転がし（`roll`）と
+    同じ `_fold` である（pyarrow 自身の確保の最大が 7.3 GB。解放を毎段呼んでも変わらない）。
+    和は足す順に依らず、どの段でも足すだけ（引かない）なので `n_days > 0` で消えるセルも
+    無い——**畳み方を変えても結果は同じ表になる**（`tests/test_build_profiles.py` と、本番の
+    3 日ぶんでバイト単位で確かめた）。渡すのが生成器なら、**読んだそばから畳んで捨てられる**。
     """
+    total: pa.Table | None = None
     for one in dailies:
         require_schema(one, DAILY_SCHEMA)
-    return _fold([_as_profile(one, +1) for one in dailies])
+        added = _as_profile(one, +1)
+        total = _fold([added] if total is None else [total, added])
+    return PROFILE_SCHEMA.empty_table() if total is None else total
 
 
 def _as_profile(daily: pa.Table, sign: int) -> pa.Table:
@@ -440,3 +461,220 @@ def _suspended_share(profile: pa.Table) -> float:
     if total == 0:
         return 0.0
     return round(int(pc.sum(profile.column("n_suspended")).as_py() or 0) / total, 6)
+
+
+# ── 特徴量として引く（純粋。W5 プラン §6.10 の PR J1）──────────────
+#: 日数の列。**NULL にしない**（0 ＝ 履歴が無い）。値の列とは扱いが違うので名前で分ける。
+DAYS_COLUMN: Final[str] = "prof_n_days"
+
+#: 値の列（`features/schema.py` の `PROFILE_COLUMNS` から日数を除いたもの）。
+VALUE_COLUMNS: Final[tuple[str, ...]] = tuple(
+    name for name in PROFILE_COLUMNS if name != DAYS_COLUMN
+)
+
+#: `prof_*` を作るのに読む和の列。**`n_suspended` は読まない**——休止していた時間も分母に
+#: 入れる（B2 と同じ定義。W5-01。`baselines/profile_climatology.py` の `fit`）。
+_SUMMED: Final[tuple[str, ...]] = (
+    "n",
+    "n_bike_ok",
+    "n_dock_ok",
+    "sum_bikes",
+    "sum_bikes_sq",
+    "sum_rentals_60",
+    "sum_returns_60",
+)
+
+#: `(system_id, station_id)` を 1 本の文字列にするときの区切り。**`eval/dataset.port_keys`
+#: と同じ**（`system_id` は `SYSTEM_IDS` の 2 つに限られ、区切りを含まない）。
+_PORT_SEPARATOR: Final[str] = "/"
+
+
+def target_slot(minute_of_day: npt.ArrayLike, h_min: npt.ArrayLike) -> Int64:
+    """目標時刻 `t + h` の 15 分枠（0〜95）。**B2 と `prof_*` が同じ規則で引く 1 か所**（W5-01）。
+
+    **日をまたいだら 0 に戻る。** 曜日種別のほうは呼ぶ側が**目標の日**で決める
+    （`target_dow_type`）。`baselines/climatology.py` の `slot15` もここを通る——
+    **2 か所に書くと、片方を直したときに B2 と `prof_*` が別のセルを指す**。
+    """
+    minute = np.asarray(minute_of_day, dtype=np.int64) + np.asarray(h_min, dtype=np.int64)
+    return np.asarray((minute % _MINUTES_PER_DAY) // SLOT_MINUTES, dtype=np.int64)
+
+
+@dataclass(frozen=True)
+class Edition:
+    """**どの日の版か**を一緒に持ったプロファイル（`profile(day)`）。`prof_*` の源。
+
+    日付を持つのは記録に出すためである——**どの版で作った特徴量か**が後から読める
+    （`DayStats.profile_date`・`inference_log.detail.profile_date`）。読む版の規則は
+    「基準時刻の前日」（`source_day`）で、学習も推論も同じ。
+    """
+
+    day: date
+    table: pa.Table
+
+
+class CorruptProfileError(ValueError):
+    """プロファイルの表が壊れている（同じセルが 2 行ある、格子点が 0 のセルがある）。
+
+    **黙って片方を使わない。** `_fold` は鍵でまとめて `n_days > 0` のセルだけを残し、
+    `daily` は `n > 0` のセルしか書かないので、正しく作った表では起きない。
+    """
+
+
+@dataclass(frozen=True)
+class Cells:
+    """行ごとに引いた `prof_*`。**セルが無い行は値が NaN、日数が 0。**"""
+
+    values: Mapping[str, Float32]
+    n_days: Int16
+
+
+@dataclass(frozen=True)
+class Lookup:
+    """プロファイルを `(ポート, 曜日種別, 枠)` で引ける形にしたもの。**`prof_*` の源。**
+
+    **持つのは在るセルだけ**で、鍵（整数）を昇順に並べて `np.searchsorted` で引く。
+    全ポート × 3 × 96 の格子は確保しない——**J2 で推論が要る枠だけを読んだ表**
+    （W5 プラン §6.10 の「先に測った」①）を渡しても、同じ形で引ける。
+
+    **ポートの番号は台帳の並び**（`StationFacts.station_keys()`）で、組み立ての行と
+    同じ番号で引く。台帳に無いポートの行は捨ててある。**鍵の整数はこのクラスの中だけで
+    使う**（作るのも引くのも `_cell_key`）。外へ出さないので、B2 の成果物の番号
+    （`baselines/climatology.cell_key`）と揃える必要は無い。
+    """
+
+    #: 版の日付。**渡されなかったら None**（推論は J2 までこちらを通る）
+    day: date | None
+    keys: Int64
+    values: Mapping[str, Float32]
+    n_days: Int16
+
+    def take(self, port: Int64, dow_type: Int64, slot: Int64) -> Cells:
+        """行ごとに引く。**無いセルは NaN と 0**（値を 0 で埋めない。日数の 0 は「無い」）。"""
+        wanted = _cell_key(port, dow_type, slot)
+        if self.keys.size == 0:
+            return _missing(len(wanted))
+        index = np.clip(np.searchsorted(self.keys, wanted), 0, self.keys.size - 1)
+        found = np.asarray(self.keys[index] == wanted, dtype=np.bool_)
+        return Cells(
+            values={
+                name: np.asarray(np.where(found, values[index], np.nan), dtype=np.float32)
+                for name, values in self.values.items()
+            },
+            n_days=np.asarray(np.where(found, self.n_days[index], 0), dtype=np.int16),
+        )
+
+
+def lookup(edition: Edition | None, ports: Sequence[tuple[str, str]]) -> Lookup:
+    """プロファイルを**台帳の並び**（`ports`）で引ける形にする。**渡されなければ空。**
+
+    台帳に無いポートの行は捨てる（引かれることが無い）。**台帳にあってプロファイルに無い
+    ポート**は、引くと NaN と 0 になる——その日現れた新しいポートと同じ扱いである。
+    """
+    if edition is None:
+        return _nothing()
+    table = edition.table
+    require_schema(table, PROFILE_SCHEMA)
+    port = _port_index(table, ports)
+    inside = port >= 0
+    keys = _cell_key(port[inside], _dow_index(table)[inside], _int64(table, "slot15")[inside])
+    order = np.argsort(keys, kind="stable")
+    ordered = np.asarray(keys[order], dtype=np.int64)
+    _refuse_duplicates(ordered)
+    summed = {name: _float64(table, name)[inside][order] for name in _SUMMED}
+    if bool(np.any(summed["n"] <= 0)):
+        raise CorruptProfileError("格子点が 0 のセルがある（n <= 0）")
+    return Lookup(
+        day=edition.day,
+        keys=ordered,
+        values={name: np.asarray(one, dtype=np.float32) for name, one in derive(summed).items()},
+        n_days=np.asarray(_int64(table, "n_days")[inside][order], dtype=np.int16),
+    )
+
+
+def derive(summed: Mapping[str, Float64]) -> dict[str, Float64]:
+    """セルの和から `prof_*` を作る。**割るのはここだけ**（表は割らずに持つ。このファイルの冒頭）。
+
+    `prof_p_bike` は **B2 の率そのもの**（`n_bike_ok / n`。休止も分母に入る。W5-01）。
+    流量の 2 列は **60 分の窓の和を格子点の数で割る**ので「1 時間あたり」になる
+    （`SUM_TYPES` の注記）。
+    """
+    points = summed["n"]
+    mean = summed["sum_bikes"] / points
+    variance = summed["sum_bikes_sq"] / points - mean * mean
+    return {
+        "prof_p_bike": summed["n_bike_ok"] / points,
+        "prof_p_dock": summed["n_dock_ok"] / points,
+        "prof_mean_bikes": mean,
+        # **0 で止める。** 全点が同じ台数のセルでは、丸めで -1e-16 のような値が出る
+        "prof_std_bikes": np.sqrt(np.maximum(variance, 0.0)),
+        "prof_rentals_per_hour": summed["sum_rentals_60"] / points,
+        "prof_returns_per_hour": summed["sum_returns_60"] / points,
+    }
+
+
+def _cell_key(port: Int64, dow_type: Int64, slot: Int64) -> Int64:
+    """`(ポート, 曜日種別, 枠)` を 1 本の整数にする。**`Lookup` の中だけで使う**（上の注記）。"""
+    return np.asarray(
+        (np.asarray(port, dtype=np.int64) * len(DOW_TYPE_ORDER) + dow_type) * SLOTS_PER_DAY + slot,
+        dtype=np.int64,
+    )
+
+
+def _port_index(table: pa.Table, ports: Sequence[tuple[str, str]]) -> Int64:
+    """行のポートを**台帳の番号**にする。台帳に無ければ -1。
+
+    鍵は `(system_id, station_id)` の組で、**`station_id` だけで引かない**（システムを跨いで
+    2,608 件が衝突する。`baselines/climatology._key` と同じ理由）。600 万行を Python の
+    文字列にしないよう、つなぐのも引くのも pyarrow の中で済ませる。
+    """
+    if not ports:
+        return np.full(table.num_rows, -1, dtype=np.int64)
+    names = pc.binary_join_element_wise(
+        table.column("system_id"), table.column("station_id"), _PORT_SEPARATOR
+    )
+    wanted = pa.array(
+        [f"{system_id}{_PORT_SEPARATOR}{station_id}" for system_id, station_id in ports],
+        type=pa.string(),
+    )
+    index = pc.index_in(names, value_set=wanted)
+    return np.asarray(index.fill_null(-1).to_numpy(), dtype=np.int64)
+
+
+def _dow_index(table: pa.Table) -> Int64:
+    """曜日種別を **`DOW_TYPE_ORDER` の番号**にする（`eval/dataset.dow_type_indices` と同じ）。"""
+    order = pa.array(DOW_TYPE_ORDER, type=pa.string())
+    index = pc.index_in(table.column("dow_type"), value_set=order)
+    if index.null_count:
+        raise CorruptProfileError("dow_type に想定外の値が入っている")
+    return np.asarray(index.to_numpy(), dtype=np.int64)
+
+
+def _refuse_duplicates(ordered: Int64) -> None:
+    if ordered.size > 1 and bool(np.any(ordered[1:] == ordered[:-1])):
+        raise CorruptProfileError("同じセルが 2 行ある")
+
+
+def _nothing() -> Lookup:
+    """**渡されなかった**ときの表。引くと全部 NaN と 0 になる（J1 の推論はこちら）。"""
+    return Lookup(
+        day=None,
+        keys=np.zeros(0, dtype=np.int64),
+        values={name: np.zeros(0, dtype=np.float32) for name in VALUE_COLUMNS},
+        n_days=np.zeros(0, dtype=np.int16),
+    )
+
+
+def _missing(count: int) -> Cells:
+    return Cells(
+        values={name: np.full(count, np.nan, dtype=np.float32) for name in VALUE_COLUMNS},
+        n_days=np.zeros(count, dtype=np.int16),
+    )
+
+
+def _int64(table: pa.Table, name: str) -> Int64:
+    return np.asarray(table.column(name).to_numpy(), dtype=np.int64)
+
+
+def _float64(table: pa.Table, name: str) -> Float64:
+    return np.asarray(table.column(name).to_numpy(), dtype=np.float64)

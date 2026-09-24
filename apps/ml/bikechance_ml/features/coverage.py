@@ -32,7 +32,10 @@ from typing import Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from bikechance_ml.features.schema import WEATHER_COLUMNS
+from bikechance_ml.features.schema import PROFILE_COLUMNS, WEATHER_COLUMNS
+
+#: `prof_*` の日数の列。**これが 0 より大きい行を「入っている」とする**（値の列は NULL になる）。
+_PROFILE_DAYS: Final[str] = "prof_n_days"
 
 #: 日ごとの被覆の差がこれを超えたら、明示しない限り当てはめない（パーセントポイント）。
 #:
@@ -63,7 +66,10 @@ class MixedWeatherError(RuntimeError):
 
 @dataclass(frozen=True)
 class Coverage:
-    """1 つの表の天気の被覆。**割合ではなく件数で持つ**（足し合わせられる）。
+    """1 つの表の被覆。**割合ではなく件数で持つ**（足し合わせられる）。
+
+    天気（`measure`）と `prof_*`（`measure_profile`）の 2 つに使う。以下は天気の場合の説明で、
+    `prof_*` では `covered` が「`prof_n_days > 0` の行」になる。
 
     `covered` は **4 列すべてが非 NULL の行**である。列ごとの数も持つのは、4 つが
     同じ行で欠けるとは限らないため——引く時間帯が違う（降水は `t` を含む時間帯と
@@ -105,6 +111,22 @@ def measure(table: pa.Table) -> Coverage:
         rows=table.num_rows,
         covered=_true(covered),
         by_column={name: _true(one) for name, one in valid.items()},
+    )
+
+
+def measure_profile(table: pa.Table) -> Coverage:
+    """表の `prof_*` の被覆を数える（W5 プラン §6.10 の PR J1）。
+
+    **入っているとは `prof_n_days > 0`。** 版（v4）は「`prof_*` の列が在る」しか語らず、
+    **前日の版が無かった日は全行が NULL** になる（2026-09-07 は `profile(09-06)` が無い）。
+    天気と同じく、**表を読んだ人がその場で数える。** 値の 6 列の数も持つ——
+    **日数と値は同じ行で揃うはず**で、揃っていなければ引き方が壊れている（`is_uniform`）。
+    """
+    values = [name for name in PROFILE_COLUMNS if name != _PROFILE_DAYS]
+    return Coverage(
+        rows=table.num_rows,
+        covered=_true(pc.greater(table.column(_PROFILE_DAYS), 0)),
+        by_column={name: _true(pc.is_valid(table.column(name))) for name in values},
     )
 
 

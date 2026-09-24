@@ -132,6 +132,11 @@ def read_features(
       3. **他系統の直近**（近傍の集計に要るのは「いまの状態」だけ。§6.3）
       4. **`at` までに入手できた予報**（`weather.serving_window`。W4 プラン §6.4）
 
+    **ポートプロファイルはまだ読まない**（W5 プラン §6.10 の J1）。`prof_*` の 6 列は NULL、
+    `prof_n_days` は 0 で出る——配っている B3 は `prof_*` を読まないので確率は変わらない。
+    **読むのは J2**（前日の版。下りとメモリを測ってから）で、それまで **`prof_*` を使う
+    モデルは配らない**（W5 プラン §9 の契約 29）。
+
     返すのは**使った参照スナップショットの日付**と組み立ての結果。日付を返すのは、
     00:00〜05:00 JST に 1 つ古い版を使うことがあるため（`read_reference_available`）。
     """
@@ -152,6 +157,8 @@ def read_features(
             reference=build.Reference(facts=facts, links=links, holidays=holidays),
             table=pa.concat_tables(tables),
             weather=weather.to_weather(port.list_weather(*weather.serving_window(at))),
+            # **J1 では読まない。** 読んでいないことは `detail.profile_date = null` に出る
+            profile=None,
         )
     )
     return reference_day, ready
@@ -240,8 +247,10 @@ class InferSummary:
     #: 配った版の種類（`baseline` / `lightgbm`）。**何を配ったかが後から読める**
     model_kind: str = ""
     #: その版を**当てはめたときの**特徴量の版。**`feature_set` と一致しなくてよい**
-    #: （ベースラインが読む 6 列は v0 から v3 まで変わっていない。W4-17）
+    #: （ベースラインが読む 6 列は v0 から v4 まで変わっていない。W4-17）
     model_feature_set: str = ""
+    #: **読んだポートプロファイルの版**の日付。**J1 では読まないので None**（J2 で日付が出る）
+    profile_date: str | None = None
     #: 予測ログ（`forecast-log/`）を置けたか。`"ok"` か `"failed:<例外の種類>"`。
     #: **置けなくても推論は落とさない**ので（D-24）、失敗はここにしか出ない。
     #: 試し打ちは何も書かないので空のままになる
@@ -519,6 +528,7 @@ def _completed(
         feature_set=ready.stats.feature_set,
         model_kind=predictor.kind,
         model_feature_set=predictor.feature_set,
+        profile_date=ready.stats.profile_date,
         forecast_log=forecast_log_status,
     )
 
@@ -685,11 +695,14 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         "stations_without_weather": summary.n_without_weather,
         "stations_unreferenced": summary.n_unreferenced,
         # **いま作っている**特徴量の版。`model_feature_set` は**当てはめたときの**版で、
-        # **一致しなくてよい**（ベースラインが読む 6 列は v0 から v3 まで変わっていない。
+        # **一致しなくてよい**（ベースラインが読む 6 列は v0 から v4 まで変わっていない。
         # W4-17）。両方を出さないと、版を上げたことが記録から読めない
         "feature_set": summary.feature_set,
         "model_kind": summary.model_kind,
         "model_feature_set": summary.model_feature_set,
+        # **読んだポートプロファイルの版。J1 では null**——`feature_set` が v4 でも
+        # `prof_*` は NULL で配っていることが、記録から読める（W5 プラン §6.10、契約 29）
+        "profile_date": summary.profile_date,
         # **試し打ちのときだけ載せる。** 通常の推論では 0 と空になる
         **(
             {"predicted": summary.n_predicted, "sample": dict(summary.sample)}

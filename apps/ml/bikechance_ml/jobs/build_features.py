@@ -36,12 +36,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bikechance_ml.config import read_storage_config
-from bikechance_ml.features import build, neighbors, static, weather
+from bikechance_ml.features import build, neighbors, profile, static, weather
 from bikechance_ml.features.constants import LOOKAHEAD_HOURS, LOOKBACK_HOURS
 from bikechance_ml.features.grid import (
     features_path,
     jst_yesterday,
     parquet_hours,
+    profile_path,
     reference_path,
 )
 from bikechance_ml.features.reference import SystemReference
@@ -192,6 +193,7 @@ def to_inputs(
     holidays: frozenset[date],
     table: pa.Table,
     forecast: weather.Weather,
+    edition: profile.Edition | None,
 ) -> build.DayInputs:
     """参照データと Parquet を、組み立ての入力に直す。"""
     facts = static.to_facts(systems, estimates)
@@ -201,7 +203,36 @@ def to_inputs(
         reference=build.Reference(facts=facts, links=links, holidays=holidays),
         table=table,
         weather=forecast,
+        profile=edition,
     )
+
+
+def read_profile_table(
+    source: ReadsStorage, day: date, name: str, schema: pa.Schema
+) -> pa.Table | None:
+    """その日の `profiles/` の 1 つを読む。**無ければ None**（初日と、欠けた日のため）。
+
+    **ファイル自身の列を確かめる**（`profile.require_schema`）。`build_profiles` の転がしも
+    同じ関数で読む——読み方を 2 つ作らない。
+    """
+    body = source.download(PARQUET_BUCKET, profile_path(day, name))
+    if body is None:
+        return None
+    table = pq.read_table(pa.BufferReader(body))
+    profile.require_schema(table, schema)
+    return table
+
+
+def read_profile(source: ReadsStorage, day: date) -> profile.Edition | None:
+    """**基準日の前日の版**を読む（`profile.source_day`。W5 プラン §6.10 の PR J1）。
+
+    **無ければ None で進む**——`prof_*` の 6 列が NULL、`prof_n_days` が 0 の日になる。
+    止めないのは天気と同じ理由で、**無かったことは記録に出る**（`profile_date` が null、
+    `profile_coverage` が 0%）。**黙って古い版を使わない**（前々日へ落ちない）。
+    """
+    wanted = profile.source_day(day)
+    table = read_profile_table(source, wanted, profile.PROFILE_NAME, profile.PROFILE_SCHEMA)
+    return None if table is None else profile.Edition(day=wanted, table=table)
 
 
 def read_weather(source: FeaturesPort, day: date) -> weather.Weather:
@@ -235,7 +266,8 @@ def build_one_day(source: FeaturesPort, day: date, cache: Path | None = None) ->
     holidays = frozenset(source.list_holidays())
     table, missing = load_snapshots(source, day, cache)
     forecast = read_weather(source, day)
-    built = build.build_day(to_inputs(day, systems, estimates, holidays, table, forecast))
+    edition = read_profile(source, day)
+    built = build.build_day(to_inputs(day, systems, estimates, holidays, table, forecast, edition))
     body = to_parquet_bytes(built.table)
     return Made(
         body=body,

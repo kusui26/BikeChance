@@ -26,6 +26,7 @@ from typing import Final, Protocol
 import numpy as np
 
 from bikechance_ml.eval.dataset import Samples, Target
+from bikechance_ml.features import profile
 from bikechance_ml.features.arrays import Bools, Float64, Int32, Int64
 from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 
@@ -72,8 +73,6 @@ MIN_CELL_ROWS: Final[int] = 30
 #: `n_days` を持ち、**下限は読む側が決める**（W5-03）。`build_profiles` の要約も
 #: この値を渡されて数える——以前は同じ `2` がプロファイル側にも在った。
 MIN_CELL_DAYS: Final[int] = 3
-
-_MINUTES_PER_DAY: Final[int] = 24 * 60
 
 
 @dataclass(frozen=True)
@@ -153,9 +152,12 @@ class Own:
 
 
 def slot15(samples: Samples) -> Int64:
-    """到着時刻 `t + h` の 15 分枠（0〜95）。**日をまたいでも枠は 0 に戻る。**"""
-    minute = (samples.minute_of_day.astype(np.int64) + samples.h_min) % _MINUTES_PER_DAY
-    return np.asarray(minute // 15, dtype=np.int64)
+    """到着時刻 `t + h` の 15 分枠（0〜95）。**日をまたいでも枠は 0 に戻る。**
+
+    **規則は `features/profile.target_slot` の 1 か所**（W5-01）。特徴量の `prof_*` も
+    そこを通るので、**B2 と `prof_*` が別のセルを指すことが構造的に起きない**。
+    """
+    return profile.target_slot(samples.minute_of_day, samples.h_min)
 
 
 def fit(

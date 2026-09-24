@@ -19,9 +19,12 @@ import pyarrow as pa
 import pytest
 
 from bikechance_ml.baselines import climatology
+from bikechance_ml.eval.dataset import Samples, dow_type_indices
 from bikechance_ml.features import asof, exclude, profile
-from bikechance_ml.features.constants import GRID_POINTS_PER_DAY, MISSING
+from bikechance_ml.features.calendar import DOW_TYPE_ORDER
+from bikechance_ml.features.constants import GRID_POINTS_PER_DAY, HORIZONS_MIN, MISSING
 from bikechance_ml.features.grid import JST, build_grid, profile_path
+from bikechance_ml.features.schema import PROFILE_COLUMNS
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from tests import profile_fixture as pf
 
@@ -341,3 +344,239 @@ def test_the_profile_no_longer_holds_a_floor() -> None:
     プロファイルは切らないので、下限を持たない。持ち主は読む側（D-30）。
     """
     assert not hasattr(profile, "MIN_CELL_DAYS")
+
+
+# ── 特徴量として引く（W5 プラン §6.10 の PR J1）───────────────────
+#: 引く検査で使う台帳。**ポートの番号はこの並び**（`StationFacts.station_keys()` の代わり）。
+LEDGER: Final[tuple[tuple[str, str], ...]] = (("hellocycling", "a"), ("hellocycling", "b"))
+WEEKDAY: Final[int] = DOW_TYPE_ORDER.index("weekday")
+SAT: Final[int] = DOW_TYPE_ORDER.index("sat")
+
+
+def profile_table(rows: list[dict[str, object]]) -> pa.Table:
+    """`profile.parquet` と同じ形の表。**書いていない和は 0**（鍵と `n_days`・`n` は必ず書く）。"""
+    filled = [{name: row.get(name, 0) for name in profile.PROFILE_SCHEMA.names} for row in rows]
+    return pa.Table.from_pylist(filled, schema=profile.PROFILE_SCHEMA)
+
+
+def one_cell(**values: object) -> dict[str, object]:
+    """`a` の平日・枠 33（08:15〜08:30）。**値は引数で上書きする。**"""
+    base: dict[str, object] = {
+        "system_id": "hellocycling",
+        "station_id": "a",
+        "dow_type": "weekday",
+        "slot15": 33,
+        "n_days": 2,
+        "n": 6,
+    }
+    return {**base, **values}
+
+
+def take_one(table: pa.Table, port: int, dow: int, slot: int) -> profile.Cells:
+    edition = profile.Edition(day=date(2026, 9, 6), table=table)
+    found = profile.lookup(edition, LEDGER)
+    return found.take(np.array([port]), np.array([dow]), np.array([slot]))
+
+
+def test_the_target_slot_is_the_arrivals_quarter_hour() -> None:
+    """**目標時刻 `t + h` の 15 分枠。** 基準時刻の枠ではない。"""
+    assert int(profile.target_slot(8 * 60, 15)) == 33  # 08:15 着 → 08:15〜08:30
+    assert int(profile.target_slot(8 * 60 + 10, 5)) == 33  # 08:15 着（端は含む）
+    assert int(profile.target_slot(8 * 60 + 10, 4)) == 32  # 08:14 着はひとつ前
+
+
+def test_the_target_slot_wraps_after_midnight() -> None:
+    """**日をまたいだら 0 に戻る**（曜日種別は呼ぶ側が翌日に切り替える）。"""
+    assert int(profile.target_slot(23 * 60 + 50, 20)) == 0  # 00:10
+    assert int(profile.target_slot(23 * 60 + 55, 180)) == 11  # 02:55
+    assert int(profile.target_slot(0, 5)) == 0
+
+
+def test_b2_and_prof_share_the_slot_rule() -> None:
+    """**B2（`climatology.slot15`）と `prof_*` は同じ関数で枠を決める**（W5-01）。
+
+    全格子点 × 全水平で突き合わせる。**2 か所に書いて片方を直すと、B2 と `prof_*` が
+    別のセルを指す**——例外は出ず、値だけがずれる。
+    """
+    minutes = np.repeat(np.arange(0, 24 * 60, 5, dtype=np.int16), len(HORIZONS_MIN))
+    horizons = np.tile(np.asarray(HORIZONS_MIN, dtype=np.int16), 24 * 60 // 5)
+    rows = len(minutes)
+    samples = Samples(
+        systems=("hellocycling",),
+        ports=("hellocycling/a",),
+        system=np.zeros(rows, dtype=np.int8),
+        port=np.zeros(rows, dtype=np.int32),
+        day=np.zeros(rows, dtype=np.int32),
+        h_min=horizons,
+        minute_of_day=minutes,
+        dow_type=np.zeros(rows, dtype=np.int8),
+        weight=np.ones(rows, dtype=np.float32),
+        labels={},
+        counts={},
+    )
+    assert np.array_equal(climatology.slot15(samples), profile.target_slot(minutes, horizons))
+
+
+def test_the_values_are_derived_from_the_sums() -> None:
+    """**割るのは読むときだけ。** `prof_p_bike` は B2 の率そのもの（`n_bike_ok / n`）。"""
+    table = profile_table(
+        [
+            one_cell(
+                n_bike_ok=3,
+                n_dock_ok=6,
+                sum_bikes=12,
+                sum_bikes_sq=30,
+                sum_rentals_60=18,
+                sum_returns_60=6,
+            )
+        ]
+    )
+    cells = take_one(table, 0, WEEKDAY, 33)
+    assert cells.values["prof_p_bike"][0] == pytest.approx(0.5)
+    assert cells.values["prof_p_dock"][0] == pytest.approx(1.0)
+    assert cells.values["prof_mean_bikes"][0] == pytest.approx(2.0)
+    # 分散は 30/6 − 2² ＝ 1
+    assert cells.values["prof_std_bikes"][0] == pytest.approx(1.0)
+    # **60 分の窓の和を点の数で割る**ので「1 時間あたり」（18 / 6 ＝ 3 台/時）
+    assert cells.values["prof_rentals_per_hour"][0] == pytest.approx(3.0)
+    assert cells.values["prof_returns_per_hour"][0] == pytest.approx(1.0)
+    assert int(cells.n_days[0]) == 2
+
+
+def test_the_suspended_points_stay_in_the_denominator() -> None:
+    """**休止していた点も分母に入る**（B2 と同じ定義。`n_suspended` は読まない）。"""
+    table = profile_table([one_cell(n_suspended=3, n_bike_ok=3)])
+    cells = take_one(table, 0, WEEKDAY, 33)
+    assert cells.values["prof_p_bike"][0] == pytest.approx(0.5)
+
+
+def test_a_missing_cell_is_nan_and_zero_days() -> None:
+    """**無いセルは NaN と 0**（値を 0 で埋めない。日数の 0 は「履歴が無い」）。"""
+    table = profile_table([one_cell()])
+    cells = take_one(table, 0, WEEKDAY, 34)
+    for name in profile.VALUE_COLUMNS:
+        assert np.isnan(cells.values[name][0]), name
+    assert int(cells.n_days[0]) == 0
+
+
+def test_the_dow_type_is_part_of_the_key() -> None:
+    """**同じポート・同じ枠でも、曜日種別が違えば別のセル。** 平日の行が土曜の値を拾わない。"""
+    table = profile_table([one_cell(n_days=2), one_cell(dow_type="sat", n_days=7, n=21)])
+    assert int(take_one(table, 0, WEEKDAY, 33).n_days[0]) == 2
+    assert int(take_one(table, 0, SAT, 33).n_days[0]) == 7
+    assert int(take_one(table, 0, DOW_TYPE_ORDER.index("sun_holiday"), 33).n_days[0]) == 0
+
+
+def test_the_dow_numbers_follow_dow_type_order() -> None:
+    """**番号は `DOW_TYPE_ORDER` の位置**（B2 の `dow_type_indices` と同じ）。3 つとも確かめる。"""
+    rows = [
+        one_cell(dow_type=name, n_days=days, n=3 * days)
+        for name, days in (("sat", 1), ("sun_holiday", 2), ("weekday", 3))
+    ]
+    table = profile_table(rows)
+    names = np.array(DOW_TYPE_ORDER, dtype=np.str_)
+    for name, index in zip(DOW_TYPE_ORDER, dow_type_indices(names), strict=True):
+        expected = {"sat": 1, "sun_holiday": 2, "weekday": 3}[name]
+        assert int(take_one(table, 0, int(index), 33).n_days[0]) == expected
+
+
+def test_the_port_number_is_the_ledgers() -> None:
+    """**ポートの番号は台帳の並び。** プロファイルの行の並びではない。"""
+    table = profile_table([one_cell(station_id="b", n_days=4, n=12), one_cell(n_days=2)])
+    assert int(take_one(table, 0, WEEKDAY, 33).n_days[0]) == 2
+    assert int(take_one(table, 1, WEEKDAY, 33).n_days[0]) == 4
+
+
+def test_a_port_the_ledger_does_not_know_is_dropped() -> None:
+    """**台帳に無いポートは捨てる**（引かれることが無い）。**台帳の別のポートに化けない。**"""
+    table = profile_table([one_cell(station_id="ghost", n_days=9, n=27)])
+    edition = profile.Edition(day=date(2026, 9, 6), table=table)
+    found = profile.lookup(edition, LEDGER)
+    assert found.keys.size == 0
+    assert int(take_one(table, 0, WEEKDAY, 33).n_days[0]) == 0
+
+
+def test_the_station_id_alone_does_not_match_across_systems() -> None:
+    """**鍵は `(system_id, station_id)` の組。** 系統を跨いで同じ番号が 2,608 件ある。"""
+    table = profile_table([one_cell(system_id="docomo-cycle", station_id="a")])
+    assert int(take_one(table, 0, WEEKDAY, 33).n_days[0]) == 0
+
+
+def test_no_edition_gives_nothing_but_nan_and_zero() -> None:
+    """**渡されなければ空**（J1 の推論はこちら）。
+
+    版の日付も None で、記録に「読んでいない」と出る。
+    """
+    found = profile.lookup(None, LEDGER)
+    assert found.day is None
+    cells = found.take(np.array([0, 1]), np.array([WEEKDAY, SAT]), np.array([0, 95]))
+    assert all(bool(np.all(np.isnan(values))) for values in cells.values.values())
+    assert cells.n_days.tolist() == [0, 0]
+
+
+def test_a_partial_profile_gives_the_same_values() -> None:
+    """**要る枠だけを読んだ表でも、引ける値は同じ**（J2 は 1 周期 8 枠だけを読む。§6.10 ①）。
+
+    全ポート × 3 × 96 の格子を確保する作りだと、部分の表を渡したときに**無い枠が
+    「0 日」に化ける**ことがある。在るセルだけを持つので、それが起きないことを固定する。
+    """
+    rows = [
+        one_cell(slot15=slot, n_days=1 + slot % 3, n=3 + 3 * (slot % 3), n_bike_ok=slot % 3)
+        for slot in range(profile.SLOTS_PER_DAY)
+    ]
+    full = profile_table(rows)
+    part = profile_table([row for row in rows if 30 <= int(str(row["slot15"])) < 38])
+    for slot in range(30, 38):
+        whole, piece = take_one(full, 0, WEEKDAY, slot), take_one(part, 0, WEEKDAY, slot)
+        assert whole.n_days.tolist() == piece.n_days.tolist()
+        for name in profile.VALUE_COLUMNS:
+            assert whole.values[name].tolist() == piece.values[name].tolist(), (slot, name)
+
+
+def test_the_standard_deviation_never_goes_negative() -> None:
+    """**分散を 0 で止める。** 全点が同じ台数のセルは、丸めで負の小さな値が出る。"""
+    derived = profile.derive(
+        {
+            "n": np.array([3.0]),
+            "n_bike_ok": np.array([0.0]),
+            "n_dock_ok": np.array([0.0]),
+            "sum_bikes": np.array([1.0]),
+            "sum_bikes_sq": np.array([1.0 / 3.0 - 1e-12]),
+            "sum_rentals_60": np.array([0.0]),
+            "sum_returns_60": np.array([0.0]),
+        }
+    )
+    assert derived["prof_std_bikes"].tolist() == [0.0]
+
+
+def test_the_derived_columns_are_the_schemas() -> None:
+    """**作る列と契約の列が同じ**（`features/schema.py` の `PROFILE_COLUMNS`）。"""
+    ones = {name: np.ones(1) for name in ("n", "n_bike_ok", "n_dock_ok", "sum_bikes")}
+    zeros = {name: np.zeros(1) for name in ("sum_bikes_sq", "sum_rentals_60", "sum_returns_60")}
+    derived = profile.derive({**ones, **zeros})
+    assert tuple(derived) == profile.VALUE_COLUMNS
+    assert (*profile.VALUE_COLUMNS, profile.DAYS_COLUMN) == PROFILE_COLUMNS
+
+
+@pytest.mark.parametrize(
+    ("rows", "reason"),
+    [
+        ([one_cell(), one_cell()], "同じセルが 2 行"),
+        ([one_cell(n=0)], "格子点が 0"),
+        ([one_cell(dow_type="holiday")], "知らない曜日種別"),
+    ],
+)
+def test_a_corrupt_profile_is_refused(rows: list[dict[str, object]], reason: str) -> None:
+    """**黙って片方を使わない。** 正しく作った表では起きないので、起きたら止める。"""
+    with pytest.raises(profile.CorruptProfileError):
+        take_one(profile_table(rows), 0, WEEKDAY, 33)
+
+
+def test_a_table_of_another_shape_is_refused() -> None:
+    """**`daily` を渡し間違えたら止める**（`n_days` が無い）。"""
+    table = pa.Table.from_pylist(
+        [{name: one_cell().get(name, 0) for name in profile.DAILY_SCHEMA.names}],
+        schema=profile.DAILY_SCHEMA,
+    )
+    with pytest.raises(profile.SchemaMismatchError):
+        profile.lookup(profile.Edition(day=date(2026, 9, 6), table=table), LEDGER)

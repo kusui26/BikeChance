@@ -28,6 +28,7 @@ from bikechance_ml.eval.dataset import to_samples
 from bikechance_ml.features.build import NowStats
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN, MAX_STALENESS_S
 from bikechance_ml.features.grid import JST
+from bikechance_ml.features.schema import PROFILE_COLUMNS
 from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.jobs import forecast_log
 from bikechance_ml.jobs.fit_baseline import build_artifact
@@ -493,6 +494,7 @@ def test_the_record_does_not_repeat_the_columns() -> None:
         "feature_set",
         "model_kind",
         "model_feature_set",
+        "profile_date",
     }
     assert to_record(_summary(cpu_ms=42))["cpu_ms"] == 42
 
@@ -751,8 +753,8 @@ def test_the_diagnostics_are_zero_when_nothing_is_wrong() -> None:
 def test_both_feature_sets_are_recorded() -> None:
     """**作った版と、当てはめたときの版は別物で、両方要る**（W4-17）。
 
-    ベースラインが読む 6 列は v0 から v3 まで変わっていないので、`model_feature_set`
-    が v0 のまま `feature_set` が v3 になるのが正常である。**片方しか出さないと、
+    ベースラインが読む 6 列は v0 から v4 まで変わっていないので、`model_feature_set`
+    が古いまま `feature_set` が v4 になるのが正常である。**片方しか出さないと、
     版を上げたことが記録から読めない。**
     """
     port = ready_port()
@@ -1083,3 +1085,60 @@ def test_a_lightgbm_model_refuses_another_feature_set() -> None:
     port.lightgbm_body = lightgbm_artifact.to_bytes(stale)
     with pytest.raises(FeatureSetMismatchError):
         run_inference(port, "hellocycling", NOW, stale.model_version)
+
+
+# ── ポートプロファイル（W5 プラン §6.10 の PR J1）────────────────
+def test_the_inference_does_not_read_the_profile_yet() -> None:
+    """**J1 の推論はプロファイルを読まない**（J1 の完了条件 2。読むのは J2）。
+
+    **読んでいないことが記録から読める**——`detail.profile_date` が null で出る。
+    `feature_set` は v4 なのに `prof_*` は NULL、という状態を**黙って**作らない。
+    """
+    port = ready_port()
+    run_inference(port, "hellocycling", NOW)
+    assert not any(path.startswith("profiles/") for path in port.downloads)
+    recorded = port.details[0]
+    assert recorded is not None
+    assert recorded["profile_date"] is None
+    assert recorded["feature_set"] == "v4"
+
+
+def test_the_served_table_has_empty_profile_columns() -> None:
+    """**配信の表の `prof_*` は NULL、`prof_n_days` は 0**（契約 29 の「J1 と J2 のあいだ」）。"""
+    _, ready = read_features(ready_port(), "hellocycling", AT, frozenset())
+    table = ready.table
+    assert table.num_rows > 0
+    for name in PROFILE_COLUMNS:
+        if name == "prof_n_days":
+            assert set(table.column(name).to_pylist()) == {0}
+        else:
+            assert table.column(name).null_count == table.num_rows, name
+    assert ready.stats.profile_date is None
+
+
+def test_the_baseline_does_not_read_the_profile_columns() -> None:
+    """**B3 の確率は `prof_*` に左右されない**（J1 の完了条件 4）。
+
+    J1 のマージで配る確率が変わらない根拠はこれである。`prof_*` を**でたらめな値で埋めた
+    表**と NULL のままの表で、**確率も「気候値が引けたか」も 1 ビットも変わらない**ことを
+    見る。B3 が読むのは 6 列（システム・ポート・日・水平・日内分・目標の曜日種別）と台数だけ。
+    """
+    _, ready = read_features(ready_port(), "hellocycling", AT, frozenset())
+    served = ready.table
+    filled = served
+    for index, name in enumerate(PROFILE_COLUMNS):
+        position = filled.schema.get_field_index(name)
+        values = [0.123 * (index + 1) + row % 7 for row in range(served.num_rows)]
+        field = filled.schema.field(name)
+        column = pa.array(
+            [int(one) + 1 for one in values] if name == "prof_n_days" else values, type=field.type
+        )
+        filled = filled.set_column(position, field, column)
+    assert not filled.equals(served), "埋めたつもりの表が元のまま（仕込みの誤り）"
+
+    predictor = BaselinePredictor(artifact=ARTIFACT)
+    plain = predictor.predict("hellocycling", AT, served)
+    noisy = predictor.predict("hellocycling", AT, filled)
+    for target in ("bike", "dock"):
+        assert plain.probability[target].tobytes() == noisy.probability[target].tobytes()
+        assert plain.informed[target].tobytes() == noisy.informed[target].tobytes()

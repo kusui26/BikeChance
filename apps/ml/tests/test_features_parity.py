@@ -1,4 +1,6 @@
-"""学習と推論が**同じ 61 列**を出すこと（W4 プラン §4 の W4-04、§6.3）。
+"""学習と推論が**同じ 68 列**を出すこと（W4 プラン §4 の W4-04、§6.3）。
+
+v4 で `prof_*` の 7 列が入った（W5 プラン §6.10 の PR J1）。
 
 **口約束にしない。** CLAUDE.md §2 の 4 は「特徴量は単一実装を学習と推論で共用する」と
 書いているが、W3 の段 8 の推論は実際には別経路だった（W3 プラン §13.4）。**一致を
@@ -9,6 +11,8 @@
   * **推論が読む窓だけ**でも同じ値になる（`serving_windows`）。ここが崩れると、
     「学習は 25 時間読める、推論は 3 時間しか読めない」がそのまま skew になる
   * ラベルと抽出は推論の出力に**入らない**
+  * **プロファイルを渡したとき**、`prof_*` まで一致する（W5 プラン §6.10 の J1 の完了条件 1）。
+    **渡さないときも**一致する（6 列が NULL・`prof_n_days` が 0。J1 の推論はこちら）
 
 **許容誤差を入れない。** ずれたら「なぜずれたか」を追う（W4 プラン §5.2）。
 """
@@ -33,7 +37,7 @@ from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from bikechance_ml.models import matrix
 from tests import features_fixture as fixture
 
-#: 突き合わせる列。**61 列すべて**（`h_min` を含む）。
+#: 突き合わせる列。**68 列すべて**（`h_min` と `prof_*` を含む）。
 COMPARED = feature_columns()
 
 #: 行を突き合わせる鍵。
@@ -112,13 +116,17 @@ def _now_inputs(
     forecast: weather.Weather | None = None,
     system_id: str = "hellocycling",
 ) -> build.NowInputs:
-    """**予報を渡さなければ学習と同じものを使う**（窓の効果を見たいときだけ渡す）。"""
+    """**予報を渡さなければ学習と同じものを使う**（窓の効果を見たいときだけ渡す）。
+
+    **プロファイルは学習と同じ版を渡す**（J1 の完了条件 1。推論が読み始めるのは J2）。
+    """
     return build.NowInputs(
         at=at,
         system_id=system_id,
         reference=day_inputs.reference,
         table=table,
         weather=day_inputs.weather if forecast is None else forecast,
+        profile=day_inputs.profile,
     )
 
 
@@ -142,9 +150,9 @@ def _serve_all(
     return pa.concat_tables(parts)
 
 
-def _run(windowed: bool) -> tuple[int, int]:
+def _run(windowed: bool, *, with_profile: bool = True) -> tuple[int, int]:
     """`build_day` の出した行を、基準時刻ごとに `build_now` と突き合わせる。"""
-    day_inputs = fixture.build_inputs()
+    day_inputs = fixture.build_inputs(with_profile=with_profile)
     built = build.build_day(day_inputs)
     times = _base_times(built.table)
     matched = 0
@@ -159,10 +167,29 @@ def _run(windowed: bool) -> tuple[int, int]:
 
 # ── 一致 ──────────────────────────────────────────────────────
 def test_build_now_matches_build_day() -> None:
-    """**同じ観測から、同じ 61 列が出る。**"""
+    """**同じ観測から、同じ 68 列が出る。**"""
     times, matched = _run(windowed=False)
     assert times > 0, "突き合わせる基準時刻が無い（フィクスチャを疑う）"
     assert matched > 0, "突き合わせた行が無い"
+
+
+def test_the_profile_columns_are_really_compared() -> None:
+    """**`prof_*` の比較が空回りしていない。** 引けた行と引けなかった行の両方が突き合わさる。
+
+    全行が NULL どうし（あるいは全行が同じ値）なら、上の一致は何も語らない。
+    """
+    built = build.build_day(fixture.build_inputs()).table
+    days = built.column("prof_n_days").to_pylist()
+    assert any(one > 0 for one in days), "引けた行が無い"
+    assert any(one == 0 for one in days), "引けなかった行が無い"
+    assert len(set(built.column("prof_p_bike").drop_null().to_pylist())) > 1
+
+
+def test_build_now_matches_build_day_without_a_profile() -> None:
+    """**渡さないときも一致する**（6 列が NULL・`prof_n_days` が 0）。J1 の推論はこちら。"""
+    times, matched = _run(windowed=False, with_profile=False)
+    assert times > 0
+    assert matched > 0
 
 
 def test_the_serving_window_is_enough() -> None:
@@ -223,9 +250,9 @@ def test_serving_output_has_no_labels_or_weights() -> None:
 
 
 def test_every_feature_column_is_served() -> None:
-    """61 列が 1 つも欠けずに出る。"""
+    """68 列が 1 つも欠けずに出る（v4。v3 の 61 列と `prof_*` の 7 列）。"""
     assert set(COMPARED) <= set(SERVING_SCHEMA.names)
-    assert len(COMPARED) == 61
+    assert len(COMPARED) == 68
 
 
 def test_rows_are_stations_times_horizons() -> None:
@@ -236,7 +263,7 @@ def test_rows_are_stations_times_horizons() -> None:
     assert set(ready.table.column("system_id").to_pylist()) == {"hellocycling"}
     assert ready.table.num_rows == ready.stats.rows
     assert ready.stats.rows == ready.stats.predictable * 10
-    assert ready.stats.feature_set == "v3"
+    assert ready.stats.feature_set == "v4"
 
 
 def test_the_grid_refuses_a_shift_it_does_not_have() -> None:
@@ -337,6 +364,8 @@ def _synthetic_inputs() -> build.DayInputs:
         # **天気は入れない。** ここで見たいのは `minutes_since_last_change` の上限で、
         # 天気の列は両側とも NULL のまま一致する
         weather=weather.empty(),
+        # **プロファイルも入れない**（同じ理由。両側とも NULL と 0 で一致する）
+        profile=None,
     )
 
 
@@ -366,8 +395,8 @@ def test_a_dormant_port_matches_too() -> None:
 def test_the_model_matrix_matches_too() -> None:
     """**学習と推論で、モデルに渡る行列がビットまで同じ。**
 
-    61 列の値が一致するのは上の検査が見ている。ここで見るのは、その値を
-    **62 列の行列に並べた結果**が一致すること——列の順序・型・カテゴリの符号化まで
+    68 列の値が一致するのは上の検査が見ている。ここで見るのは、その値を
+    **69 列の行列に並べた結果**が一致すること——列の順序・型・カテゴリの符号化まで
     含めて、木が同じ位置で同じ値を見るかどうかである。
 
     ずれても例外は出ない。**確率だけが静かに変わる**ので、機械で固定する。
