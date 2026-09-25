@@ -1,9 +1,10 @@
 """どの版を配るか（`models/registry.py`）。
 
-**主題は 3 つ。**
+**主題は 4 つ。**
   * 「いま配る版」の正は **DB**（`model_versions`）で、環境変数ではない（W4-08）
   * **`kind` で読み方が分かれる**のはここ 1 か所だけ
   * **特徴量の版の照合は、特徴量の表を読むモデルにだけ掛ける**（この非対称が肝）
+  * **配信中（active・shadow）の版と同じ名前では、成果物を置かない**（W6-19、契約 38）
 
 配信の経路が `lightgbm` を読み込まないことは `tests/test_serving_imports.py` が見る。
 """
@@ -192,3 +193,65 @@ def test_a_new_version_replaces_the_cache() -> None:
     port.bodies[other.artifact_path] = baseline_to_bytes(renamed)
     registry.load(port, other)
     assert port.fetches == 2
+
+
+# ── 上書きの防止（W6-19、契約 38）──────────────────────────────
+@dataclass
+class ShelfPort:
+    """登録簿を名前で引いて、成果物を置くだけの代役。**置いたものを覚える。**"""
+
+    rows: dict[str, registry.Registered] = field(default_factory=dict)
+    uploads: list[tuple[str, str, bytes, str]] = field(default_factory=list)
+
+    def find_model(self, model_version: str) -> registry.Registered | None:
+        return self.rows.get(model_version)
+
+    def upload(self, bucket: str, path: str, body: bytes, content_type: str) -> None:
+        self.uploads.append((bucket, path, body, content_type))
+
+
+NAME = "baseline-b3-v0-20260928"
+PATH = baseline_path(NAME)
+
+
+def _shelf(status: str | None) -> ShelfPort:
+    """その名前が `status` で登録された登録簿（`None` なら登録が無い）。"""
+    if status is None:
+        return ShelfPort()
+    return ShelfPort(rows={NAME: _registered(NAME, registry.BASELINE_KIND, FEATURE_SET, status)})
+
+
+@pytest.mark.parametrize("status", ["active", "shadow"])
+def test_a_serving_name_is_not_overwritten(status: str) -> None:
+    """**配信中の版と同じ名前では置かない。** 置けば、昇格を経ずに配る値が変わる（所見 157）。"""
+    port = _shelf(status)
+    with pytest.raises(registry.ServingVersionError, match=status):
+        registry.upload_artifact(port, NAME, PATH, b"body", "application/gzip")
+    assert port.uploads == []
+
+
+@pytest.mark.parametrize("status", ["candidate", "retired", None])
+def test_a_name_that_is_not_serving_can_be_put(status: str | None) -> None:
+    """**candidate・retired・登録の無い名前は置ける**（`register_model_version` と同じ範囲）。"""
+    port = _shelf(status)
+    registry.upload_artifact(port, NAME, PATH, b"body", "application/gzip")
+    assert port.uploads == [(registry.MODEL_BUCKET, PATH, b"body", "application/gzip")]
+
+
+def test_refusing_looks_up_only_the_given_name() -> None:
+    """**止めるのは同じ名前だけ。** 別の版が active でも、新しい名前は置ける。"""
+    port = ShelfPort(
+        rows={"other": _registered("other", registry.BASELINE_KIND, FEATURE_SET, "active")}
+    )
+    registry.refuse_serving(port, NAME)
+    with pytest.raises(registry.ServingVersionError):
+        registry.refuse_serving(port, "other")
+
+
+def test_the_serving_statuses_are_the_ones_the_database_protects() -> None:
+    """**DB（0038）の `register_model_version` が登録し直させないのと同じ 2 つ。**
+
+    ここを広げる（例えば candidate を足す）と、当てはめ直しの日課が止まる。狭める
+    （shadow を外す）と、shadow の成果物を黙って差し替えられる。どちらも決め直しである。
+    """
+    assert frozenset({"active", "shadow"}) == registry.SERVING_STATUSES

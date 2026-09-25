@@ -62,8 +62,8 @@ from bikechance_ml.jobs.window import (
     samples_of,
 )
 from bikechance_ml.models import artifact as lightgbm_artifact
-from bikechance_ml.models import forest, matrix
-from bikechance_ml.models.registry import LIGHTGBM_KIND, MODEL_BUCKET
+from bikechance_ml.models import forest, matrix, registry
+from bikechance_ml.models.registry import LIGHTGBM_KIND
 
 #: 版の付け方。**最後の学習日**を入れる（いつまでのデータで作ったかが名前で分かる）。
 VERSION_PREFIX: Final[str] = "lgbm-v0"
@@ -406,7 +406,7 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--out", default=None, help="成果物の書き出し先")
     parser.add_argument("--report", default=None, help="評価の Markdown の出力先")
     parser.add_argument("--card", default=None, help="モデルカードの出力先")
-    parser.add_argument("--upload", action="store_true", help="成果物を Storage に置く")
+    parser.add_argument("--upload", action="store_true", help=registry.UPLOAD_HELP)
     parser.add_argument("--register", action="store_true", help="model_versions に登録する")
     parser.add_argument(
         "--no-profile",
@@ -481,6 +481,9 @@ def run(argv: Sequence[str] | None = None) -> int:
             purge_days=options.purge_days,
             allow_mixed_weather=options.allow_mixed_weather,
         )
+        if options.upload:
+            # **置けない名前なら当てはめる前に止める**（W6-19、契約 38）。名前は学習日で決まる
+            registry.refuse_serving(source, model_version_for(split.fit))
         # **B2 は本番と同じ作り方にする**（`evaluate_baselines` と同じ 1 か所を通す）。
         # 読むのは**学習期間の日だけ**——検証日の版を渡すと、B2 が検証日の観測を
         # 見た状態で測ることになる（`jobs/climate.py`）
@@ -495,15 +498,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         fitted = fit_and_score(window, samples, split, chosen)
         artifact = build_artifact(fitted.forests, split.fit)
         body = lightgbm_artifact.to_bytes(artifact)
-        if options.upload:
-            source.upload(
-                MODEL_BUCKET,
-                lightgbm_artifact.artifact_path(artifact.model_version),
-                body,
-                lightgbm_artifact.CONTENT_TYPE,
-            )
-        if options.register:
-            source.register_model_version(to_registration(artifact, fitted, options.card))
+        _publish(source, options, artifact, body, fitted)
 
     if options.out:
         Path(options.out).write_bytes(body)
@@ -517,6 +512,27 @@ def run(argv: Sequence[str] | None = None) -> int:
     _write(options.card, render_card(artifact, fitted), "モデルカード")
     print(f"{artifact.describe()} / {len(body):,} バイト")
     return 0
+
+
+def _publish(
+    source: SupabaseIo,
+    options: argparse.Namespace,
+    artifact: lightgbm_artifact.LightGbmArtifact,
+    body: bytes,
+    fitted: Fitted,
+) -> None:
+    """置いて登録する。**置く直前にもう 1 度登録簿を引く**（`registry.upload_artifact`）。
+
+    登録（`--register`）は DB の側が配信中の版を登録し直させない（0038）。置く側にも
+    同じ決まりを置いたので、**配信中の名前では、置くのも登録するのも止まる。**
+    """
+    if options.upload:
+        path = lightgbm_artifact.artifact_path(artifact.model_version)
+        registry.upload_artifact(
+            source, artifact.model_version, path, body, lightgbm_artifact.CONTENT_TYPE
+        )
+    if options.register:
+        source.register_model_version(to_registration(artifact, fitted, options.card))
 
 
 def _load(source: SupabaseIo, days: Sequence[date], local: Path | None) -> Window:

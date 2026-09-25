@@ -8,13 +8,33 @@
 **UTC と JST の境目を 2 点で挟む。** `now` は UTC で渡ってくるが、暦日は JST で切る。
 `now.date()` と書いてしまうと **JST の朝 9 時より前に「一昨日まで」になる**——日次の
 当てはめ直しは 08:30 JST 以降に走らせる想定なので、まさにその時間帯で外れる。
+
+**もう 1 つの主題は上書きの防止**（W6 の PR B、W6-19、契約 38）。版の名前は最終学習日
+なので、回し直すと同じ名前になる。**配信中の版と同じ名前なら、当てはめる前に止まり、
+置く直前にもう 1 度確かめる。**
 """
 
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pytest
 
-from bikechance_ml.jobs.fit_baseline import DEFAULT_TRAIN_DAYS, WindowError, run, window
+from bikechance_ml.baselines.artifact import FORMAT_VERSION, artifact_path, from_bytes
+from bikechance_ml.features.constants import FEATURE_SET
+from bikechance_ml.jobs import fit_baseline
+from bikechance_ml.jobs.fit_baseline import (
+    CONTENT_TYPE,
+    DEFAULT_TRAIN_DAYS,
+    WindowError,
+    model_version_for,
+    run,
+    window,
+)
+from bikechance_ml.models import registry
+from tests import eval_fixture
+from tests.test_window import write_samples
 
 #: JST の 2026-09-14 08:30（＝当てはめ直しを走らせる時刻）。**UTC ではまだ 09-13。**
 MORNING = datetime(2026, 9, 13, 23, 30, tzinfo=UTC)
@@ -115,3 +135,129 @@ def test_the_command_refuses_before_it_opens_storage() -> None:
     届いていたら `read_storage_config` が別の失敗を出す。
     """
     assert run(["--from", "2026-09-07", "--days", "3"]) == 2
+
+
+# ── 上書きの防止（W6-19、契約 38）──────────────────────────────
+DAYS = eval_fixture.DAYS
+
+
+def _row(model_version: str, status: str) -> registry.Registered:
+    return registry.Registered(
+        model_version=model_version,
+        kind=registry.BASELINE_KIND,
+        feature_set=FEATURE_SET,
+        artifact_path=artifact_path(model_version),
+        status=status,
+    )
+
+
+@dataclass
+class Shelf:
+    """登録簿と `models` バケットの代役。**引いた名前と、置いたものを覚える。**
+
+    `promoted_from` 回目に引かれたときから、その名前を active と答える——**当てはめの
+    数分のあいだに昇格された**を作る。
+    """
+
+    rows: dict[str, registry.Registered] = field(default_factory=dict)
+    lookups: list[str] = field(default_factory=list)
+    uploads: list[tuple[str, str, bytes, str]] = field(default_factory=list)
+    promoted_from: int | None = None
+
+    def find_model(self, model_version: str) -> registry.Registered | None:
+        self.lookups.append(model_version)
+        if self.promoted_from is not None and len(self.lookups) >= self.promoted_from:
+            return _row(model_version, "active")
+        return self.rows.get(model_version)
+
+    def upload(self, bucket: str, path: str, body: bytes, content_type: str) -> None:
+        self.uploads.append((bucket, path, body, content_type))
+
+
+def _run(shelf: Shelf, root: Path, monkeypatch: pytest.MonkeyPatch, *extra: str) -> int:
+    """**入り口から**走らせる（`--local` の学習サンプル、Storage の代わりに `shelf`）。"""
+    monkeypatch.setattr(fit_baseline, "read_storage_config", lambda: None)
+    monkeypatch.setattr(fit_baseline, "open_storage", lambda config: nullcontext(shelf))
+    return run(["--from", f"{DAYS[0]}", "--to", f"{DAYS[-1]}", "--local", str(root), *extra])
+
+
+def _must_not_fit(*args: object) -> None:
+    raise AssertionError("当てはめに入った（止まるのは当てはめの前のはず）")
+
+
+@pytest.mark.parametrize("status", ["active", "shadow"])
+def test_a_serving_name_stops_before_fitting(
+    status: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**7 分かけてから捨てない。** 読めた日で名前が決まった直後に止まり、何も置かない。"""
+    root = write_samples(tmp_path, dict.fromkeys(DAYS, True))
+    name = model_version_for(DAYS)
+    shelf = Shelf(rows={name: _row(name, status)})
+    monkeypatch.setattr(fit_baseline, "build_artifact", _must_not_fit)
+    with pytest.raises(registry.ServingVersionError, match=status):
+        _run(shelf, root, monkeypatch, "--upload")
+    assert shelf.lookups == [name]
+    assert shelf.uploads == []
+
+
+def test_the_name_comes_from_the_days_that_were_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**最終日が読めなければ、1 日前の名前になる**——それが active なら止まる。
+
+    頼んだ期間（〜09-09）で名前を作って引くと、読めた期間（〜09-08）の名前で
+    **配信中の成果物を上書きする**。朝の日次ジョブが遅れた日に起きる（W6 プラン §8.1）。
+    """
+    root = write_samples(tmp_path, dict.fromkeys(DAYS[:-1], True))
+    served = model_version_for(DAYS[:-1])
+    shelf = Shelf(rows={served: _row(served, "active")})
+    monkeypatch.setattr(fit_baseline, "build_artifact", _must_not_fit)
+    with pytest.raises(registry.ServingVersionError):
+        _run(shelf, root, monkeypatch, "--upload")
+    assert shelf.lookups == [served]
+    assert shelf.uploads == []
+
+
+def test_a_candidate_name_is_put_in_format_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**candidate は上書きする。** 置いたものは版 2 で、登録簿は 2 度引く（前と直前）。"""
+    root = write_samples(tmp_path, dict.fromkeys(DAYS, True))
+    name = model_version_for(DAYS)
+    shelf = Shelf(rows={name: _row(name, "candidate")})
+    assert _run(shelf, root, monkeypatch, "--upload") == 0
+    assert shelf.lookups == [name, name]
+    [(bucket, path, body, content_type)] = shelf.uploads
+    assert (bucket, path, content_type) == (
+        registry.MODEL_BUCKET,
+        artifact_path(name),
+        CONTENT_TYPE,
+    )
+    put = from_bytes(body)
+    assert (put.format_version, put.model_version) == (FORMAT_VERSION, name)
+
+
+def test_a_name_promoted_during_the_fit_is_not_put(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**当てはめの間に昇格されたら、置く直前に止まる**（前に 1 度見ただけでは足りない）。"""
+    root = write_samples(tmp_path, dict.fromkeys(DAYS, True))
+    shelf = Shelf(promoted_from=2)
+    with pytest.raises(registry.ServingVersionError):
+        _run(shelf, root, monkeypatch, "--upload")
+    assert len(shelf.lookups) == 2
+    assert shelf.uploads == []
+
+
+def test_writing_to_a_file_does_not_ask_the_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**`--out` だけなら登録簿を引かない**（確かめるための道を、配信の状態に縛らない）。"""
+    root = write_samples(tmp_path / "samples", dict.fromkeys(DAYS, True))
+    name = model_version_for(DAYS)
+    shelf = Shelf(rows={name: _row(name, "active")})
+    out = tmp_path / "artifact.json.gz"
+    assert _run(shelf, root, monkeypatch, "--out", str(out)) == 0
+    assert shelf.lookups == []
+    assert shelf.uploads == []
+    assert from_bytes(out.read_bytes()).model_version == name

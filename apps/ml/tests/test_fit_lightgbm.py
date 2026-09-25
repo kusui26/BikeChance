@@ -10,7 +10,7 @@
 
 import inspect
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Final
@@ -28,7 +28,8 @@ from bikechance_ml.jobs import climate as climate_module
 from bikechance_ml.jobs import fit_lightgbm as fit
 from bikechance_ml.jobs.build_features import to_parquet_bytes
 from bikechance_ml.jobs.window import Window
-from bikechance_ml.models import matrix
+from bikechance_ml.models import artifact as lightgbm_artifact
+from bikechance_ml.models import matrix, registry
 from tests import eval_fixture as eval_rows
 from tests.test_model_artifact import ARTIFACT, BOOSTERS, N_COLUMNS, _features
 from tests.test_window import read_local, write_distinct_sizes, write_samples
@@ -467,3 +468,96 @@ def test_the_registration_can_only_ask_for_candidate() -> None:
     assert row["status"] == "candidate"
     assert row["card_path"] is None
     assert row["artifact_path"] == "lightgbm/lgbm-v0-test.json.gz"
+
+
+# ── 上書きの防止（W6 の PR B、W6-19、契約 38）──────────────────
+#: 天気の門と同じ 3 日で走らせたときの版の名前（学習日は 09-07 の 1 日）。
+FIT_NAME: Final[str] = fit.model_version_for(SPLIT.fit)
+
+
+@dataclass
+class Shelf:
+    """登録簿と `models` バケットの代役。**引いた名前・置いたもの・登録したものを覚える。**
+
+    `promoted_from` 回目に引かれたときから、その名前を active と答える（当てはめの間の昇格）。
+    """
+
+    statuses: dict[str, str] = field(default_factory=dict)
+    lookups: list[str] = field(default_factory=list)
+    uploads: list[tuple[str, str, str]] = field(default_factory=list)
+    registered: list[str] = field(default_factory=list)
+    promoted_from: int | None = None
+
+    def find_model(self, model_version: str) -> registry.Registered | None:
+        self.lookups.append(model_version)
+        promoted = self.promoted_from is not None and len(self.lookups) >= self.promoted_from
+        status = "active" if promoted else self.statuses.get(model_version)
+        if status is None:
+            return None
+        return registry.Registered(
+            model_version=model_version,
+            kind=registry.LIGHTGBM_KIND,
+            feature_set=ARTIFACT.feature_set,
+            artifact_path=lightgbm_artifact.artifact_path(model_version),
+            status=status,
+        )
+
+    def upload(self, bucket: str, path: str, body: bytes, content_type: str) -> None:
+        self.uploads.append((bucket, path, content_type))
+
+    def register_model_version(self, row: dict[str, object]) -> str:
+        self.registered.append(str(row["model_version"]))
+        return str(row["model_version"])
+
+
+def _run_with(shelf: Shelf, root: Path, monkeypatch: pytest.MonkeyPatch) -> int:
+    """**入り口から**走らせる。当てはめは差し替える（見たいのは置く前後だけ）。"""
+    monkeypatch.setattr(fit, "read_storage_config", lambda: None)
+    monkeypatch.setattr(fit, "open_storage", lambda config: nullcontext(shelf))
+    argv = ["--from", f"{DAYS[0]}", "--to", f"{DAYS[2]}", "--local", str(root)]
+    return fit.run([*argv, "--upload", "--register"])
+
+
+@pytest.mark.parametrize("status", ["active", "shadow"])
+def test_a_serving_name_stops_before_fitting(
+    status: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**配信中の版と同じ名前なら、森を育てる前に止まる。** 置きも登録もしない。"""
+    root = write_samples(tmp_path, dict.fromkeys(DAYS, True))
+    shelf = Shelf(statuses={FIT_NAME: status})
+
+    def must_not_fit(*args: object) -> fit.Fitted:
+        raise AssertionError("当てはめに入った（止まるのは当てはめの前のはず）")
+
+    monkeypatch.setattr(fit, "fit_and_score", must_not_fit)
+    with pytest.raises(registry.ServingVersionError, match=status):
+        _run_with(shelf, root, monkeypatch)
+    assert shelf.lookups == [FIT_NAME]
+    assert (shelf.uploads, shelf.registered) == ([], [])
+
+
+def test_a_candidate_name_is_put_and_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**candidate は置き直せる。** 登録簿は 2 度引く（当てはめる前と、置く直前）。"""
+    root = write_samples(tmp_path, dict.fromkeys(DAYS, True))
+    shelf = Shelf(statuses={FIT_NAME: "candidate"})
+    monkeypatch.setattr(fit, "fit_and_score", lambda *args: _fitted(1.0, 1.0, 1.0))
+    assert _run_with(shelf, root, monkeypatch) == 0
+    assert shelf.lookups == [FIT_NAME, FIT_NAME]
+    path = lightgbm_artifact.artifact_path(FIT_NAME)
+    assert shelf.uploads == [(registry.MODEL_BUCKET, path, lightgbm_artifact.CONTENT_TYPE)]
+    assert shelf.registered == [FIT_NAME]
+
+
+def test_a_name_promoted_during_the_fit_is_neither_put_nor_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**当てはめの間に昇格されたら、置く直前に止まる。** 登録にも進まない。"""
+    root = write_samples(tmp_path, dict.fromkeys(DAYS, True))
+    shelf = Shelf(promoted_from=2)
+    monkeypatch.setattr(fit, "fit_and_score", lambda *args: _fitted(1.0, 1.0, 1.0))
+    with pytest.raises(registry.ServingVersionError):
+        _run_with(shelf, root, monkeypatch)
+    assert len(shelf.lookups) == 2
+    assert (shelf.uploads, shelf.registered) == ([], [])
