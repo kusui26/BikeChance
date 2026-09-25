@@ -10,6 +10,9 @@
 **配信側は `lightgbm` を読み込まない**（PR E′）。LightGBM の成果物は木の構造そのものを
 持ち、`models/forest.py` が numpy で歩く。当てはめる側（`jobs/fit_lightgbm.py`）だけが
 `lightgbm` に依存する（§12 の 126）。
+
+**成果物を置く口もここに 1 つだけ置く**（`upload_artifact`）。配信中（active・shadow）の
+版と同じ名前なら置かない（W6-19、契約 38）——登録簿を知っているのがここだからである。
 """
 
 from dataclasses import dataclass
@@ -27,6 +30,17 @@ MODEL_BUCKET: Final[str] = "models"
 #: `model_versions.kind` の値。
 BASELINE_KIND: Final[str] = "baseline"
 LIGHTGBM_KIND: Final[str] = "lightgbm"
+
+#: 配信中の状態。**この名前では成果物を置かない**（W6-19、契約 38）。
+#: `register_model_version`（0038）が行を登録し直させないのと同じ 2 つである。
+SERVING_STATUSES: Final[frozenset[str]] = frozenset({"active", "shadow"})
+
+#: `--upload` のヘルプ。**置く口（`upload_artifact`）の決まりをそのまま書く**
+#: （`fit_baseline` と `fit_lightgbm` で同じ文）。
+UPLOAD_HELP: Final[str] = (
+    "Storage に置く（同じ名前が active・shadow なら置かずに止まる。"
+    "candidate・retired は上書きする）"
+)
 
 
 @dataclass(frozen=True)
@@ -56,12 +70,28 @@ class FeatureSetMismatchError(RuntimeError):
     """成果物の特徴量の版が、いま作っている版と違う。**配らない。**"""
 
 
+class ServingVersionError(RuntimeError):
+    """配信中（active・shadow）の版と同じ名前で、成果物を置こうとした。**置かない。**"""
+
+
 class ReadsModels(Protocol):
     """登録簿と成果物を読む口だけ。"""
 
     def active_model(self) -> Registered | None: ...
     def find_model(self, model_version: str) -> Registered | None: ...
     def download(self, bucket: str, path: str) -> bytes | None: ...
+
+
+class FindsModels(Protocol):
+    """登録簿を名前で引く口だけ（上書きを防ぐのに要る）。"""
+
+    def find_model(self, model_version: str) -> Registered | None: ...
+
+
+class PutsModels(FindsModels, Protocol):
+    """成果物を置く口。**置く直前に登録簿を引く**ので、引く口も持つ。"""
+
+    def upload(self, bucket: str, path: str, body: bytes, content_type: str) -> None: ...
 
 
 #: 読み込んだ版。**同じ版なら取り直さない**（成果物は 3.2 MB あり、5 分毎に取り直すと
@@ -88,6 +118,34 @@ def named(source: ReadsModels, model_version: str) -> Registered:
     if found is None:
         raise UnknownModelError(f"登録されていない版です: {model_version}")
     return found
+
+
+def refuse_serving(source: FindsModels, model_version: str) -> None:
+    """**その名前が配信中（active・shadow）なら止める**（W6-19、契約 38）。
+
+    版の名前は学習の最終日で決まるので、期間を変えて回し直すと同じ名前になる。
+    置き直すと `model_versions` の行はそのままで**配る値だけが変わる**——昇格を経ずに
+    （W5 プランの所見 157）。candidate・retired と、登録の無い名前は置ける。
+    `register_model_version` が行を登録し直させる範囲と同じである。
+    """
+    found = source.find_model(model_version)
+    if found is not None and found.status in SERVING_STATUSES:
+        raise ServingVersionError(
+            f"{model_version} は {found.status} です。配信中の版と同じ名前では置きません"
+            "（確かめるだけなら --out に書き出す）"
+        )
+
+
+def upload_artifact(
+    source: PutsModels, model_version: str, path: str, body: bytes, content_type: str
+) -> None:
+    """成果物を `models` に置く。**置く直前にも登録簿を引く。**
+
+    当てはめる前に 1 度見ていても、当てはめの数分のあいだに昇格されることがある。
+    **置くのはここだけ**にして、引き忘れた経路を作らない。
+    """
+    refuse_serving(source, model_version)
+    source.upload(MODEL_BUCKET, path, body, content_type)
 
 
 def load(source: ReadsModels, registered: Registered) -> Predictor:

@@ -31,10 +31,12 @@ B1 に落ちていた。§2.3）。
 `profiles/date=…`）。**`--no-profile` を付けると従来どおり学習サンプルから作る**
 （入れ替える前後を比べるため）。
 
-**同じ日に 2 度 `--upload` しない。** 版の名前は**最終学習日**なので、期間を変えて
-回し直すと**同じ名前の成果物を上書きする**——`model_versions` の行は動かないまま
-**配る値だけが変わる**（昇格を経ずに。W5 プラン §12 の 157）。確かめたいだけなら
-`--out` を使う。
+**配信中（active・shadow）の版と同じ名前では置けない**（W6-19、契約 38）。版の名前は
+**最終学習日**なので、期間を変えて回し直すと同じ名前になり、置き直すと
+`model_versions` の行は動かないまま**配る値だけが変わる**（昇格を経ずに。W5 プラン
+§12 の 157）。**登録簿は 2 度引く**：読めた日が決まった直後（当てはめる前に止める）と、
+置く直前（当てはめの数分のあいだに昇格されても置かない）。candidate・retired の名前は
+上書きする。確かめたいだけなら `--out` を使う。
 """
 
 import argparse
@@ -60,8 +62,8 @@ from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.features.grid import jst_yesterday
 from bikechance_ml.io.supabase import SupabaseIo, open_storage
 from bikechance_ml.jobs import climate
-from bikechance_ml.jobs.window import day_reader, days_between, read_window, samples_of
-from bikechance_ml.models.registry import MODEL_BUCKET
+from bikechance_ml.jobs.window import Window, day_reader, days_between, read_window, samples_of
+from bikechance_ml.models import registry
 
 #: 成果物の Content-Type。gzip した JSON。
 CONTENT_TYPE: Final[str] = "application/gzip"
@@ -182,9 +184,7 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--local", default=None, help="Storage の代わりに読む場所")
     parser.add_argument("--out", default=None, help="成果物の書き出し先")
-    parser.add_argument(
-        "--upload", action="store_true", help="Storage に置く（**同じ名前があれば上書きする**）"
-    )
+    parser.add_argument("--upload", action="store_true", help=registry.UPLOAD_HELP)
     parser.add_argument(
         "--no-profile", action="store_true", help="気候値を学習サンプルの行から作る（従来）"
     )
@@ -213,7 +213,7 @@ def _fit(options: argparse.Namespace, days: Sequence[date]) -> int:
     with open_storage(read_storage_config()) as source:
         reader = None if local else source
         # **名前を `window` にしない**——この上に期間を決める `window()` が在る
-        opened = read_window(day_reader(reader, local), days)
+        opened = _open(source, reader, local, days, upload=options.upload)
         samples = samples_of(opened)
         chosen = climate_source(reader, opened.days, local, samples, options.no_profile)
         # **天気の被覆は見ない。** ベースラインが読むのは 6 列で、天気はその中に無い
@@ -221,12 +221,37 @@ def _fit(options: argparse.Namespace, days: Sequence[date]) -> int:
         artifact = build_artifact(samples, opened.days, chosen)
         body = to_bytes(artifact)
         if options.upload:
-            source.upload(MODEL_BUCKET, artifact_path(artifact.model_version), body, CONTENT_TYPE)
+            _upload(source, artifact, body)
 
     if options.out:
         Path(options.out).write_bytes(body)
     _report(artifact, body, samples, chosen)
     return 0
+
+
+def _open(
+    source: SupabaseIo,
+    reader: SupabaseIo | None,
+    local: Path | None,
+    days: Sequence[date],
+    *,
+    upload: bool,
+) -> Window:
+    """学習サンプルの窓を開く。**置けない名前なら、ここで止める**（当てはめる前）。
+
+    7 分かけてから捨てない。**名前は読めた日で決まる**——最終日が無ければ 1 日前の
+    名前になり、それが配信中の版と重なり得る（W6-19）。
+    """
+    opened = read_window(day_reader(reader, local), days)
+    if upload:
+        registry.refuse_serving(source, model_version_for(opened.days))
+    return opened
+
+
+def _upload(source: SupabaseIo, artifact: Artifact, body: bytes) -> None:
+    """置く。**置く直前にもう 1 度登録簿を引く**（`registry.upload_artifact`）。"""
+    path = artifact_path(artifact.model_version)
+    registry.upload_artifact(source, artifact.model_version, path, body, CONTENT_TYPE)
 
 
 def _report(artifact: Artifact, body: bytes, samples: Samples, chosen: climatology.Source) -> None:

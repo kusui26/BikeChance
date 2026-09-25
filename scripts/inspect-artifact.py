@@ -27,6 +27,11 @@
 届いていない曜日種別には 1 つも無い**。満たさなければ終了コード 1 を返すので、昇格の
 手順にそのまま挟める。プロファイルが読めなければ、**3 曜日種別すべてにセルがあること**
 を求める（前の判定）。
+
+**書式の版と大きさ、B2 の使えるセルの数と率の範囲も出す**（W6 の PR B）。当てはめ直しの
+あとに「書式 2 で置けたか」「セルの数と率が崩れていないか」を目で見るためである
+（W6 プラン §8.1 の 2）。版 1 と版 2 のどちらも開ける（契約 30）。率が 0〜1 の外なら
+読み手が開く前に止めるので、ここに出るのは必ず 0〜1 の中である。
 """
 
 import argparse
@@ -40,6 +45,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bikechance_ml.baselines import artifact as baseline_artifact
+from bikechance_ml.baselines import climatology
 from bikechance_ml.baselines.climatology import SLOTS_PER_DAY
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.features import profile
@@ -86,14 +92,29 @@ def profile_days(source: registry.ReadsModels, day: str) -> dict[str, int] | Non
     return {str(kind): int(most) for kind, most in zip(kinds, days, strict=True)}
 
 
-def header(one: baseline_artifact.Artifact) -> list[str]:
-    """成果物そのものの素性。**どの期間で作ったかが読めること。**"""
+def header(one: baseline_artifact.Artifact, size_bytes: int) -> list[str]:
+    """成果物そのものの素性。**どの期間・どの書式で作り、どれだけの大きさか。**"""
     days = one.train_days
     return [
-        f"{one.model_version}（書式 {one.format_version}、feature_set {one.feature_set}）",
+        f"{one.model_version}（書式 {one.format_version}、feature_set {one.feature_set}、"
+        f"{size_bytes:,} B）",
         f"  学習 {days[0]}〜{days[-1]}（{len(days)} 日） / 作成 {one.created_at}",
         f"  ポート {len(one.ports):,} / システム {len(one.systems)} / 水平 {len(one.horizons_min)}",
     ]
+
+
+def climatology_cells(one: baseline_artifact.Artifact) -> list[str]:
+    """B2 の使えるセルの数と、率の範囲。**書式を替えても数と値が崩れていないかを見る。**"""
+    return ["", *[cells_line(name, model.b2) for name, model in sorted(one.targets.items())]]
+
+
+def cells_line(name: str, table: climatology.Table) -> str:
+    """1 ターゲットぶん。**率の範囲は使えるセルだけで取る**（使えないセルの 0 を混ぜない）。"""
+    rates = table.rate[table.usable]
+    total = table.usable.size
+    share = rates.size / total if total else 0.0
+    span = f"{float(rates.min()):.6f}〜{float(rates.max()):.6f}" if rates.size else "—"
+    return f"  {name} の B2：使えるセル {rates.size:,} / {total:,}（{share:.1%}） / 率 {span}"
 
 
 def floors(one: baseline_artifact.Artifact) -> list[str]:
@@ -193,12 +214,14 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
 def run(argv: Sequence[str] | None = None) -> int:
     options = _arguments(argv)
     with open_storage(read_storage_config()) as source:
-        one = baseline_artifact.from_bytes(fetch(source, options))
+        body = fetch(source, options)
+        one = baseline_artifact.from_bytes(body)
         days = profile_days(source, one.train_days[-1])
     if days is None:
         print(f"（プロファイル profiles/date={one.train_days[-1]} が読めません）", file=sys.stderr)
     passed, message = verdict(one, days)
-    print("\n".join([*header(one), *floors(one), *table(one, days), "", message]))
+    lines = [*header(one, len(body)), *climatology_cells(one), *floors(one), *table(one, days)]
+    print("\n".join([*lines, "", message]))
     return 0 if passed else 1
 
 

@@ -3986,6 +3986,9 @@ PR は素通りする。**`ci.yml` の `secrets` ジョブ**（すべての PR �
 
 **W6 で決めること**：`--upload` を「新しい名前のときだけ」に狭めるか、`register_model_version`
 と同じく**配信中の版を上書きできない**規則を Storage 側にも置くか（§14）。
+→ **後者に決めて実装した**（2026-09-25、W6 の PR B。W6-19、契約 38）：`fit_baseline`・
+`fit_lightgbm` の `--upload` は、同じ名前が active・shadow なら**当てはめる前と置く直前の
+2 度で止まる**。candidate・retired は `register_model_version` と同じく上書きできる。
 
 ### 158. **代替候補に、40 km 離れた別事業者のポートが混ざっていた**（PR G。本番のバグ）
 
