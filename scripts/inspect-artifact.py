@@ -28,6 +28,10 @@
 手順にそのまま挟める。プロファイルが読めなければ、**3 曜日種別すべてにセルがあること**
 を求める（前の判定）。
 
+**下限は曜日種別ごとに見る**（W6 の PR A、D-37）。配る側の下限は曜日種別で違い、
+「配らない」種別もある（土日祝は 9/28 に決める）。**配らない種別は 0 が正しい。**
+下限の欄の無い成果物（PR A より前）は、全種別に `b2_min_days` を当てた形として読む。
+
 **書式の版と大きさ、B2 の使えるセルの数と率の範囲も出す**（W6 の PR B）。当てはめ直しの
 あとに「書式 2 で置けたか」「セルの数と率が崩れていないか」を目で見るためである
 （W6 プラン §8.1 の 2）。版 1 と版 2 のどちらも開ける（契約 30）。率が 0〜1 の外なら
@@ -49,22 +53,17 @@ from bikechance_ml.baselines import climatology
 from bikechance_ml.baselines.climatology import SLOTS_PER_DAY
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.features import profile
-from bikechance_ml.features.arrays import Bools, Int64
+from bikechance_ml.features.arrays import Bools
 from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 from bikechance_ml.features.grid import profile_path
 from bikechance_ml.io.supabase import PARQUET_BUCKET, open_storage
 from bikechance_ml.models import registry
 
 
-def dow_of(keys: Int64) -> Int64:
-    """セルの鍵から曜日種別の番号を取り出す。**鍵の組み立ては `cell_key` 1 か所。**"""
-    return np.asarray((keys // SLOTS_PER_DAY) % len(DOW_TYPE_ORDER), dtype=np.int64)
-
-
 def counts_by_dow(usable: Bools) -> dict[str, int]:
-    """曜日種別ごとの使えるセルの数。"""
-    keys = np.nonzero(usable)[0]
-    found = np.bincount(dow_of(keys), minlength=len(DOW_TYPE_ORDER))
+    """曜日種別ごとの使えるセルの数。**鍵から種別を取り出す式は `climatology` の 1 か所。**"""
+    keys = np.asarray(np.nonzero(usable)[0], dtype=np.int64)
+    found = np.bincount(climatology.dow_of_cell(keys), minlength=len(DOW_TYPE_ORDER))
     return {name: int(found[index]) for index, name in enumerate(DOW_TYPE_ORDER)}
 
 
@@ -74,9 +73,16 @@ def fewest_cells(one: baseline_artifact.Artifact) -> dict[str, int]:
     return {dow: min(one_target[dow] for one_target in counted) for dow in DOW_TYPE_ORDER}
 
 
-def floor_days(one: baseline_artifact.Artifact) -> int:
-    """成果物に書かれた下限（日）。**ターゲットで違えば厳しいほう**を使う。"""
-    return max(model.b2.min_days for model in one.targets.values())
+def floor_by_dow(one: baseline_artifact.Artifact) -> dict[str, int | None]:
+    """曜日種別ごとの配る側の下限（日。None は配らない）。**ターゲットで違えば厳しいほう。**"""
+    return {dow: _strictest(one, dow) for dow in DOW_TYPE_ORDER}
+
+
+def _strictest(one: baseline_artifact.Artifact, dow: str) -> int | None:
+    floors = [model.b2.floor.serve[dow] for model in one.targets.values()]
+    if any(floor is None for floor in floors):
+        return None
+    return max(floor for floor in floors if floor is not None)
 
 
 def profile_days(source: registry.ReadsModels, day: str) -> dict[str, int] | None:
@@ -118,18 +124,19 @@ def cells_line(name: str, table: climatology.Table) -> str:
 
 
 def floors(one: baseline_artifact.Artifact) -> list[str]:
-    """下限（件数・日数）。**どこまで信じた表かを一緒に出す**（§12 の 167）。"""
-    return [
-        "",
-        *[
-            f"  {name} の下限：{model.b2.min_samples} 件 {model.b2.min_days} 日"
-            for name, model in sorted(one.targets.items())
-        ],
-    ]
+    """下限（件数・曜日種別ごとの日数）と厚さ。**どこまで信じた表かを一緒に出す**（§12 の 167）。"""
+    lines = [""]
+    for name, model in sorted(one.targets.items()):
+        lines.append(f"  {name} の下限：{model.b2.min_samples} 件・{model.b2.floor.describe()}")
+        thickness = climatology.describe_thickness(model.b2.max_days)
+        lines.append(f"  {name} の厚さ（曜日種別ごとの日数の最大）：{thickness}")
+    return lines
 
 
-def expectation(days: int | None, floor: int) -> str:
+def expectation(days: int | None, floor: int | None) -> str:
     """その曜日種別に**セルが立つはずか**。プロファイルが無ければ「立つはず」とみなす。"""
+    if floor is None:
+        return "配らない（0 が正しい）"
     if days is None:
         return "立つはず（プロファイル無し）"
     return "立つはず" if days >= floor else "0 が正しい"
@@ -146,49 +153,76 @@ def table(one: baseline_artifact.Artifact, days: Mapping[str, int] | None) -> li
         + " | 1 ポート × 96 枠に対する割合 | プロファイルの日数 | 期待 |",
         "|---|" + "---:|" * (len(targets) + 2) + "---|",
     ]
-    for dow in DOW_TYPE_ORDER:
-        counted = {name: counts_by_dow(one.targets[name].b2.usable)[dow] for name in targets}
-        share = max(counted.values()) / slots if slots else 0.0
-        cells = " | ".join(f"{counted[name]:,}" for name in targets)
-        seen = None if days is None else days.get(dow, 0)
-        shown = "—" if seen is None else str(seen)
-        rows.append(
-            f"| {dow} | {cells} | {share:.1%} | {shown} | {expectation(seen, floor_days(one))} |"
-        )
-    return rows
+    floor = floor_by_dow(one)
+    return [*rows, *[_table_row(one, dow, slots, days, floor[dow]) for dow in DOW_TYPE_ORDER]]
+
+
+def _table_row(
+    one: baseline_artifact.Artifact,
+    dow: str,
+    slots: int,
+    days: Mapping[str, int] | None,
+    floor: int | None,
+) -> str:
+    """曜日種別 1 つぶんの行。**セルの数・割合・プロファイルの日数・期待**を並べる。"""
+    targets = sorted(one.targets)
+    counted = {name: counts_by_dow(one.targets[name].b2.usable)[dow] for name in targets}
+    share = max(counted.values()) / slots if slots else 0.0
+    cells = " | ".join(f"{counted[name]:,}" for name in targets)
+    seen = None if days is None else days.get(dow, 0)
+    shown = "—" if seen is None else str(seen)
+    return f"| {dow} | {cells} | {share:.1%} | {shown} | {expectation(seen, floor)} |"
 
 
 def verdict(one: baseline_artifact.Artifact, days: Mapping[str, int] | None) -> tuple[bool, str]:
-    """合格か。**立つはずの種別にセルがあり、0 が正しい種別には 1 つも無いこと。**"""
-    cells, floor = fewest_cells(one), floor_days(one)
-    missing = [
-        dow
-        for dow in DOW_TYPE_ORDER
-        if cells[dow] == 0 and (days is None or days.get(dow, 0) >= floor)
-    ]
-    stray = [
-        dow
-        for dow in DOW_TYPE_ORDER
-        if cells[dow] > 0 and days is not None and days.get(dow, 0) < floor
-    ]
+    """合格か。**立つはずの種別にセルがあり、0 が正しい種別には 1 つも無いこと。**
+
+    0 が正しいのは 2 通り：**配らない種別**（D-37）と、**下限に届いていない種別**。
+    """
+    cells, floor = fewest_cells(one), floor_by_dow(one)
+    missing = [dow for dow in DOW_TYPE_ORDER if cells[dow] == 0 and _due(floor[dow], days, dow)]
+    stray = [dow for dow in DOW_TYPE_ORDER if cells[dow] > 0 and _barred(floor[dow], days, dow)]
     if missing and days is None:
-        where = ", ".join(missing)
         return False, (
-            f"**不合格**：セルが 1 つも無い（{where}）。"
-            "プロファイルが読めないので 3 種別すべてを求めた"
+            f"**不合格**：配る種別なのにセルが 1 つも無い（{', '.join(missing)}）。"
+            "プロファイルが読めないので、配る種別すべてに求めた"
         )
     if missing:
-        where = ", ".join(missing)
-        return False, f"**不合格**：下限（{floor} 日）に届いているのにセルが無い（{where}）"
+        return False, f"**不合格**：下限に届いているのにセルが無い（{_with_floor(missing, floor)}）"
     if stray:
-        where = ", ".join(stray)
         return False, (
-            f"**不合格**：下限（{floor} 日）に届いていないのにセルがある（{where}）"
-            "——別のプロファイルで作った成果物かもしれません"
+            f"**不合格**：配らないか下限に届いていないのにセルがある（{_with_floor(stray, floor)}）"
+            "——別のプロファイルか別の下限で作った成果物かもしれません"
         )
-    waiting = [dow for dow in DOW_TYPE_ORDER if cells[dow] == 0]
-    note = f"（{', '.join(waiting)} は下限に届いていないので 0 が正しい）" if waiting else ""
+    waiting = [_why_zero(dow, floor[dow], days) for dow in DOW_TYPE_ORDER if cells[dow] == 0]
+    note = f"（{'、'.join(waiting)}ので 0 が正しい）" if waiting else ""
     return True, f"**合格**：立つはずの曜日種別にはすべてセルがあります{note}"
+
+
+def _why_zero(dow: str, floor: int | None, days: Mapping[str, int] | None) -> str:
+    """0 が正しい理由。**配らないのか、下限に届いていないのか**を分けて言う。"""
+    if floor is None:
+        return f"{dow} は配らない"
+    seen = "—" if days is None else f"{days.get(dow, 0)} 日"
+    return f"{dow} は下限 {floor} 日に届いていない（{seen}）"
+
+
+def _due(floor: int | None, days: Mapping[str, int] | None, dow: str) -> bool:
+    """その種別に**セルが立つはずか**（配る種別で、下限に届いている）。"""
+    return floor is not None and (days is None or days.get(dow, 0) >= floor)
+
+
+def _barred(floor: int | None, days: Mapping[str, int] | None, dow: str) -> bool:
+    """その種別に**セルがあってはいけないか**（配らない種別か、下限に届いていない）。"""
+    return floor is None or (days is not None and days.get(dow, 0) < floor)
+
+
+def _with_floor(dows: Sequence[str], floor: Mapping[str, int | None]) -> str:
+    return ", ".join(f"{dow}：{_floor_text(floor[dow])}" for dow in dows)
+
+
+def _floor_text(days: int | None) -> str:
+    return "配らない" if days is None else f"下限 {days} 日"
 
 
 def fetch(source: registry.ReadsModels, options: argparse.Namespace) -> bytes:

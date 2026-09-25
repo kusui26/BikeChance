@@ -134,8 +134,8 @@ def _summary(
         "missing_hours": len(missing),
         # **前日の版が無ければ当日だけで作っている**（さかのぼるときに効く）
         "carried": previous is not None,
-        # **使えるセルは当てはめと同じ下限で数える**（持ち主は読む側。W5-03）
-        **profile.summarize(rolled, min_days=climatology.MIN_CELL_DAYS),
+        # **使えるセルは当てはめと同じ下限で数える**（持ち主は読む側。W5-03・D-37）
+        **profile.summarize(rolled, serve_days=climatology.SERVE_DAYS),
     }
 
 
@@ -280,7 +280,7 @@ def _run_from_dailies(args: argparse.Namespace, day: date) -> int:
         "from_dailies": True,
         "dailies": len(summed.days),
         "first_day": summed.days[0].isoformat() if summed.days else None,
-        **profile.summarize(summed.profile, min_days=climatology.MIN_CELL_DAYS),
+        **profile.summarize(summed.profile, serve_days=climatology.SERVE_DAYS),
         **compared,
     }
     print(json.dumps(summary, ensure_ascii=False))

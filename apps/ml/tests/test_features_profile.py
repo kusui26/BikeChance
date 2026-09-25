@@ -251,10 +251,10 @@ def test_the_day_count_says_how_much_is_behind_a_cell() -> None:
     assert set(first.column("n_days").to_pylist()) == {1}
     assert set(second.column("n_days").to_pylist()) == {2}
     assert set(third.column("n_days").to_pylist()) == {3}
-    floor = climatology.MIN_CELL_DAYS
-    assert profile.summarize(first, min_days=floor)["usable_cells"] == 0
-    assert profile.summarize(second, min_days=floor)["usable_cells"] == 0
-    assert profile.summarize(third, min_days=floor)["usable_cells"] == third.num_rows
+    floor = climatology.SERVE_DAYS
+    assert profile.summarize(first, serve_days=floor)["usable_cells"] == 0
+    assert profile.summarize(second, serve_days=floor)["usable_cells"] == 0
+    assert profile.summarize(third, serve_days=floor)["usable_cells"] == third.num_rows
 
 
 def test_a_new_dow_type_starts_at_zero_days() -> None:
@@ -262,11 +262,39 @@ def test_a_new_dow_type_starts_at_zero_days() -> None:
     weekday = daily(observations([("hellocycling", "a", 3, 4, OPEN)]))
     saturday = daily(observations([("hellocycling", "a", 3, 4, OPEN)], day=SATURDAY), day=SATURDAY)
     mixed = profile.roll(profile.roll(None, weekday, None), saturday, None)
-    counted = profile.summarize(mixed, min_days=climatology.MIN_CELL_DAYS)["by_dow_type"]
+    counted = profile.summarize(mixed, serve_days=climatology.SERVE_DAYS)["by_dow_type"]
     assert isinstance(counted, dict)
     assert counted["weekday"]["days_max"] == 1
     assert counted["sat"]["days_max"] == 1
     assert counted["sat"]["usable"] == 0
+
+
+def test_usable_cells_follow_the_floor_of_each_dow_type() -> None:
+    """**使えるセルは曜日種別ごとの下限で数える**（D-37）。配らない種別は 0 と数える。
+
+    `build_profiles` の要約（`job_runs` に残る）が、配信と同じ形で数えるように——土日祝を
+    配らない既定のあいだは、**厚くても 0 が正しい**。下限を知らない種別も 0（数えない）。
+    """
+    weekday = daily(observations([("hellocycling", "a", 3, 4, OPEN)]))
+    saturday = daily(observations([("hellocycling", "a", 3, 4, OPEN)], day=SATURDAY), day=SATURDAY)
+    rolled: pa.Table | None = None
+    for _ in range(3):
+        rolled = profile.roll(profile.roll(rolled, weekday, None), saturday, None)
+    assert rolled is not None
+    assert set(rolled.column("n_days").to_pylist()) == {3}
+
+    def usable(serve_days: dict[str, int | None]) -> dict[str, int]:
+        counted = profile.summarize(rolled, serve_days=serve_days)["by_dow_type"]
+        assert isinstance(counted, dict)
+        return {dow: counted[dow]["usable"] for dow in ("sat", "weekday")}
+
+    cells = rolled.num_rows // 2
+    assert usable(dict(climatology.SERVE_DAYS)) == {"sat": 0, "weekday": cells}
+    assert usable({"sat": 3, "sun_holiday": None, "weekday": 3}) == {"sat": cells, "weekday": cells}
+    assert usable({"sat": 4, "sun_holiday": 4, "weekday": 3}) == {"sat": 0, "weekday": cells}
+    assert usable({"weekday": 3}) == {"sat": 0, "weekday": cells}
+    summary = profile.summarize(rolled, serve_days=climatology.SERVE_DAYS)
+    assert summary["serve_days"] == {"sat": None, "sun_holiday": None, "weekday": 3}
 
 
 def test_the_rows_are_sorted_by_the_key() -> None:

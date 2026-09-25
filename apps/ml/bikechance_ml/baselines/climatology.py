@@ -20,7 +20,9 @@
 **日数が足りているかは、この比で見当がつく。**
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final, Protocol
 
 import numpy as np
@@ -72,7 +74,130 @@ MIN_CELL_ROWS: Final[int] = 30
 #: **下限を持つのはここ 1 か所。** プロファイル（`features/profile.py`）は切らずに
 #: `n_days` を持ち、**下限は読む側が決める**（W5-03）。`build_profiles` の要約も
 #: この値を渡されて数える——以前は同じ `2` がプロファイル側にも在った。
+#:
+#: **2026-09-25 から、これは平日の配る側の下限である**（D-37）。曜日種別ごとの形は
+#: `SERVE_DAYS`、学習の行の下げ幅は `PROFILE_FIT_OFFSET_DAYS`。
 MIN_CELL_DAYS: Final[int] = 3
+
+#: 配る側の日数の下限。**曜日種別ごと**（W6 の PR A、D-37、契約 44）。`None` は**配らない**。
+#:
+#: **平日は 3**（D-30）——平日のセルは 10 日以上あって下限に当たらず、B2 は効いている
+#: （09-24 の行で、落とすと +2.38%。W6 プラン §13.7）。**土日祝は 2026-09-28 に、9/27 の
+#: 実測で 3・4・5・配らない から選ぶ**（W6 プラン §6.1 の基準。9/27 のデータを見る前に
+#: 決めた）。**見せても 3 日の B2 は、落とした確率より悪かった**（EDA #8 §0.4 C）ので、
+#: **決まるまでは配らない**——9/28 に測れなかったときも、この既定のまま当てはめ直せる。
+SERVE_DAYS: Final[Mapping[str, int | None]] = MappingProxyType(
+    {"sat": None, "sun_holiday": None, "weekday": MIN_CELL_DAYS}
+)
+
+#: 学習の行で下限を何日下げるか（**プロファイルから作るとき**。W5 プランの所見 179、契約 44）。
+#:
+#: leave-one-out は**自分の日を丸ごと**引くので、学習の行は 1 日薄い。配る側と同じ下限で
+#: 判定すると、**日数がちょうど下限のセルだけが、混合に一度も見られないまま配られる**
+#: （EDA #8：害の約 8 割がここから来ていた）。1 日下げれば、**配るセル ＝ 学習の行が
+#: 引けるセル**になる。学習サンプルの行から作るとき（`FromSamples`）は引くのが行 1 つで、
+#: 日数は減らないので 0 のままでよい。
+PROFILE_FIT_OFFSET_DAYS: Final[int] = 1
+
+#: 9/27 の実測で下限を選ぶ曜日種別（土日祝）。平日は `MIN_CELL_DAYS` のまま。
+WEEKEND_DOW_TYPES: Final[tuple[str, ...]] = ("sat", "sun_holiday")
+
+#: 「配らない」を日数で表すときの下限。**どのセルも届かない。**
+_NEVER_DAYS: Final[int] = int(np.iinfo(np.int64).max)
+
+
+class FloorError(ValueError):
+    """下限の形が組めない。**曜日種別が揃っていない・日数が 1 日を切る**など。"""
+
+
+@dataclass(frozen=True)
+class DayFloor:
+    """B2 のセルを使うのに要る**日数**（W6 の PR A、D-37）。
+
+    **配る側は曜日種別ごと**（`serve`。`None` は配らない）で、**学習の行は `fit_offset` 日
+    低く**判定する（`predict_without`）。`serve` は `DOW_TYPE_ORDER` の種別を全部持つ。
+
+    **形を 1 つの物にするのは、表・成果物・報告書・点検が同じ形を読むため**である。
+    以前は `min_days` という 1 つの数で、曜日種別も学習の行も同じ下限だった。
+    """
+
+    serve: Mapping[str, int | None]
+    fit_offset: int = 0
+
+    def __post_init__(self) -> None:
+        _check_floor(self.serve, self.fit_offset)
+        # 渡された辞書を後から書き換えられないように、読むだけの写しにする
+        object.__setattr__(self, "serve", MappingProxyType(dict(self.serve)))
+
+    @classmethod
+    def uniform(cls, days: int, fit_offset: int = 0) -> "DayFloor":
+        """**全曜日種別に同じ下限**（PR A より前の形。版 1 の成果物はこの形で読む）。"""
+        return cls(serve=dict.fromkeys(DOW_TYPE_ORDER, days), fit_offset=fit_offset)
+
+    def serve_by_dow(self) -> Int64:
+        """`DOW_TYPE_ORDER` の並びの、配る側の下限。**配らない種別はどの日数も届かない。**"""
+        return _by_dow(self.serve, 0)
+
+    def fit_by_dow(self) -> Int64:
+        """同じ並びの、学習の行の下限（配る側 − `fit_offset`）。"""
+        return _by_dow(self.serve, self.fit_offset)
+
+    @property
+    def legacy_days(self) -> int:
+        """**1 つの数にするなら**（成果物の `b2_min_days`）：配る種別のうち最も低い下限。
+
+        「これより薄いセルはどの種別でも配らない」という意味で、1 つの数だった頃と矛盾しない。
+        """
+        return min(one for one in self.serve.values() if one is not None)
+
+    def describe(self) -> str:
+        """報告書の 1 行。**種別ごとの下限と、学習の行の下げ幅。**"""
+        parts = [f"{dow} {_days_text(self.serve[dow])}" for dow in DOW_TYPE_ORDER]
+        lowered = f"（学習の行は {self.fit_offset} 日低く）" if self.fit_offset else ""
+        return "・".join(parts) + lowered
+
+
+def weekend_floor(floor: DayFloor, days: int | None) -> DayFloor:
+    """**土日祝の配る側だけ**を差し替えた形（平日と学習の行の下げ幅はそのまま）。
+
+    9/27 の実測で比べる候補の版（3・4・5・配らない）を作るのに使う（W6 プラン §6.1）。
+    """
+    serve = {**floor.serve, **dict.fromkeys(WEEKEND_DOW_TYPES, days)}
+    return DayFloor(serve=serve, fit_offset=floor.fit_offset)
+
+
+def _check_floor(serve: Mapping[str, int | None], fit_offset: int) -> None:
+    """**組めない形は作らない。** 種別の欠け・配る種別が 1 つも無い・1 日を切る学習側。"""
+    if set(serve) != set(DOW_TYPE_ORDER):
+        raise FloorError(
+            f"下限は曜日種別 {DOW_TYPE_ORDER} を全部持つ（渡されたのは {sorted(serve)}）"
+        )
+    served = [one for one in serve.values() if one is not None]
+    if not served:
+        raise FloorError("どの曜日種別にも配らない下限は作れない")
+    if fit_offset < 0 or min(served) - fit_offset < 1:
+        raise FloorError(f"学習の行の下限が 1 日を切る（{dict(serve)}、{fit_offset} 日下げる）")
+
+
+def _by_dow(serve: Mapping[str, int | None], offset: int) -> Int64:
+    return np.asarray([_lowered(serve[dow], offset) for dow in DOW_TYPE_ORDER], dtype=np.int64)
+
+
+def _lowered(days: int | None, offset: int) -> int:
+    """下限を `offset` 日下げる。**配らない種別は、下げても届かないまま。**"""
+    return _NEVER_DAYS if days is None else days - offset
+
+
+def _days_text(days: int | None) -> str:
+    return "配らない" if days is None else f"{days} 日"
+
+
+#: 学習サンプルの行から作るときの既定。**引くのは行 1 つ**（日数は減らない）ので、
+#: 学習の行を下げない。
+SAMPLES_FLOOR: Final[DayFloor] = DayFloor(serve=SERVE_DAYS, fit_offset=0)
+
+#: プロファイルから作るときの既定。**自分の日を丸ごと引く**ので、学習の行を 1 日下げる。
+PROFILE_FLOOR: Final[DayFloor] = DayFloor(serve=SERVE_DAYS, fit_offset=PROFILE_FIT_OFFSET_DAYS)
 
 
 @dataclass(frozen=True)
@@ -80,7 +205,9 @@ class Table:
     """気候値の表と、その作り方の記録。**セルの番号は `cell_key` が決める。**
 
     `rate` 以外を持ち回るのは、**自分のぶんを引いたあとに下限を判定し直すため**である
-    （`predict_without`）。配信では読まないので、成果物には書かない（`artifact.py`）。
+    （`predict_without`）。配信では読まないので、4 つの数（下の表）は成果物に書かない
+    （`artifact.py`）。**下限（`min_samples`・`floor`）と厚さ（`max_days`）は記録として書く**
+    ——どの下限・どの厚さで作った B2 かを、点検と測りが後から読む。
 
     | 列 | `fit`（学習サンプルから） | `profile_climatology.fit`（プロファイルから） |
     |---|---|---|
@@ -98,11 +225,15 @@ class Table:
     total: Float64
     positive: Float64
     counted: Int64
-    #: セルに寄与した**日の数**。`min_days` と突き合わせる
+    #: セルに寄与した**日の数**。`floor` と突き合わせる
     days: Int64
     usable: Bools
     min_samples: int
-    min_days: int
+    #: 日数の下限の形（D-37）。**`usable` はこの配る側の下限で決めてある**
+    floor: DayFloor
+    #: 曜日種別ごとの、セルに寄与した日数の最大（**当てはめたプロファイルの厚さ**）。
+    #: 成果物に書いて、どの厚さで作った B2 かを後から読めるようにする。**知れなければ None**
+    max_days: Mapping[str, int] | None = None
 
     @property
     def cells(self) -> int:
@@ -165,7 +296,7 @@ def fit(
     target: Target,
     keep: Bools,
     min_samples: int = MIN_CELL_ROWS,
-    min_days: int = MIN_CELL_DAYS,
+    floor: DayFloor = SAMPLES_FLOOR,
 ) -> Table:
     """学習期間の**行**からセルを作る。**下限に満たないセルは使えない印を付ける。**
 
@@ -183,7 +314,7 @@ def fit(
         counted=np.asarray(np.bincount(key, minlength=size), dtype=np.int64),
         days=_days_per_cell(key, fitted.day, size),
         min_samples=min_samples,
-        min_days=min_days,
+        floor=floor,
     )
 
 
@@ -195,14 +326,18 @@ def table_of(
     counted: Int64,
     days: Int64,
     min_samples: int,
-    min_days: int,
+    floor: DayFloor,
 ) -> Table:
     """数えた結果を表にする。**「使えるセル」と率の決め方はここだけ**（W5-01）。
 
     プロファイルから作るときも同じ関数を通る（`profile_climatology.fit`）。
     **2 つの作り方が 2 つの下限を持つと、報告した割合が配信と食い違う。**
+
+    日数の下限は**曜日種別ごと**に当てる（D-37）。配らない種別のセルは 1 つも立たない。
     """
-    usable = np.asarray((counted >= min_samples) & (days >= min_days), dtype=np.bool_)
+    usable = np.asarray(
+        (counted >= min_samples) & meets_by_dow(days, floor.serve_by_dow()), dtype=np.bool_
+    )
     return Table(
         n_ports=n_ports,
         rate=np.asarray(np.divide(positive, total, out=np.zeros(len(total)), where=usable)),
@@ -212,8 +347,34 @@ def table_of(
         days=days,
         usable=usable,
         min_samples=min_samples,
-        min_days=min_days,
+        floor=floor,
+        max_days=max_days_by_dow(days),
     )
+
+
+def meets_by_dow(days: Int64, need: Int64) -> Bools:
+    """セルごとの日数が、**そのセルの曜日種別の下限**に届いているか。
+
+    セルは `(ポート, 曜日種別, 15 分枠)` の順に並ぶ（`cell_key`）ので、3 次元に畳めば
+    曜日種別の軸に下限を当てられる——セルと同じ長さの下限の配列を作らずに済む。
+    """
+    shaped = days.reshape(-1, len(DOW_TYPE_ORDER), SLOTS_PER_DAY)
+    return np.asarray((shaped >= need[None, :, None]).reshape(-1), dtype=np.bool_)
+
+
+def max_days_by_dow(days: Int64) -> dict[str, int]:
+    """曜日種別ごとの、セルに寄与した日数の最大。**当てはめたプロファイルの厚さ**である。"""
+    if days.size == 0:
+        return dict.fromkeys(DOW_TYPE_ORDER, 0)
+    most = days.reshape(-1, len(DOW_TYPE_ORDER), SLOTS_PER_DAY).max(axis=(0, 2))
+    return {dow: int(most[index]) for index, dow in enumerate(DOW_TYPE_ORDER)}
+
+
+def describe_thickness(max_days: Mapping[str, int] | None) -> str:
+    """厚さの 1 行（当てはめの報告と点検）。**記録の無い表（PR A より前）はそう書く。**"""
+    if max_days is None:
+        return "記録なし"
+    return "・".join(f"{dow} {max_days[dow]} 日" for dow in DOW_TYPE_ORDER)
 
 
 def _days_per_cell(key: Int64, day: Int32, size: int) -> Int64:
@@ -246,16 +407,22 @@ def predict_without(table: Table, samples: Samples, fallback: Float64, own: Own)
     引く量は表の作り方で決まる（`Own`）。**下限（件数・日数）は引いたあとの残りで
     判定する**——残りが薄いセルは、配信のときに使えないセルと同じ扱いにする。
 
+    **学習の行は、配る側より `fit_offset` 日低い下限で判定する**（D-37）。プロファイルから
+    作るときは自分の日を丸ごと引くので 1 日薄くなる——同じ下限だと、日数がちょうど
+    下限のセルだけが混合に見られないまま配られる（W5 プランの所見 179）。
+
     **日数の下限もここで見る。** 以前は件数しか見ておらず、`predict`（配信）が使わない
     セル（同じ日に 3 行入っただけのセル）を leave-one-out が使っていた。**B3 は
     「配信では引けないセル」の値を入力に係数を決めていた**（W5 プラン §12 の 141）。
     """
     key, inside = _lookup(table, samples)
     total = table.total[key] - own.total
+    # 曜日種別は行の到着の日のもの（`cell_key` と同じ `samples.dow_type`）
+    need = table.floor.fit_by_dow()[samples.dow_type.astype(np.int64)]
     used = np.asarray(
         inside
         & (table.counted[key] - own.counted >= table.min_samples)
-        & (table.days[key] - own.days >= table.min_days)
+        & (table.days[key] - own.days >= need)
         & (total > 0),
         dtype=np.bool_,
     )
@@ -346,6 +513,11 @@ def cell_key(port: Int64, dow_type: Int64, slot: Int64) -> Int64:
     )
 
 
+def dow_of_cell(key: Int64) -> Int64:
+    """セルの番号から曜日種別の番号を取り出す。**`cell_key` の逆で、式はここだけ。**"""
+    return np.asarray((key // SLOTS_PER_DAY) % len(DOW_TYPE_ORDER), dtype=np.int64)
+
+
 # ── B2 の作り方（学習側）──────────────────────────────────────
 class Source(Protocol):
     """**B2 の表をどう作るか。** 学習サンプルの行からか、プロファイルからか。
@@ -385,10 +557,11 @@ class FromSamples:
 
     #: 行の下限。**変えられるようにしてあるのは測るためで、配る側は既定を使う**
     min_samples: int = MIN_CELL_ROWS
-    min_days: int = MIN_CELL_DAYS
+    #: 日数の下限の形。**引くのは行 1 つで日数は減らない**ので、学習の行を下げない
+    floor: DayFloor = SAMPLES_FLOOR
 
     def table(self, samples: Samples, target: Target, keep: Bools) -> Table:
-        return fit(samples, target, keep, min_samples=self.min_samples, min_days=self.min_days)
+        return fit(samples, target, keep, min_samples=self.min_samples, floor=self.floor)
 
     def leave_out(
         self, table: Table, samples: Samples, target: Target, fallback: Float64
@@ -405,4 +578,4 @@ class FromSamples:
         「学習サンプルから作った」だけでは、**どこまで信じた表か**が後から読めない
         （§12 の 166 で「作り方」を残すようにしたのと同じ理由）。
         """
-        return f"学習サンプル（features/、下限 {self.min_samples} 行 {self.min_days} 日）"
+        return f"学習サンプル（features/、下限 {self.min_samples} 行・{self.floor.describe()}）"

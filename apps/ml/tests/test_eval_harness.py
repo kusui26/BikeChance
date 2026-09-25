@@ -121,9 +121,11 @@ def test_b2_fallback_ratio_is_reported() -> None:
 
 def test_the_climatology_source_is_named_in_the_report() -> None:
     """**同じ日でも作り方で B2 の中身が変わる。** どちらで測ったかを報告書に残す。"""
-    assert OUTCOME.climate == "学習サンプル（features/、下限 30 行 3 日）"
+    described = FromSamples().describe()
+    assert OUTCOME.climate == described
+    assert "下限 30 行・sat 配らない・sun_holiday 配らない・weekday 3 日" in described
     text = report.render_markdown(OUTCOME, "検査", "", weather=WEATHER)
-    assert "学習サンプル（features/、下限 30 行 3 日）" in text
+    assert described in text
 
 
 def test_a_source_given_from_outside_is_the_one_used() -> None:

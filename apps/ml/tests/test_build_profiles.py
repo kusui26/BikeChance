@@ -226,8 +226,8 @@ def test_the_summary_says_how_many_cells_are_usable() -> None:
     assert _int_of(second.summary, "usable_cells") == 0, "2 日では下限（3 日）に届かない"
     made = build_and_upload(port, DAY + timedelta(days=2))
     assert _int_of(made.summary, "usable_cells") == made.profile.num_rows
-    # **使えるセルは当てはめと同じ下限で数える**（持ち主は読む側。D-30）
-    assert made.summary["min_days"] == climatology.MIN_CELL_DAYS
+    # **使えるセルは当てはめと同じ下限で数える**（持ち主は読む側。D-30・D-37）
+    assert made.summary["serve_days"] == dict(climatology.SERVE_DAYS)
 
 
 # ── 記録 ──────────────────────────────────────────────────────
