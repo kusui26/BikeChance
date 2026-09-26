@@ -31,6 +31,14 @@ B1 に落ちていた。§2.3）。
 `profiles/date=…`）。**`--no-profile` を付けると従来どおり学習サンプルから作る**
 （入れ替える前後を比べるため）。
 
+**測るときだけ `--weekend-days` で土日祝の配る側の下限を指定できる**（3・4・5・off。
+W6 プラン §6.1 の候補の版を作る）。**`--upload` とは一緒に使えない**——配る版の下限は
+`climatology.SERVE_DAYS` の 1 か所で決め、コマンドの引数では変えない（D-37）。
+**k を渡したら、日曜・祝日の厚さがちょうど k 日でなければ書き出さずに止める**（違う厚さの
+版で K を決めない。測る側の `measure_floor` も同じ関数でもう 1 度確かめる）。
+
+    … --to 2026-09-21 --days 7 --weekend-days 3 --out .cache/floor/k3.json.gz
+
 **配信中（active・shadow）の版と同じ名前では置けない**（W6-19、契約 38）。版の名前は
 **最終学習日**なので、期間を変えて回し直すと同じ名前になり、置き直すと
 `model_versions` の行は動かないまま**配る値だけが変わる**（昇格を経ずに。W5 プラン
@@ -42,13 +50,14 @@ B1 に落ちていた。§2.3）。
 import argparse
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
 import numpy as np
 
-from bikechance_ml.baselines import blend, climatology, conditional
+from bikechance_ml.baselines import blend, climatology, conditional, profile_climatology
 from bikechance_ml.baselines.artifact import (
     FORMAT_VERSION,
     Artifact,
@@ -57,6 +66,7 @@ from bikechance_ml.baselines.artifact import (
     to_bytes,
 )
 from bikechance_ml.config import read_storage_config
+from bikechance_ml.eval import b2_effect
 from bikechance_ml.eval.dataset import TARGETS, Samples, Target
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.features.grid import jst_yesterday
@@ -82,8 +92,23 @@ VERSION_PREFIX: Final[str] = "baseline-b3-v0"
 #: 1,230 万行で 7 分 44 秒。日数に比例して伸びる）。
 DEFAULT_TRAIN_DAYS: Final[int] = 7
 
+#: `--weekend-days` に渡せる値（W6 プラン §6.1 の候補）。`off` は配らない。
+WEEKEND_CHOICES: Final[tuple[str, ...]] = ("3", "4", "5", "off")
+WEEKEND_OFF: Final[str] = "off"
 
-class WindowError(ValueError):
+#: 候補の版で厚さを確かめる曜日種別。**9/27 に測るのは日曜・祝日**（W6 プラン §6.1）。
+CANDIDATE_DOW_TYPE: Final[str] = "sun_holiday"
+
+
+class OptionError(ValueError):
+    """引数の組み合わせが通らない。**当てはめる前に止める**（7 分かけてから捨てない）。"""
+
+
+class CandidateError(ValueError):
+    """測るための候補の版が、頼んだ厚さになっていない。**書き出さずに止める。**"""
+
+
+class WindowError(OptionError):
     """期間の指定が噛み合っていない。**黙ってどちらかを選ばない。**"""
 
 
@@ -160,6 +185,7 @@ def climate_source(
     local: Path | None,
     samples: Samples,
     no_profile: bool = False,
+    weekend: str | None = None,
 ) -> climatology.Source:
     """B2 の作り方を決める。**プロファイルが読めればそちら。**
 
@@ -169,11 +195,54 @@ def climate_source(
     **決め方そのものは `jobs/climate.py` に 1 つだけ置く**（W5 プラン §12 の 166）。
     同じ条件が 3 か所に書かれていて、**そのうち 1 つが違う答えを出していた**。
     """
-    return climate.source_for(source, days, local, samples.ports, from_profiles=not no_profile)
+    chosen = climate.source_for(source, days, local, samples.ports, from_profiles=not no_profile)
+    return chosen if weekend is None else with_weekend(chosen, weekend)
+
+
+def with_weekend(chosen: climatology.Source, weekend: str) -> climatology.Source:
+    """**測るときだけ**：土日祝の配る側の下限を差し替える（W6 プラン §6.1 の候補の版）。
+
+    平日の下限と学習の行の下げ幅は、その作り方の既定のまま（`weekend_floor`）。
+    """
+    days = None if weekend == WEEKEND_OFF else int(weekend)
+    if isinstance(chosen, profile_climatology.FromProfile | climatology.FromSamples):
+        return replace(chosen, floor=climatology.weekend_floor(chosen.floor, days))
+    raise TypeError(f"下限を差し替えられない作り方です: {type(chosen).__name__}")
+
+
+def check_candidate(artifact: Artifact, weekend: str | None) -> None:
+    """**候補 k の版は、日曜・祝日の厚さがちょうど k 日**でなければ止める（W6 プラン §6.1）。
+
+    厚いと k 日より厚いセルも配る版になり、薄いと 1 セルも配らない版になる——どちらも
+    「k 日の B2」を測ったことにならない。**確かめ方は測る側と同じ関数**（`b2_effect`）。
+    """
+    if weekend is None or weekend == WEEKEND_OFF:
+        return
+    wrong = b2_effect.check_candidate(artifact, int(weekend), CANDIDATE_DOW_TYPE)
+    if wrong is not None:
+        raise CandidateError(wrong)
 
 
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="配信するベースラインを当てはめる")
+    _add_window(parser)
+    parser.add_argument("--local", default=None, help="Storage の代わりに読む場所")
+    parser.add_argument("--out", default=None, help="成果物の書き出し先")
+    parser.add_argument("--upload", action="store_true", help=registry.UPLOAD_HELP)
+    parser.add_argument(
+        "--weekend-days",
+        default=None,
+        choices=WEEKEND_CHOICES,
+        help="測るときだけ：土日祝の配る側の下限（日。off は配らない）。--upload とは使えない",
+    )
+    parser.add_argument(
+        "--no-profile", action="store_true", help="気候値を学習サンプルの行から作る（従来）"
+    )
+    return parser.parse_args(argv)
+
+
+def _add_window(parser: argparse.ArgumentParser) -> None:
+    """期間の 3 つ。**`--from` と `--days` は排他**（確かめるのは `window`）。"""
     parser.add_argument("--from", dest="start", default=None, help="JST の暦日（含む）")
     parser.add_argument("--to", dest="end", default=None, help="JST の暦日（含む。既定は昨日）")
     parser.add_argument(
@@ -182,30 +251,33 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
         default=None,
         help=f"--to までの日数（既定 {DEFAULT_TRAIN_DAYS}）。--from とは同時に指定できない",
     )
-    parser.add_argument("--local", default=None, help="Storage の代わりに読む場所")
-    parser.add_argument("--out", default=None, help="成果物の書き出し先")
-    parser.add_argument("--upload", action="store_true", help=registry.UPLOAD_HELP)
-    parser.add_argument(
-        "--no-profile", action="store_true", help="気候値を学習サンプルの行から作る（従来）"
-    )
-    return parser.parse_args(argv)
 
 
 def run(argv: Sequence[str] | None = None) -> int:
     options = _arguments(argv)
     try:
-        first, last = window(
-            start=options.start, end=options.end, days=options.days, now=datetime.now(UTC)
-        )
+        first, last = _checked_window(options)
     # **黙って既定に落ちない。** 期間を間違えたまま配る成果物を作るほうが高くつく
-    except WindowError as error:
-        print(f"期間の指定が違います: {error}", file=sys.stderr)
+    except OptionError as error:
+        print(f"指定が違います: {error}", file=sys.stderr)
         return 2
     days = days_between(first, last)
     # **どの期間で当てはめたかを最初に言う。** 既定で走らせたときに、何日ぶんを
     # 読もうとしているかが目で分かる（読めなかった日は `read_window` が別に言う）
     print(f"学習期間 {first} 〜 {last}（{len(days)} 日）", file=sys.stderr)
-    return _fit(options, days)
+    try:
+        return _fit(options, days)
+    except CandidateError as error:
+        print(f"候補の版になっていません（書き出しません）: {error}", file=sys.stderr)
+        return 2
+
+
+def _checked_window(options: argparse.Namespace) -> tuple[date, date]:
+    """**当てはめる前に、通らない指定を止める。** 期間の決め方と、測るための下限の使い方。"""
+    if options.weekend_days is not None and options.upload:
+        # **測るための下限では置かない**——配る版の下限は `SERVE_DAYS` の 1 か所で決める（D-37）
+        raise OptionError("--weekend-days は測るとき（--out）だけに使え、--upload とは使えません")
+    return window(start=options.start, end=options.end, days=options.days, now=datetime.now(UTC))
 
 
 def _fit(options: argparse.Namespace, days: Sequence[date]) -> int:
@@ -214,11 +286,7 @@ def _fit(options: argparse.Namespace, days: Sequence[date]) -> int:
         reader = None if local else source
         # **名前を `window` にしない**——この上に期間を決める `window()` が在る
         opened = _open(source, reader, local, days, upload=options.upload)
-        samples = samples_of(opened)
-        chosen = climate_source(reader, opened.days, local, samples, options.no_profile)
-        # **天気の被覆は見ない。** ベースラインが読むのは 6 列で、天気はその中に無い
-        # （`baselines/` は `Samples` しか触らない）。混ざっても値が変わらない
-        artifact = build_artifact(samples, opened.days, chosen)
+        artifact, samples, chosen = _fitted(reader, opened, local, options)
         body = to_bytes(artifact)
         if options.upload:
             _upload(source, artifact, body)
@@ -227,6 +295,21 @@ def _fit(options: argparse.Namespace, days: Sequence[date]) -> int:
         Path(options.out).write_bytes(body)
     _report(artifact, body, samples, chosen)
     return 0
+
+
+def _fitted(
+    reader: SupabaseIo | None, opened: Window, local: Path | None, options: argparse.Namespace
+) -> tuple[Artifact, Samples, climatology.Source]:
+    """開いた窓で当てはめる。**候補の版なら、書き出す前に厚さを確かめる。**"""
+    samples = samples_of(opened)
+    chosen = climate_source(
+        reader, opened.days, local, samples, options.no_profile, options.weekend_days
+    )
+    # **天気の被覆は見ない。** ベースラインが読むのは 6 列で、天気はその中に無い
+    # （`baselines/` は `Samples` しか触らない）。混ざっても値が変わらない
+    artifact = build_artifact(samples, opened.days, chosen)
+    check_candidate(artifact, options.weekend_days)
+    return artifact, samples, chosen
 
 
 def _open(
@@ -263,6 +346,10 @@ def _report(artifact: Artifact, body: bytes, samples: Samples, chosen: climatolo
         f"ポート {samples.n_ports:,} / 学習 {len(samples):,} 行 / 気候値 {chosen.describe()}",
         file=sys.stderr,
     )
+    # **どの厚さで作ったか**（曜日種別ごとの日数の最大。日数はターゲットによらない）。
+    # 候補の版を作るとき、`sun_holiday` がちょうど k 日かを目でも見られる（W6 プラン §6.1）
+    thickness = climatology.describe_thickness(next(iter(artifact.targets.values())).b2.max_days)
+    print(f"B2 の厚さ（曜日種別ごとの日数の最大）: {thickness}", file=sys.stderr)
 
 
 if __name__ == "__main__":

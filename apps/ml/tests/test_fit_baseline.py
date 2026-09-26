@@ -19,9 +19,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 
+from bikechance_ml.baselines import climatology
 from bikechance_ml.baselines.artifact import FORMAT_VERSION, artifact_path, from_bytes
+from bikechance_ml.eval.dataset import Samples, Target
+from bikechance_ml.features.arrays import Bools, Float64
 from bikechance_ml.features.constants import FEATURE_SET
 from bikechance_ml.jobs import fit_baseline
 from bikechance_ml.jobs.fit_baseline import (
@@ -31,10 +35,11 @@ from bikechance_ml.jobs.fit_baseline import (
     model_version_for,
     run,
     window,
+    with_weekend,
 )
 from bikechance_ml.models import registry
 from tests import eval_fixture
-from tests.test_window import write_samples
+from tests.test_window import GOLDEN, write_day, write_samples
 
 #: JST の 2026-09-14 08:30（＝当てはめ直しを走らせる時刻）。**UTC ではまだ 09-13。**
 MORNING = datetime(2026, 9, 13, 23, 30, tzinfo=UTC)
@@ -261,3 +266,91 @@ def test_writing_to_a_file_does_not_ask_the_registry(
     assert shelf.lookups == []
     assert shelf.uploads == []
     assert from_bytes(out.read_bytes()).model_version == name
+
+
+# ── 測るための候補の版（W6 プラン §6.1、D-37）──────────────────
+def _on_sundays(root: Path) -> Path:
+    """3 日ぶんを置く。**到着の曜日種別を全部 `sun_holiday` にする**（厚さ 3 日の日曜）。"""
+    index = GOLDEN.schema.get_field_index("target_dow_type")
+    sundays = GOLDEN.set_column(
+        index,
+        GOLDEN.schema.field(index),
+        pa.array(["sun_holiday"] * GOLDEN.num_rows, type=pa.string()),
+    )
+    for day in DAYS:
+        write_day(root, day, sundays)
+    return root
+
+
+def test_weekend_days_cannot_be_uploaded(capsys: pytest.CaptureFixture[str]) -> None:
+    """**測るための下限では置かない**（配る版の下限は `SERVE_DAYS` の 1 か所。D-37）。
+
+    Storage を開く前に 2 で返る（`read_storage_config` に届けば別の失敗になる）。
+    """
+    assert run(["--to", f"{DAYS[-1]}", "--weekend-days", "3", "--upload"]) == 2
+    assert "--weekend-days は測るとき" in capsys.readouterr().err
+
+
+def test_a_candidate_gets_the_asked_weekend_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**土日祝の配る側だけが k になり**、報告書に形と厚さが出る（PR A の完了条件 3）。"""
+    root = _on_sundays(tmp_path / "samples")
+    out = tmp_path / "k3.json.gz"
+    assert _run(Shelf(), root, monkeypatch, "--weekend-days", "3", "--out", str(out)) == 0
+    for model in from_bytes(out.read_bytes()).targets.values():
+        assert dict(model.b2.floor.serve) == {"sat": 3, "sun_holiday": 3, "weekday": 3}
+        assert model.b2.max_days == {"sat": 0, "sun_holiday": 3, "weekday": 0}
+    err = capsys.readouterr().err
+    assert "sat 3 日・sun_holiday 3 日・weekday 3 日" in err
+    assert "B2 の厚さ（曜日種別ごとの日数の最大）: sat 0 日・sun_holiday 3 日・weekday 0 日" in err
+
+
+def test_a_candidate_of_another_thickness_is_not_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**日曜・祝日がちょうど k 日でなければ書き出さない**（違う厚さの版で K を決めない）。"""
+    root = _on_sundays(tmp_path / "samples")
+    out = tmp_path / "k4.json.gz"
+    assert _run(Shelf(), root, monkeypatch, "--weekend-days", "4", "--out", str(out)) == 2
+    assert not out.exists()
+    assert "候補の版になっていません" in capsys.readouterr().err
+
+
+def test_off_is_the_default_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`off` は既定と同じ形（**土日祝を配らない**）。厚さは確かめない。"""
+    root = _on_sundays(tmp_path / "samples")
+    out = tmp_path / "off.json.gz"
+    assert _run(Shelf(), root, monkeypatch, "--weekend-days", "off", "--out", str(out)) == 0
+    for model in from_bytes(out.read_bytes()).targets.values():
+        assert model.b2.floor == climatology.SAMPLES_FLOOR
+
+
+def test_with_weekend_keeps_the_way_b2_is_made() -> None:
+    """**差し替えるのは土日祝の配る側だけ**。学習の行の下げ幅（作り方の既定）は残る。"""
+    from_samples = with_weekend(climatology.FromSamples(), "4")
+    assert isinstance(from_samples, climatology.FromSamples)
+    assert from_samples.floor == climatology.weekend_floor(climatology.SAMPLES_FLOOR, 4)
+    with pytest.raises(TypeError):
+        with_weekend(_Unknown(), "4")
+
+
+class _Unknown:
+    """**下限を差し替える口を知らない作り方**（`Source` の形だけを満たす代役）。
+
+    黙って元の作り方を返すと、**頼んだ下限で当てはめていない候補の版**ができる。
+    """
+
+    def table(self, samples: Samples, target: Target, keep: Bools) -> climatology.Table:
+        raise AssertionError("当てはめに入らない")
+
+    def leave_out(
+        self, table: climatology.Table, samples: Samples, target: Target, fallback: Float64
+    ) -> climatology.Applied:
+        raise AssertionError("当てはめに入らない")
+
+    def blend_rows(self, samples: Samples) -> Bools:
+        raise AssertionError("当てはめに入らない")
+
+    def describe(self) -> str:
+        return "検査用（下限の口が無い）"

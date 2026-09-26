@@ -17,6 +17,10 @@
 `predict_leave_one_out` をそのまま使うと書いていたが、**抽出重みは 25 と 100 で、
 高々 84 点のセルから引くと分母が負になる**（§12 の 143）。
 
+**引く日は、行の答えが入った日（到着日）である**（W5 プランの所見 180、W6 の PR A）。
+セルは到着時刻で引く（`target_dow_type`・`t + h` の枠）ので、日をまたぐ行（学習の行の
+約 4%）で基準の日を引くと、**答えがセルに残り**、違う曜日種別に着く行では日数も減らない。
+
 **ここは純粋な部分だけを持つ。** Parquet を読むのは `jobs/climate.py`。
 """
 
@@ -72,7 +76,7 @@ def fit(
     ports: Sequence[str],
     target: Target,
     min_samples: int = climatology.MIN_CELL_POINTS,
-    min_days: int = climatology.MIN_CELL_DAYS,
+    floor: climatology.DayFloor = climatology.PROFILE_FLOOR,
 ) -> climatology.Table:
     """プロファイルの累計を B2 の表にする。**下限と率の決め方は `table_of` に任せる。**
 
@@ -94,7 +98,7 @@ def fit(
             taken, weights=_floats(profile_table, "n_days")[inside], minlength=size
         ).astype(np.int64),
         min_samples=min_samples,
-        min_days=min_days,
+        floor=floor,
     )
 
 
@@ -128,10 +132,18 @@ class Dailies:
     #: JST の暦日の通し番号（`date.toordinal()`）→ その日ぶん
     by_day: Mapping[int, DayCells]
 
-    def covers(self, samples: Samples) -> Bools:
-        """**その行の日ぶんを引けるか。** 引けない日の行は混合の当てはめから外す。"""
-        known = np.asarray(sorted(self.by_day), dtype=np.int32)
-        return np.asarray(np.isin(samples.day, known), dtype=np.bool_)
+    def covers(self, samples: Samples, profile_day: date) -> Bools:
+        """**その行の答えを、B2 から除けるか。** 除けない行は混合の当てはめから外す。
+
+        除けるのは 2 通り：**到着日の寄与を引ける**（その日の `daily` がある）か、
+        **到着日がプロファイルの日より後**（答えがもともとプロファイルに入っていない）。
+        学習の最終日の夜に出て翌日に着く行が後者で、引かずにそのまま使える。
+        """
+        known = np.asarray(sorted(self.by_day), dtype=np.int64)
+        arrival = arrival_day(samples)
+        return np.asarray(
+            np.isin(arrival, known) | (arrival > profile_day.toordinal()), dtype=np.bool_
+        )
 
 
 def day_cells(daily: pa.Table, ports: Sequence[str]) -> DayCells:
@@ -150,22 +162,37 @@ def day_cells(daily: pa.Table, ports: Sequence[str]) -> DayCells:
     )
 
 
-def own_day(dailies: Dailies, samples: Samples, target: Target) -> climatology.Own:
-    """**その行の日ぶんを丸ごと**引く量（`climatology.predict_without` に渡す）。
+def arrival_day(samples: Samples) -> Int64:
+    """行の**到着日**（JST の暦日の通し番号）。`t + h` が日をまたげば基準の日の翌日。
 
-    **引けない日の行は 0 を返す**（引かない）。そのまま混ぜると B2 が自分の答えを見る
-    ので、**呼ぶ側は `Dailies.covers` で先に絞る**（`FromProfile.blend_rows`）。
+    セルを引く曜日種別（`target_dow_type`）と枠（`slot15`）は到着時刻で決まるので、
+    **答えの観測が入っているのはこの日の寄与**である（W5 プランの所見 180）。
+    """
+    ahead = profile.target_day_offset(samples.minute_of_day, samples.h_min)
+    return np.asarray(samples.day.astype(np.int64) + ahead, dtype=np.int64)
+
+
+def own_day(dailies: Dailies, samples: Samples, target: Target) -> climatology.Own:
+    """**その行の答えが入った日（到着日）ぶんを丸ごと**引く量（`predict_without` に渡す）。
+
+    **基準の日ではなく到着日を引く**（W5 プランの所見 180）。日をまたぐ行で基準の日を
+    引くと、同じ曜日種別に着く行は**自分の答えがセルに残り**、違う曜日種別に着く行は
+    **何も引かれず日数も減らない**——下限ちょうどのセルを学習の行が引けてしまっていた。
+
+    **到着日の `daily` が無い行は 0 を返す**（引かない）。答えがプロファイルに入って
+    いるのに引けない行は、**呼ぶ側が `Dailies.covers` で混合から外す**（`blend_rows`）。
     """
     key = climatology.cell_key(
         samples.port.astype(np.int64),
         samples.dow_type.astype(np.int64),
         climatology.slot15(samples),
     )
+    arrival = arrival_day(samples)
     total = np.zeros(len(samples), dtype=np.float64)
     positive = np.zeros(len(samples), dtype=np.float64)
     days = np.zeros(len(samples), dtype=np.int64)
     for ordinal, cell in dailies.by_day.items():
-        rows = np.asarray(samples.day == ordinal, dtype=np.bool_)
+        rows = np.asarray(arrival == ordinal, dtype=np.bool_)
         found, points, hits = cell.take(key[rows], target)
         total[rows], positive[rows], days[rows] = points, hits, found
     return climatology.Own(
@@ -190,10 +217,10 @@ class FromProfile:
     dailies: Dailies
     #: `dailies` を作ったときのポートの並び。**サンプルと違えば例外にする**
     ports: tuple[str, ...]
-    #: 下限（格子点と日数）。**変えられるようにしてあるのは測るためで、配る側は既定を使う**。
+    #: 下限（格子点と日数の形）。**変えられるようにしてあるのは測るためで、配る側は既定を使う**。
     #: **報告書に出す**（`describe`）——どの下限で作った B2 かが後から読めるように（§12 の 167）
     min_points: int = climatology.MIN_CELL_POINTS
-    min_days: int = climatology.MIN_CELL_DAYS
+    floor: climatology.DayFloor = climatology.PROFILE_FLOOR
 
     def table(self, samples: Samples, target: Target, keep: Bools) -> climatology.Table:  # noqa: ARG002
         """**`keep` は見ない。** どの日までを含むかはプロファイルの版が決めている。"""
@@ -204,7 +231,7 @@ class FromProfile:
             ports=self.ports,
             target=target,
             min_samples=self.min_points,
-            min_days=self.min_days,
+            floor=self.floor,
         )
 
     def leave_out(
@@ -219,12 +246,13 @@ class FromProfile:
         )
 
     def blend_rows(self, samples: Samples) -> Bools:
-        return self.dailies.covers(samples)
+        return self.dailies.covers(samples, self.day)
 
     def describe(self) -> str:
+        """**版・引ける日・下限の形・引く日の決め方**。どう作った B2 かが後から読める。"""
         return (
             f"プロファイル（profiles/date={self.day}、引ける日 {len(self.dailies.by_day)}、"
-            f"下限 {self.min_points} 点 {self.min_days} 日）"
+            f"下限 {self.min_points} 点・{self.floor.describe()}、自分の日は到着日で引く）"
         )
 
 
