@@ -5,15 +5,20 @@
 """
 
 import math
+import re
+from pathlib import Path
+from typing import Final
 
 import numpy as np
 import pytest
 
 from bikechance_ml.eval.metrics import (
+    BANDS,
     CALIBRATION_BINS,
     ECE_QUANTILE_BINS,
     LOG_LOSS_EPSILON,
     brier,
+    decision,
     ece,
     ece_uniform,
     log_loss,
@@ -221,3 +226,76 @@ def test_the_judgement_uses_the_quantile_one() -> None:
 def test_an_empty_set_has_no_bins() -> None:
     """行が無ければ区間も無い（0 の点を作らない）。"""
     assert reliability_quantile(y(), p()) == ()
+
+
+# ── 意思決定の指標（W6-16）──────────────────────────────────────
+CONSTANTS_TS: Final[Path] = (
+    Path(__file__).resolve().parents[3] / "packages" / "shared" / "src" / "constants.ts"
+)
+
+
+def typescript_band_thresholds() -> dict[str, float]:
+    """`constants.ts` の `PROBABILITY_BAND_THRESHOLDS`（`high_min`・`medium_min`）を読む。"""
+    text = CONSTANTS_TS.read_text(encoding="utf-8")
+    found = re.search(r"PROBABILITY_BAND_THRESHOLDS = \{([^}]*)\}", text)
+    assert found is not None, "PROBABILITY_BAND_THRESHOLDS が constants.ts に見つからない"
+    pairs = re.findall(r"(\w+):\s*([0-9.]+)", found.group(1))
+    return {name: float(value) for name, value in pairs}
+
+
+def test_the_bands_are_the_ones_the_app_shows() -> None:
+    """**3 段階の境目は、アプリが表示に使う値と同じ**（開発プラン §9.3）。
+
+    ずれると、報告書の「高の実現率」がアプリの「高」と違う帯を数える。
+    """
+    shown = typescript_band_thresholds()
+    assert [low for _, low in BANDS] == [shown["high_min"], shown["medium_min"], 0.0]
+
+
+def test_precision_and_coverage_at_the_promise() -> None:
+    """**0.9 以上と出した 3 行のうち 2 行が当たり、それは全体（重み 10）の 3 / 10。**"""
+    labels = y(1, 1, 0, 1, 0)
+    values = p(0.95, 0.9, 0.99, 0.5, 0.2)
+    weights = w(1, 1, 1, 3, 4)
+    result = decision(labels, values, weights)
+    assert result.precision == pytest.approx(2 / 3)
+    assert result.coverage == pytest.approx(3 / 10)
+
+
+def test_the_precision_is_weighted() -> None:
+    """重みは逆抽出確率。**重い行が外れれば、実現率はそのぶん下がる。**"""
+    result = decision(y(1, 0), p(0.95, 0.95), w(1, 3))
+    assert result.precision == pytest.approx(1 / 4)
+
+
+def test_no_promise_means_no_precision() -> None:
+    """**0.9 以上を 1 度も出さなければ、実現率は無い**（0 と区別する）。"""
+    result = decision(y(1, 0), p(0.5, 0.2))
+    assert result.precision is None
+    assert result.coverage == 0.0
+
+
+def test_a_value_on_the_border_belongs_to_the_higher_band() -> None:
+    """**境目ちょうどは上の段階**（0.85 は「高」、0.60 は「中」。アプリと同じ）。"""
+    bands = {one.name: one for one in decision(y(1, 1, 0), p(0.85, 0.6, 0.5999)).bands}
+    assert bands["高"].share == pytest.approx(1 / 3)
+    assert bands["中"].share == pytest.approx(1 / 3)
+    assert bands["低"].share == pytest.approx(1 / 3)
+    assert (bands["高"].realized, bands["中"].realized, bands["低"].realized) == (1.0, 1.0, 0.0)
+
+
+def test_the_bands_cover_every_row_once() -> None:
+    rng = np.random.default_rng(20260927)
+    values = rng.random(1_000)
+    labels = np.asarray(rng.random(1_000) < values, dtype=np.int8)
+    weights = np.asarray(rng.random(1_000) + 0.5, dtype=np.float32)
+    bands = decision(labels, values, weights).bands
+    assert sum(one.share for one in bands) == pytest.approx(1.0)
+    assert [one.name for one in bands] == [name for name, _ in BANDS]
+
+
+def test_an_empty_band_has_no_realized_rate() -> None:
+    """**入った行が無い段階は None**（「全部外れた」の 0 と混ぜない）。"""
+    bands = {one.name: one for one in decision(y(1, 0), p(0.95, 0.9)).bands}
+    assert bands["低"].realized is None
+    assert bands["低"].share == 0.0

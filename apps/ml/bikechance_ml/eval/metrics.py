@@ -17,7 +17,7 @@ from typing import Final
 
 import numpy as np
 
-from bikechance_ml.features.arrays import Float32, Float64, Int8
+from bikechance_ml.features.arrays import Bools, Float32, Float64, Int8
 
 #: 確率をこの範囲に丸めてから log を取る。B0 は 0 と 1 を返すので、そのままだと
 #: 外した行が無限大になる。**丸める前提を明示しておく**（log loss の解釈に効く）。
@@ -25,6 +25,15 @@ LOG_LOSS_EPSILON: Final[float] = 1e-15
 
 #: **信頼度図**の区間の数（**等幅**）。図として読むための刻みで、合否には使わない。
 CALIBRATION_BINS: Final[int] = 20
+
+#: 「約束の履行」の閾値（開発プラン §1 の表：`precision@0.9 ≥ 0.90`。§7.3）。
+#: **0.9 以上と出したときに、実際にどれだけ当たったか**を見る（W6-16）。
+PROMISE_MIN: Final[float] = 0.90
+
+#: アプリの 3 段階（**高い順**。名前と下限）。**`packages/shared/src/constants.ts` の
+#: `PROBABILITY_BAND_THRESHOLDS` と同じ値**である（開発プラン §9.3。検査が突き合わせる）。
+#: 「高 ＝ ほぼ大丈夫」がアプリの約束で、**v1 でそれがどれだけ実現するかを初めて測る**（W6-16）。
+BANDS: Final[tuple[tuple[str, float], ...]] = (("高", 0.85), ("中", 0.60), ("低", 0.0))
 
 #: **判定に使う ECE** の区間の数（**等頻度**。開発プラン §7.3 の「15 等頻度ビン」）。
 #:
@@ -208,6 +217,66 @@ def score(y: Int8, p: Float64, w: Float32 | None = None) -> Scores:
         bins=bins,
         quantile_bins=quantile,
     )
+
+
+@dataclass(frozen=True)
+class BandScore:
+    """3 段階の 1 つ。**その段階に入った割合と、そこでの実現率**（どちらも重み付き）。"""
+
+    name: str
+    #: 段階の下限（含む）。上限は 1 つ上の段階の下限（含まない）
+    low: float
+    share: float
+    #: 入った行が無ければ None（**0 と区別する**。0 は「全部外れた」である）
+    realized: float | None
+
+
+@dataclass(frozen=True)
+class Decision:
+    """意思決定の指標（W6-16、開発プラン §7.3）。**アプリの約束がどれだけ実現するか。**
+
+    日次評価（`model_daily_metrics`）には入れない（列が要るので W8）。当てはめの報告書と
+    モデルカードに出す。
+    """
+
+    #: `precision@0.9`：0.9 以上と出した行の実現率。**そういう行が無ければ None**
+    precision: float | None
+    #: `coverage@0.9`：0.9 以上と出せた割合
+    coverage: float
+    bands: tuple[BandScore, ...]
+
+
+def decision(y: Int8, p: Float64, w: Float32 | None = None) -> Decision:
+    """意思決定の指標をまとめる。**確率は配る前の値のまま**（表示の丸めは掛けない）。"""
+    return Decision(
+        precision=_realized(y, w, p >= PROMISE_MIN),
+        coverage=_share(w, p >= PROMISE_MIN, len(y)),
+        bands=tuple(_band(y, p, w, index) for index in range(len(BANDS))),
+    )
+
+
+def _band(y: Int8, p: Float64, w: Float32 | None, index: int) -> BandScore:
+    """高い順に `index` 番目の段階。**上の段階の下限を上限にする**（境目は上の段階に入る）。"""
+    name, low = BANDS[index]
+    high = BANDS[index - 1][1] if index > 0 else np.inf
+    inside = np.asarray((p >= low) & (p < high), dtype=np.bool_)
+    return BandScore(name, low, _share(w, inside, len(y)), _realized(y, w, inside))
+
+
+def _realized(y: Int8, w: Float32 | None, inside: Bools) -> float | None:
+    """その行たちの実現率（重み付き）。**1 行も無ければ None。**"""
+    if not bool(inside.any()):
+        return None
+    return _mean(np.asarray(y[inside], dtype=np.float64), None if w is None else w[inside])
+
+
+def _share(w: Float32 | None, inside: Bools, count: int) -> float:
+    """その行たちの割合（重み付き）。**行が 1 つも無ければ 0。**"""
+    total = _total(w, count)
+    if total <= 0.0:
+        return 0.0
+    part = float(inside.sum()) if w is None else float(w.astype(np.float64)[inside].sum())
+    return part / total
 
 
 def skill(value: float, reference: float) -> float | None:

@@ -18,6 +18,10 @@
 
 **門は 1 の後・2 の前に通る**（`jobs/fit_lightgbm.py` の `prepare`）。天気の被覆は
 1 で数え終わっているので、**止めるときは表を 1 つも開いていない。**
+
+**読んだバイト列の SHA-256 も持って帰れる**（`fingerprints`。W6-17、開発プラン §7.5）。
+`features/` は同じパスで作り直すことがあるので（J1）、**パスだけでは「どのバイト列から
+当てはめたか」が残らない。**
 """
 
 import io
@@ -30,7 +34,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bikechance_ml.eval.dataset import NEEDED_COLUMNS, Samples, merge, to_chunk
-from bikechance_ml.features import coverage
+from bikechance_ml.features import coverage, fingerprint
 from bikechance_ml.features.grid import features_path
 from bikechance_ml.features.schema import WEATHER_COLUMNS
 from bikechance_ml.io.supabase import SupabaseIo
@@ -65,6 +69,11 @@ class Window:
 
     def __len__(self) -> int:
         return sum(self.rows.values())
+
+
+def fingerprints(window: Window) -> dict[date, fingerprint.Fingerprint]:
+    """読めた日ごとの行数と SHA-256。**読んだバイト列そのもの**を数える（取り直さない）。"""
+    return {day: fingerprint.of(window.bodies[day], window.rows[day]) for day in window.days}
 
 
 def days_between(start: date, end: date) -> tuple[date, ...]:

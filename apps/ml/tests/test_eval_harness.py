@@ -309,3 +309,74 @@ def test_a_misaligned_extra_model_stops() -> None:
 def test_without_extras_the_tables_are_unchanged() -> None:
     """**足さなければ今までどおり。** 既存の報告の形を壊さない。"""
     assert build(scenario()).models == ("B0", "B1", "B2", "B3")
+
+
+# ── 門の相手の B3 を、学習窓の最後の日で当てはめる（W6-10、W6 の契約 36）──
+#: 学習 2 日 / パージ 1 日 / 検証 1 日。
+FOUR_DAYS: Final[tuple[date, ...]] = (*fixture.DAYS, date(2026, 9, 10))
+FOUR_SPLIT = split_days(FOUR_DAYS, evaluate_days=1, purge_days=1)
+
+
+def _changing_rows() -> list[dict[str, object]]:
+    """**台数 0 の行が、1 日目は必ず借りられず、2 日目は必ず借りられる。** 検証日は半々。"""
+    answers = {
+        FOUR_DAYS[0]: (0, 0),
+        FOUR_DAYS[1]: (1, 1),
+        FOUR_DAYS[2]: (0, 1),
+        FOUR_DAYS[3]: (0, 1),
+    }
+    return [
+        fixture.row(day, "hellocycling", station, 30, 0, 9, answer, 1)
+        for day, pair in answers.items()
+        for station, answer in zip(("a", "b"), pair, strict=True)
+    ]
+
+
+def _baseline_outcome(days: tuple[date, ...] | None) -> harness.Outcome:
+    samples = to_samples(fixture.to_table(_changing_rows()))
+    return harness.run(samples, FOUR_SPLIT, climate=FromSamples(), baseline_days=days)
+
+
+def test_the_baselines_can_be_fitted_on_the_last_days_only() -> None:
+    """**配る B3 は学習窓の最後の 7 日で当てはめる**ので、門の相手もそれに揃える。
+
+    2 日目だけで当てはめた B1 は「台数 0 でも借りられる」を覚え、2 日ぶんの B1 より高く出す。
+    """
+    last = _baseline_outcome((FOUR_DAYS[1],))
+    both = _baseline_outcome(None)
+    b1_last = last.fits[0].probability["B1"]
+    b1_both = both.fits[0].probability["B1"]
+    assert float(b1_last.mean()) > float(b1_both.mean())
+    assert last.baseline_days == (FOUR_DAYS[1],)
+    assert (last.n_fit, last.n_baseline_fit) == (4, 2), "LightGBM の学習の行は窓ぜんぶのまま"
+
+
+def test_without_baseline_days_the_whole_fit_period_is_used() -> None:
+    both = _baseline_outcome(None)
+    assert both.baseline_days == FOUR_SPLIT.fit
+    assert both.n_baseline_fit == both.n_fit == 4
+
+
+@pytest.mark.parametrize("day", [FOUR_DAYS[2], FOUR_DAYS[3]])
+def test_a_baseline_day_outside_the_fit_period_is_refused(day: date) -> None:
+    """**パージ日や検証日で当てはめない**（検証日の答えを B3 に見せない）。"""
+    with pytest.raises(harness.BaselineDaysError):
+        _baseline_outcome((FOUR_DAYS[1], day))
+
+
+def test_no_baseline_days_is_refused() -> None:
+    with pytest.raises(harness.BaselineDaysError):
+        _baseline_outcome(())
+
+
+def test_the_report_says_which_days_the_baselines_were_fitted_on() -> None:
+    """**報告書に、B3 を当てはめた日を書く**（学習期間の一部のときだけ）。"""
+    weather = dict.fromkeys(FOUR_DAYS, _coverage(100, 1.0))
+    last = report.render_markdown(
+        _baseline_outcome((FOUR_DAYS[1],)), "t", "n", "fit_lightgbm", weather=weather
+    )
+    both = report.render_markdown(
+        _baseline_outcome(None), "t", "n", "fit_lightgbm", weather=weather
+    )
+    assert f"**B0〜B3 の当てはめ**：{FOUR_DAYS[1]}〜{FOUR_DAYS[1]}（1 日・2 行）" in last
+    assert "B0〜B3 の当てはめ" not in both
