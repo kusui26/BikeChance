@@ -289,6 +289,34 @@ def test_a_listing_failure_is_labelled_storage() -> None:
     assert caught.value.failure.phase == "storage"
 
 
+# ── 登録簿の shadow（W6 の PR E）──────────────────────────────
+SHADOW_ROW: dict[str, object] = {
+    "model_version": "baseline-b3-v0-20260928",
+    "kind": "baseline",
+    "status": "shadow",
+    "feature_set": "v4",
+    "artifact_path": "baseline/baseline-b3-v0-20260928.json.gz",
+}
+
+
+def test_the_shadow_row_is_asked_by_its_status() -> None:
+    """**shadow の行は `status = shadow` の 1 行**（2 つ無いことは 0038 の部分一意索引が守る）。"""
+    io, seen = io_with(lambda request: json_response([SHADOW_ROW]))
+    found = io.shadow_model()
+    assert found is not None
+    assert (found.model_version, found.status) == ("baseline-b3-v0-20260928", "shadow")
+    request = seen[0]
+    assert request.url.path == "/rest/v1/model_versions"
+    assert (request.url.params["status"], request.url.params["limit"]) == ("eq.shadow", "1")
+    assert KEY not in str(request.url)
+
+
+def test_no_shadow_is_none() -> None:
+    """**shadow は無いのが普通**——空の応答は None で、例外にしない。"""
+    io, _ = io_with(lambda request: json_response([]))
+    assert io.shadow_model() is None
+
+
 # ── Range 要求（W6 の PR D）──────────────────────────────────
 PROFILE: str = "profiles/date=2026-09-26/profile.parquet"
 

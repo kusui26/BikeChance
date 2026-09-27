@@ -9,8 +9,11 @@
 配信の経路が `lightgbm` を読み込まないことは `tests/test_serving_imports.py` が見る。
 """
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from typing import Final
 
 import pyarrow as pa
 import pytest
@@ -188,15 +191,118 @@ def test_the_same_version_is_fetched_once() -> None:
     assert port.fetches == 1
 
 
-def test_a_new_version_replaces_the_cache() -> None:
+def test_a_new_version_is_fetched_and_the_old_one_stays() -> None:
+    """**新しい版は取りに行き、前の版は残る**（捨てるのは `retain` と上限。W6-02）。"""
     port = _baseline_port()
-    registry.load(port, registry.active(port))
-    renamed = replace(BASELINE, model_version="baseline-b3-v0-99999999")
-    other = _registered(renamed.model_version, registry.BASELINE_KIND, FEATURE_SET)
-    port.rows[other.model_version] = other
-    port.bodies[other.artifact_path] = baseline_to_bytes(renamed)
+    first = registry.active(port)
+    registry.load(port, first)
+    other = _add_version(port, "baseline-b3-v0-99999999", "active")
     registry.load(port, other)
+    registry.load(port, first)
     assert port.fetches == 2
+
+
+# ── 版ごとに持つ（W6-02、契約 31）──────────────────────────────
+def _add_version(port: FakePort, model_version: str, status: str) -> registry.Registered:
+    """同じ中身を別の版の名前で置き、登録する。**取りに行った回数だけを見る**検査に使う。"""
+    renamed = replace(BASELINE, model_version=model_version)
+    row = _registered(model_version, registry.BASELINE_KIND, FEATURE_SET, status)
+    port.rows[model_version] = row
+    port.bodies[row.artifact_path] = baseline_to_bytes(renamed)
+    return row
+
+
+def test_the_active_and_the_shadow_are_kept_side_by_side() -> None:
+    """**active と shadow を毎周期読んでも、取り直さない**（所見 189）。
+
+    1 つだけ持つと互いを追い出し、毎周期 2 つとも落とし直す（版 1 の成果物なら月 300 GB）。
+    """
+    port = _baseline_port()
+    active = registry.active(port)
+    shadow = _add_version(port, "baseline-b3-v0-shadow", "shadow")
+    for _ in range(3):
+        registry.retain({active.model_version, shadow.model_version})
+        registry.load(port, active)
+        registry.load(port, shadow)
+    assert port.fetches == 2
+
+
+def test_retain_drops_only_the_versions_not_in_use() -> None:
+    """**その周期に使う版だけを残す**——下ろした shadow は捨て、active は残す。"""
+    port = _baseline_port()
+    active = registry.active(port)
+    shadow = _add_version(port, "baseline-b3-v0-shadow", "shadow")
+    registry.load(port, active)
+    registry.load(port, shadow)
+    registry.retain({active.model_version})
+    registry.load(port, active)
+    assert port.fetches == 2, "残した版は取り直さない"
+    registry.load(port, shadow)
+    assert port.fetches == 3, "捨てた版は取り直す"
+
+
+def test_the_cache_drops_the_least_recently_used_beyond_the_limit() -> None:
+    """**上限を超えたら、いちばん長く使っていない版から捨てる**（`CACHE_LIMIT`）。"""
+    port = _baseline_port()
+    rows = [
+        _add_version(port, f"baseline-b3-v0-9999000{index}", "candidate")
+        for index in range(registry.CACHE_LIMIT + 1)
+    ]
+    for row in rows[: registry.CACHE_LIMIT]:
+        registry.load(port, row)
+    registry.load(port, rows[0])  # 使い直す（いちばん新しくなる）
+    registry.load(port, rows[registry.CACHE_LIMIT])  # 上限を超える
+    fetched = port.fetches
+    registry.load(port, rows[0])
+    assert port.fetches == fetched, "使い直した版は残る"
+    registry.load(port, rows[1])
+    assert port.fetches == fetched + 1, "いちばん長く使っていない版が捨てられている"
+
+
+def test_many_cycles_at_once_keep_the_cache_whole() -> None:
+    """**2 系統の周期が同じプロセスで並行に走っても壊れない**（`/ml/infer` は同期の口）。"""
+    port = _baseline_port()
+    active = registry.active(port)
+    shadow = _add_version(port, "baseline-b3-v0-shadow", "shadow")
+
+    def cycle(_: int) -> None:
+        registry.retain({active.model_version, shadow.model_version})
+        registry.load(port, active)
+        registry.load(port, shadow)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(cycle, range(400)))
+    fetched = port.fetches
+    cycle(0)
+    assert port.fetches == fetched, "並行に回した後も、2 つとも持っている"
+
+
+#: ほかのスレッドがロックで待たされていることを確かめる時間。
+LOCK_WAIT_S: Final[float] = 0.2
+
+
+def test_the_cache_is_touched_only_under_its_lock() -> None:
+    """**キャッシュの出し入れは、ロックを握ってから**（上の検査の、確率に頼らない形）。
+
+    並行の壊れ方は確率的で、並べて回すだけでは必ずは再現しない。ここでは**ロックを握って
+    いる間、ほかのスレッドの `retain` と `load` が待たされる**ことを確かめる。
+    """
+    port = _baseline_port()
+    active = registry.active(port)
+    registry.load(port, active)
+    workers = [
+        threading.Thread(target=registry.retain, args=({active.model_version},)),
+        threading.Thread(target=registry.load, args=(port, active)),
+    ]
+    with registry._CACHE_LOCK:
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=LOCK_WAIT_S)
+        assert all(worker.is_alive() for worker in workers), "ロックを握っている間に触った"
+    for worker in workers:
+        worker.join()
+    assert port.fetches == 1
 
 
 # ── 上書きの防止（W6-19、契約 38）──────────────────────────────

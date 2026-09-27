@@ -24,13 +24,19 @@ LightGBM は W4 以降（W3-18）。**予測テーブルを埋め始め、5 分�
 **読んだ版の日付を必ず記録に残す**（`profile_date`。契約 32）。**読めなくても配信は止めない**——
 B3 は `prof_*` を読まないので、配る確率は変わらない。**`prof_*` を読む版は、読めなかった周期に
 配らない**（W6-05、契約 33）。
+
+**shadow は、active を配って予測ログを置いてから歩く**（W6 の PR E、W6-06、契約 34）。特徴量は
+作り直さず、**同じ表で予測して予測ログにだけ書く**——`station_forecasts` にも `inference_log` の
+列にも書かない。shadow の例外は `detail.shadow` に詰め替え、**active の結果を変えない**。
+`prof_*` を読む shadow は、プロファイルを読めた周期だけ歩く（契約 33）。shadow を上げ下げする
+のは人である（`promote_model_version()`・`retire_model_version()`。契約 39）。
 """
 
 import resource
 import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Final, Protocol
 
@@ -90,6 +96,7 @@ class InferPort(Protocol):
     def list_weather(self, start: datetime, end: datetime) -> tuple[WeatherRow, ...]: ...
     def active_model(self) -> registry.Registered | None: ...
     def find_model(self, model_version: str) -> registry.Registered | None: ...
+    def shadow_model(self) -> registry.Registered | None: ...
     def download(self, bucket: str, path: str) -> bytes | None: ...
     def download_range(
         self, bucket: str, path: str, byte_range: str
@@ -348,6 +355,25 @@ class Forecast:
 
 
 @dataclass(frozen=True)
+class ShadowRun:
+    """shadow を歩いた 1 回（W6 の PR E）。**`detail.shadow` にそのまま出す**（列には書かない）。"""
+
+    #: shadow の行の版。**行を引けなかったときは None**
+    model_version: str | None
+    #: `ok`・`skipped:no_profile`（契約 33）・`failed:<例外の種類>`
+    status: str
+    #: 予測ログを置けたか（`ok`・`failed:<例外の種類>`）。**歩かなかったら空**
+    forecast_log: str = ""
+    #: 成果物を読むのに掛かった時間（**温まっていれば 0**。版ごとに持つ。契約 31）
+    model_load_ms: int = 0
+    #: 予測に掛かった時間。**shadow の費用はほぼここ**（特徴量は active と共有する）
+    predict_ms: int = 0
+
+    def as_detail(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class InferSummary:
     """1 回の推論の要約。`inference_log` と応答の両方に使う。"""
 
@@ -403,6 +429,8 @@ class InferSummary:
     n_predicted: int = 0
     #: 試し打ちの見本 1 件
     sample: Mapping[str, object] = field(default_factory=dict)
+    #: shadow を歩いた結果（W6 の PR E）。**shadow が無ければ None で、`detail` に欄を出さない**
+    shadow: ShadowRun | None = None
     error: str | None = None
 
     @property
@@ -697,6 +725,9 @@ def _produce(
     started: datetime,
     cpu_started: int,
 ) -> InferSummary:
+    # **shadow の行は周期の初めに引く。** キャッシュに残す版（active と shadow）がここで決まる
+    found = _find_shadow(port)
+    _retain_serving(chosen.model_version, found)
     predictor, model_load_ms = _load(port, chosen)
     # **基準時刻は 5 分格子に落とす。** 水平の起点は `generated_at` なので、
     # 書き込む `generated_at` も同じ時刻にする（W4 プラン §12 の 114）
@@ -705,22 +736,141 @@ def _produce(
     features = read_features(port, system_id, at, frozenset(port.list_holidays()))
     features_ms = _ms_since(features_started)
     _refuse_without_profile(predictor, features.profile)
-    stale = (at - base).total_seconds() > MAX_STALENESS_S
-    forecasts = predict(predictor, system_id, at, features.ready.table, stale)
-    payload = to_payload(forecasts, at, base, predictor.model_version)
+    cycle = Cycle(system_id, at, base, stale=(at - base).total_seconds() > MAX_STALENESS_S)
+    served = _serve(port, predictor, features, cycle)
+    # **shadow は、配って予測ログを置いてから**（契約 34）。例外は `shadow` に詰め替わる
+    shadow = _walk_shadow(port, found, features, cycle, predictor)
+    done = Done(started, cpu_started, features_ms, model_load_ms)
+    summary = _completed(
+        system_id, "ok", base, predictor, features, done, served.written, served.forecast_log
+    )
+    return replace(summary, shadow=shadow)
+
+
+@dataclass(frozen=True)
+class Cycle:
+    """1 周期の時刻と、観測が古いか。**active と shadow で同じ**（予測ログの 2 つの時刻も同じ）。"""
+
+    system_id: str
+    #: 5 分格子に落とした基準時刻（`generated_at`）
+    at: datetime
+    #: 最後に取れた観測の時刻（`base_observed_at`）
+    base: datetime
+    stale: bool
+
+
+@dataclass(frozen=True)
+class Served:
+    """active を配った結果。書いた行の数と、予測ログを置けたか。"""
+
+    written: int
+    forecast_log: str
+
+
+def _serve(port: InferPort, predictor: Predictor, features: Features, cycle: Cycle) -> Served:
+    """active を配り、予測ログを置く。**配ってから記録する**（ログを置けなくても配信は済む）。"""
+    forecasts = predict(predictor, cycle.system_id, cycle.at, features.ready.table, cycle.stale)
+    payload = to_payload(forecasts, cycle.at, cycle.base, predictor.model_version)
     written = sum(port.upsert_forecasts(chunk) for chunk in batches(payload, UPSERT_BATCH))
-    # **配ってから記録する。** 順番に意味がある：ログを置けなくても配信は済んでいる
     logged = _record_forecasts(
         port,
         forecasts,
-        system_id=system_id,
-        at=at,
-        base=base,
+        system_id=cycle.system_id,
+        at=cycle.at,
+        base=cycle.base,
         ready=features.ready,
         chosen=predictor,
     )
-    done = Done(started, cpu_started, features_ms, model_load_ms)
-    return _completed(system_id, "ok", base, predictor, features, done, written, logged)
+    return Served(written=written, forecast_log=logged)
+
+
+# ── shadow（W6 の PR E、W6-06、契約 31・33・34）───────────────────
+#: プロファイルを読めなかった周期に、`prof_*` を読む shadow を歩かなかった印（契約 33）。
+SHADOW_NO_PROFILE: Final[str] = "skipped:no_profile"
+
+
+class ShadowSameAsActiveError(RuntimeError):
+    """shadow の成果物が、active と同じ版を名乗った。**歩くと active の予測ログを上書きする。**"""
+
+
+@dataclass(frozen=True)
+class ShadowFound:
+    """周期の初めに引いた shadow の行。**引けなかったら理由だけを持つ**（active は止めない）。"""
+
+    row: registry.Registered | None
+    failure: str | None = None
+
+
+def _find_shadow(port: InferPort) -> ShadowFound:
+    """いまの shadow の行（**無いのが普通**）。引けなくても active は止めない。"""
+    try:
+        return ShadowFound(row=port.shadow_model())
+    except Exception as cause:
+        _log(f"shadow の行を引けませんでした: {type(cause).__name__}")
+        return ShadowFound(row=None, failure=f"failed:{type(cause).__name__}")
+
+
+def _retain_serving(active_version: str, found: ShadowFound) -> None:
+    """**その周期に使う版だけをキャッシュに残す**（W6-02、契約 31）。
+
+    shadow の行を引けなかった周期は触らない——一時の不調で、温まった shadow を捨てない。
+    """
+    if found.failure is not None:
+        return
+    shadow = () if found.row is None else (found.row.model_version,)
+    registry.retain({active_version, *shadow})
+
+
+def _walk_shadow(
+    port: InferPort, found: ShadowFound, features: Features, cycle: Cycle, active: Predictor
+) -> ShadowRun | None:
+    """shadow を歩く。**shadow が無ければ None**（`detail` に欄を出さない）。
+
+    **例外はここで止め、`ShadowRun` に詰め替える**（W6-06）。active はもう配って記録して
+    あるので、shadow が何で落ちても active の結果は変わらない。メモリ不足で呼び出しごと
+    落ちる形だけは切り離せない——だから予行演習で測る（W6 プラン §8.6）。
+    """
+    if found.failure is not None:
+        return ShadowRun(model_version=None, status=found.failure)
+    if found.row is None:
+        return None
+    try:
+        return _shadow_once(port, found.row, features, cycle, active)
+    except Exception as cause:
+        _log(f"shadow に失敗しました: {cycle.system_id} / {type(cause).__name__}")
+        return ShadowRun(found.row.model_version, f"failed:{type(cause).__name__}")
+
+
+def _shadow_once(
+    port: InferPort,
+    row: registry.Registered,
+    features: Features,
+    cycle: Cycle,
+    active: Predictor,
+) -> ShadowRun:
+    """shadow の成果物で、**active と同じ特徴量の表**から予測し、予測ログにだけ書く。
+
+    行の名前は主キーなので active と重ならない。**見るのは成果物が名乗る版**である——
+    同じ版を名乗る成果物で歩くと、予測ログの置き場所が active と同じになり、上書きする。
+    """
+    predictor, model_load_ms = _load(port, row)
+    if predictor.model_version == active.model_version:
+        raise ShadowSameAsActiveError(f"shadow の成果物が active と同じ版です: {row.model_version}")
+    if features.profile.edition is None and registry.reads_profile(predictor):
+        return ShadowRun(row.model_version, SHADOW_NO_PROFILE, model_load_ms=model_load_ms)
+    started = time.monotonic_ns()
+    forecasts = predict(predictor, cycle.system_id, cycle.at, features.ready.table, cycle.stale)
+    predict_ms = _ms_since(started)
+    logged = _record_forecasts(
+        port,
+        forecasts,
+        system_id=cycle.system_id,
+        at=cycle.at,
+        base=cycle.base,
+        ready=features.ready,
+        chosen=predictor,
+    )
+    return ShadowRun(row.model_version, "ok", logged, model_load_ms, predict_ms)
 
 
 def _load(port: InferPort, chosen: registry.Registered) -> tuple[Predictor, int]:
@@ -868,6 +1018,9 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         # **成果物を読む時間と、プロセスの山**（J2 の完了条件 2。増分を証明するのに要る）
         "model_load_ms": summary.model_load_ms,
         "rss_mb": summary.rss_mb,
+        # **shadow を歩いた結果**（W6 の PR E、契約 34）。**shadow が無ければ欄ごと出さない**——
+        # shadow が登録されていない本番では、記録がデプロイの前と同じになる（完了条件 1）
+        **({"shadow": summary.shadow.as_detail()} if summary.shadow is not None else {}),
         # **試し打ちのときだけ載せる。** 通常の推論では 0 と空になる
         **(
             {"predicted": summary.n_predicted, "sample": dict(summary.sample)}

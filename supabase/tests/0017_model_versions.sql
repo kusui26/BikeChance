@@ -4,7 +4,7 @@
 -- どの版を配るかを推論がどう読むかは `apps/ml` の側（`tests/test_model_registry.py`）。
 
 begin;
-select plan(35);
+select plan(53);
 
 create function pg_temp.candidate(p_version text, p_kind text default 'lightgbm') returns jsonb
 language sql as $$
@@ -172,6 +172,74 @@ select is(
 select isnt(
   (select promoted_at from public.model_versions where model_version = 'lgbm-a'),
   null, '昇格した時刻が入る'
+);
+
+-- ────────────────────────────────────────────────────────────────
+-- retire_model_version — shadow を下ろす口（0054、W6-07）。**誰にも grant しない**
+-- ────────────────────────────────────────────────────────────────
+select has_function('public', 'retire_model_version', array['text'], 'retire_model_version がある');
+select is(
+  has_function_privilege('service_role', 'public.retire_model_version(text)', 'execute'),
+  false, '**サービスロールは下ろせない**（人が psql から行う。W6 の契約 39）'
+);
+select is(
+  has_function_privilege('anon', 'public.retire_model_version(text)', 'execute'),
+  false, '匿名は下ろせない'
+);
+select is(
+  has_function_privilege('authenticated', 'public.retire_model_version(text)', 'execute'),
+  false, 'ログインした利用者も下ろせない'
+);
+select is(
+  has_function_privilege('public', 'public.retire_model_version(text)', 'execute'),
+  false, 'PUBLIC にも渡していない'
+);
+select throws_ok(
+  $$select public.retire_model_version('知らない版')$$,
+  '22023', null, '登録されていない版は下ろせない'
+);
+select throws_ok(
+  $$select public.retire_model_version('lgbm-a')$$,
+  '55006', null, '**active は下ろせない**（別の版を昇格して入れ替える）'
+);
+select is(
+  (select status from public.model_versions where model_version = 'lgbm-a'),
+  'active', '拒んだ後も active のまま'
+);
+
+-- **shadow を代わり無しで下ろす**（予行演習の後・合成器を active にした後。所見 190）
+select is(pg_temp.candidate('lgbm-b') ->> 'status', 'candidate', '下ろす版を候補として登録する');
+select is(
+  public.promote_model_version('lgbm-b', 'shadow') ->> 'status', 'shadow', 'それを shadow に上げる'
+);
+select is(
+  public.retire_model_version('lgbm-b') ->> 'previous', 'shadow', '**shadow を retired にする**'
+);
+select is(
+  (select status from public.model_versions where model_version = 'lgbm-b'),
+  'retired', '下ろした版は retired になる（candidate に戻さない）'
+);
+select is(
+  (select count(*)::int from public.model_versions where status = 'shadow'),
+  0, 'shadow が 1 つも無くなる'
+);
+select is(
+  (select status from public.model_versions where model_version = 'lgbm-a'),
+  'active', 'active はそのまま'
+);
+
+-- 候補も下ろせる。**下ろした版をもう 1 度下ろしても何も変わらない**
+select is(pg_temp.candidate('lgbm-c') ->> 'status', 'candidate', 'もう 1 つ候補を登録する');
+select is(
+  public.retire_model_version('lgbm-c') ->> 'previous', 'candidate', 'candidate も retired にする'
+);
+select is(
+  public.retire_model_version('lgbm-c') ->> 'previous', 'retired',
+  'retired をもう 1 度下ろしても何も変わらない'
+);
+select is(
+  (select status from public.model_versions where model_version = 'lgbm-c'),
+  'retired', 'retired のまま'
 );
 
 -- ────────────────────────────────────────────────────────────────

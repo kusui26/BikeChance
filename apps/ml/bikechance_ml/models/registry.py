@@ -13,8 +13,14 @@
 
 **成果物を置く口もここに 1 つだけ置く**（`upload_artifact`）。配信中（active・shadow）の
 版と同じ名前なら置かない（W6-19、契約 38）——登録簿を知っているのがここだからである。
+
+**読んだ成果物は版ごとに持つ**（W6-02、契約 31）。active と shadow を同じ周期に使うので、
+1 つだけ持つと互いを追い出し、毎周期落とし直す（W6 プランの所見 189）。**持つのは、その
+周期に使う版だけ**（`retain`）で、上限は `CACHE_LIMIT`。
 """
 
+import threading
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Final, Protocol
 
@@ -95,14 +101,24 @@ class PutsModels(FindsModels, Protocol):
     def upload(self, bucket: str, path: str, body: bytes, content_type: str) -> None: ...
 
 
-#: 読み込んだ版。**同じ版なら取り直さない**（成果物は 3.2 MB あり、5 分毎に取り直すと
-#: 1 日 900 MB の転送になる。開発プラン §8.2）。冷えれば消えるだけで正しさに影響しない。
+#: 同時に持つ版の上限（W6-02）。**その周期に使う版**（active・shadow）に、手で試す候補が
+#: 入っても足りる。超えたら、いちばん長く使っていない版から捨てる。
+CACHE_LIMIT: Final[int] = 4
+
+#: 読み込んだ版（`model_version` → 口）。**持っている版は取り直さない**（成果物は 2〜3 MB あり、
+#: 5 分毎に取り直すと 1 日 900 MB の転送になる。開発プラン §8.2）。**並びは使った順**（最後が
+#: いちばん新しい）。冷えれば消えるだけで正しさに影響しない。
 _CACHE: dict[str, Predictor] = {}
+
+#: `_CACHE` の出し入れを守る。**2 系統の周期が同じプロセスで並行に走りうる**（`/ml/infer` は
+#: 同期の口で、FastAPI はスレッドで捌く）。**取りに行く間は握らない**（下りは秒単位になりうる）。
+_CACHE_LOCK: Final = threading.Lock()
 
 
 def forget() -> None:
     """キャッシュを捨てる。**テストが版をまたぐときに使う。**"""
-    _CACHE.clear()
+    with _CACHE_LOCK:
+        _CACHE.clear()
 
 
 def active(source: ReadsModels) -> Registered:
@@ -150,18 +166,49 @@ def upload_artifact(
 
 
 def load(source: ReadsModels, registered: Registered) -> Predictor:
-    """成果物を読んで配信用の口にする。**版が同じなら取り直さない。**"""
-    cached = _CACHE.get(registered.model_version)
+    """成果物を読んで配信用の口にする。**持っている版なら取り直さない。**"""
+    cached = _take(registered.model_version)
     if cached is not None:
         return cached
+    predictor = _fetch(source, registered)
+    _keep(registered.model_version, predictor)
+    return predictor
+
+
+def retain(versions: Collection[str]) -> None:
+    """**その周期に使う版だけを残す**（W6-02、契約 31）。退役した版・下ろした版を捨てる。
+
+    推論は周期の初めに active と shadow の版を渡す。捨てるのはキャッシュからの参照だけで、
+    別の周期がいま使っている口は、使い終わるまで生きている。
+    """
+    with _CACHE_LOCK:
+        for unused in [one for one in _CACHE if one not in versions]:
+            del _CACHE[unused]
+
+
+def _take(model_version: str) -> Predictor | None:
+    """持っていれば返し、**使った順の最後へ回す**（上限で捨てる順が、使った順になる）。"""
+    with _CACHE_LOCK:
+        found = _CACHE.pop(model_version, None)
+        if found is not None:
+            _CACHE[model_version] = found
+        return found
+
+
+def _keep(model_version: str, predictor: Predictor) -> None:
+    """持つ。**上限を超えたら、いちばん長く使っていない版から捨てる**（`CACHE_LIMIT`）。"""
+    with _CACHE_LOCK:
+        _CACHE[model_version] = predictor
+        for oldest in list(_CACHE)[: max(0, len(_CACHE) - CACHE_LIMIT)]:
+            del _CACHE[oldest]
+
+
+def _fetch(source: ReadsModels, registered: Registered) -> Predictor:
+    """成果物を Storage から取って組み立てる。**無ければ止める**（代わりをでっち上げない）。"""
     body = source.download(MODEL_BUCKET, registered.artifact_path)
     if body is None:
         raise MissingArtifactError(f"成果物がありません: {registered.model_version}")
-    predictor = _build(registered, body)
-    # 版が変わったら古いものは要らない。1 つだけ持つ
-    _CACHE.clear()
-    _CACHE[registered.model_version] = predictor
-    return predictor
+    return _build(registered, body)
 
 
 def reads_profile(predictor: Predictor) -> bool:

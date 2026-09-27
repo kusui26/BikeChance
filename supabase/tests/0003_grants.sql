@@ -201,8 +201,8 @@ create function pg_temp.cron_only() returns text[] language sql immutable as $$
     'rls_auto_enable',
     -- このテスト自身が既定権限を測るために作る
     'privilege_probe_fn',
-    -- **誰からも呼べない**（所有者が psql から呼ぶ。CLAUDE.md §6）
-    'promote_model_version'
+    -- **誰からも呼べない**（所有者が psql から呼ぶ。CLAUDE.md §6、W6 の契約 39）
+    'promote_model_version', 'retire_model_version'
   ];
 $$;
 
