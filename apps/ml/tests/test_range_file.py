@@ -6,6 +6,7 @@
   * **隣り合う行群は 1 回にまとめ、間の行群は取らない**（下りの予算。1 周期 2 MB 未満）
   * **フッタが末尾の 64 KiB より長ければ、足りないぶんだけを取る**（PR C の版は 263 KB）
   * **版が読みの途中で入れ替わったら、1 度だけ読み直し、それでも揃わなければ止める**
+    （版は応答を受け取ったその場で比べる。フッタを pyarrow に渡す前に）
   * **取っていない範囲は読まない**（0 で埋めて返さない）
 
 **本番の書き手（`profile_bytes`）で書いたファイル**を、本番と同じ規則で範囲を返す偽の Storage
@@ -154,35 +155,81 @@ def test_choosing_nothing_gives_an_empty_table_with_the_columns() -> None:
 
 
 # ── 版の入れ替わり ─────────────────────────────────────────────
+#: 入れ替わった後の版。**ポートが 1 つ多く、中身も大きさも違う**——同じバイトに ETag だけを
+#: 変えて返すと、混ぜても読めてしまい、検査が空振りする。
+NEWER: Final[pa.Table] = range_fixture.full_profile(
+    (("docomo-cycle", "d1"), ("docomo-cycle", "d2"), ("hellocycling", "h1"))
+)
+NEWER_BODY: Final[bytes] = profile_bytes(NEWER)
+
+#: 1 回の読みの中で、何回目の要求から新しい版が返るか（末尾が 0 回目）。
+FROM_FOOTER: Final[int] = 1
+FROM_GROUPS: Final[int] = 2
+
+
+def _tails(requests: list[str]) -> int:
+    return sum(one.startswith("bytes=-") for one in requests)
+
+
 @dataclass
 class SwitchingStorage:
-    """**末尾を取った後に版が入れ替わる**偽の Storage。`settle_after` 回の読みで揃う。"""
+    """**1 度目の読みの `switch_at` 回目の要求から、新しい版を返す**偽の Storage。
 
-    settle_after: int
-    tails: int = 0
+    読み直した 2 度目は、始めから新しい版で揃う。`flapping` なら 2 度目も同じ所で入れ替わる。
+    """
+
+    switch_at: int
+    flapping: bool = False
+    #: 古い版と新しい版の ETag。**`(None, None)` なら ETag の無い応答**（大きさだけで見分ける）
+    etags: tuple[str | None, str | None] = ('"v1"', '"v2"')
     requests: list[str] = field(default_factory=list)
 
     def download_range(self, bucket: str, path: str, byte_range: str) -> Piece | None:
         self.requests.append(byte_range)
-        is_tail = byte_range.startswith("bytes=-")
-        self.tails += is_tail
-        settled = self.tails > self.settle_after
-        etag = '"v2"' if (settled or not is_tail) else '"v1"'
-        return range_fixture.serve(BODY, byte_range, etag)
+        old, new = (BODY, self.etags[0]), (NEWER_BODY, self.etags[1])
+        body, etag = old if self._serves_old() else new
+        return range_fixture.serve(body, byte_range, etag)
+
+    def _serves_old(self) -> bool:
+        """最後の末尾から数えて `switch_at` 回目より前なら、古い版を返す。
+
+        行群は並行に取るので、数えた位置は前後しうる。**行群はどれも 2 回目以降**なので、
+        `switch_at` が 2 以下なら返す版は変わらない。
+        """
+        starts = [index for index, one in enumerate(self.requests) if one.startswith("bytes=-")]
+        early = len(self.requests) - 1 - starts[-1] < self.switch_at
+        return early and (len(starts) == 1 or self.flapping)
 
 
-def test_a_version_change_is_read_again_once() -> None:
-    """**1 度目は末尾だけが古い版**——読み直した 2 度目で揃い、読める。"""
-    storage = SwitchingStorage(settle_after=1)
+@pytest.mark.parametrize(
+    ("switch_at", "etags"),
+    [
+        # **フッタの残りから新しい版**：受け取ったその場で比べないと、pyarrow が混ざった
+        # フッタを読んで `OSError` で止まり、読み直しに入らない（2026-09-27 に再現）
+        (FROM_FOOTER, ('"v1"', '"v2"')),
+        # **行群から新しい版**：古い版のフッタの番地で、新しい版の中身を読むところだった
+        (FROM_GROUPS, ('"v1"', '"v2"')),
+        # **ETag の無い応答**でも、全体の大きさで見分ける
+        (FROM_GROUPS, (None, None)),
+    ],
+)
+def test_a_version_change_is_read_again_once(
+    switch_at: int, etags: tuple[str | None, str | None]
+) -> None:
+    """**1 度目の途中で入れ替わる**——読み直した 2 度目で揃い、**新しい版**が読める。"""
+    storage = SwitchingStorage(switch_at=switch_at, etags=etags)
     read = _read(storage)
-    assert storage.tails == 2
-    assert read.table.equals(_only(TABLE, CELLS))
+    assert _tails(storage.requests) == 2
+    assert read.table.equals(_only(NEWER, CELLS))
 
 
-def test_a_version_that_keeps_changing_stops() -> None:
+@pytest.mark.parametrize("switch_at", [FROM_FOOTER, FROM_GROUPS])
+def test_a_version_that_keeps_changing_stops(switch_at: int) -> None:
     """**2 度とも揃わなければ止める**（混ぜた版の値で配らない）。"""
+    storage = SwitchingStorage(switch_at=switch_at, flapping=True)
     with pytest.raises(ChangedWhileReadingError):
-        _read(SwitchingStorage(settle_after=5))
+        _read(storage)
+    assert _tails(storage.requests) == 2
 
 
 @dataclass
@@ -224,8 +271,9 @@ def test_a_server_that_ignores_the_range_still_reads_right() -> None:
 
 @dataclass
 class ShortStorage:
-    """**頼んだ範囲より短い応答**を返す（途中で切れた）。"""
+    """**頼んだ範囲より短い応答**を返す（途中で切れた）。`etag` を変えると、違う版の短い応答。"""
 
+    etag: str = range_fixture.ETAG
     requests: list[str] = field(default_factory=list)
 
     def download_range(self, bucket: str, path: str, byte_range: str) -> Piece | None:
@@ -233,12 +281,22 @@ class ShortStorage:
         piece = range_fixture.serve(BODY, byte_range)
         if byte_range.startswith("bytes=-"):
             return piece
-        return Piece(start=piece.start, body=piece.body[:-1], size=piece.size, etag=piece.etag)
+        return Piece(start=piece.start, body=piece.body[:-1], size=piece.size, etag=self.etag)
 
 
 def test_a_response_that_misses_the_span_stops() -> None:
+    storage = ShortStorage()
     with pytest.raises(CorruptFileError):
-        _read(ShortStorage())
+        _read(storage)
+    assert _tails(storage.requests) == 1, "壊れた応答は読み直さない"
+
+
+def test_a_short_response_from_another_version_is_a_change() -> None:
+    """**版は範囲より先に見る**——違う版の応答は、範囲が欠けていても入れ替わりとして読み直す。"""
+    storage = ShortStorage(etag='"v2"')
+    with pytest.raises(ChangedWhileReadingError):
+        _read(storage)
+    assert _tails(storage.requests) == 2
 
 
 # ── 取った範囲だけを持つファイル ───────────────────────────────

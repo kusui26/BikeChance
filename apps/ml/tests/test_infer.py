@@ -28,6 +28,7 @@ from bikechance_ml.baselines.climatology import FromSamples
 from bikechance_ml.eval.dataset import to_samples
 from bikechance_ml.features import profile
 from bikechance_ml.features.build import NowStats
+from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN, MAX_STALENESS_S
 from bikechance_ml.features.grid import JST, profile_path
 from bikechance_ml.features.schema import PROFILE_COLUMNS
@@ -1276,7 +1277,7 @@ PARITY_TIMES: Final[tuple[tuple[datetime, tuple[date, ...]], ...]] = (
 
 #: 全セル（3 曜日種別 × 96 枠）。**全部を読んだ版**を作るのに使う。
 ALL_CELLS: Final[tuple[tuple[str, int], ...]] = tuple(
-    (kind, slot) for kind in ("sat", "sun_holiday", "weekday") for slot in range(96)
+    (kind, slot) for kind in DOW_TYPE_ORDER for slot in range(profile.SLOTS_PER_DAY)
 )
 
 

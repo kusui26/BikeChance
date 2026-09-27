@@ -13,8 +13,9 @@ pyarrow には**取った範囲だけを持つファイル**（`SparseFile`）�
 
 **版が読みの途中で入れ替わっても混ぜない。** Storage の応答は Cloudflare のキャッシュを通る
 （2026-09-27 に本番で `cf-cache-status: HIT`・`age` 約 1 時間 45 分）。置き直しの直後は、要求ごとに
-古い版と新しい版が返りうるので、**1 回の読みで受け取った応答の ETag と大きさが揃わなければ、
-1 度だけ最初から読み直し、それでも揃わなければ止める**（`ChangedWhileReadingError`）。
+古い版と新しい版が返りうるので、**応答を受け取るたびに ETag と大きさを最初の末尾と比べ**
+（フッタを pyarrow に渡す前に）、**揃わなければ 1 度だけ最初から読み直し、それでも揃わなければ
+止める**（`ChangedWhileReadingError`）。
 
 **HTTP は知らない。** 取るのは `FetchesRanges`（`SupabaseIo.download_range`）で、ここは範囲を
 決めて組み立てるだけである——だから偽の取り口で、範囲・まとめ方・版の食い違いを検査できる。
@@ -180,8 +181,7 @@ def _read_once(
     metadata = pq.ParquetFile(SparseFile(tail.size, footer)).metadata
     groups = tuple(choose(metadata))
     spans = _uncovered(coalesced([group_span(metadata.row_group(one)) for one in groups]), footer)
-    pieces = (*footer, *_fetch(source, bucket, path, spans))
-    _require_one_version(pieces)
+    pieces = (*footer, *_fetch(source, bucket, path, spans, tail))
     return RangeRead(
         table=_read_table(SparseFile(tail.size, pieces), groups),
         bytes_read=sum(len(one.body) for one in pieces),
@@ -196,7 +196,7 @@ def _with_footer(source: FetchesRanges, bucket: str, path: str, tail: Piece) -> 
         raise CorruptFileError("フッタの長さがファイルより長い")
     if footer_start >= tail.start:
         return (tail,)
-    return (tail, _fetch_span(source, bucket, path, Span(footer_start, tail.start)))
+    return (tail, _fetch_span(source, bucket, path, Span(footer_start, tail.start), tail))
 
 
 def footer_length(tail: Piece) -> int:
@@ -247,18 +247,24 @@ def _uncovered(spans: Sequence[Span], held: Sequence[Piece]) -> tuple[Span, ...]
 
 
 def _fetch(
-    source: FetchesRanges, bucket: str, path: str, spans: Sequence[Span]
+    source: FetchesRanges, bucket: str, path: str, spans: Sequence[Span], first: Piece
 ) -> tuple[Piece, ...]:
     return fanout.gather(
-        lambda span: _fetch_span(source, bucket, path, span), spans, workers=FETCH_WORKERS
+        lambda span: _fetch_span(source, bucket, path, span, first), spans, workers=FETCH_WORKERS
     )
 
 
-def _fetch_span(source: FetchesRanges, bucket: str, path: str, span: Span) -> Piece:
-    """範囲を 1 つ取る。**途中で消えたら入れ替わりとして扱う**（最初の末尾は取れていた）。"""
+def _fetch_span(source: FetchesRanges, bucket: str, path: str, span: Span, first: Piece) -> Piece:
+    """範囲を 1 つ取る。**版は受け取ったその場で、最初の末尾と比べる**（範囲や中身より先に）。
+
+    後でまとめて比べると、フッタの残りが違う版だったとき、pyarrow が混ざったフッタを読んで
+    `OSError` で止まり、読み直しに入らない（2026-09-27 に再現）。**途中で消えたときも、
+    範囲の欠けた応答が違う版だったときも、入れ替わりとして扱う。**
+    """
     piece = source.download_range(bucket, path, span.header())
     if piece is None:
         raise ChangedWhileReadingError("読んでいる途中でオブジェクトが消えた")
+    _require_one_version((first, piece))
     if piece.start > span.start or piece.stop < span.stop:
         raise CorruptFileError("頼んだ範囲を含まない応答が返った")
     return piece
