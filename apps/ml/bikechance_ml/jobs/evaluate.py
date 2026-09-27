@@ -12,6 +12,7 @@ W4-27 が `build_features` について決めたのと同じ規律である：**
 させるので行は増えない（完了条件 2）。ワークフロー側の `concurrency` でも重ならない。
 
 **ログの無い日は `skipped`。** 埋めない（CLAUDE.md §6「収集の欠損は補間しない」）。
+`job_runs` にもそのまま `skipped` で残る（0053。見張りは `ok` に数えないので、続けば鳴る）。
 予測ログは 12 か月残るので、後から `--date` で測り直せる（`workflow_dispatch` の入力）。
 
 **読み取りは並行に行う**（`io/fanout.py`）。1 日ぶんは 2 システムで**予測ログ 576 件・
@@ -491,7 +492,12 @@ def run_evaluation(port: EvaluatePort, day: date) -> EvaluateSummary:
 
 
 def _status(results: Sequence[SystemResult], error: str | None = None) -> str:
-    """**ログが 1 つも無ければ `skipped`**（完了条件 5）。"""
+    """**ログが 1 つも無ければ `skipped`**（完了条件 5）。
+
+    `job_runs` が `skipped` を受けるのは **0053 から**（W6 プランの所見 207。それまでは弾かれ、
+    行が `running` のまま残る形だった）。**見張りは `ok` だけを成功と数える**ので、`skipped` が
+    続けば 30 時間で鳴る——評価の側の不具合でログが見えない日も、そこで気づける。
+    """
     if error is not None or not all(result.outcome.ok for result in results):
         return "failed"
     if all(result.outcome.n_files == 0 for result in results):

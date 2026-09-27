@@ -8,7 +8,7 @@
 -- 確かめられるのは記録と抑制の論理まで（0007 と同じ）。
 
 begin;
-select plan(110);
+select plan(112);
 
 -- 自分の前提を作る
 delete from public.status_snapshots;
@@ -227,6 +227,16 @@ select is(
   true, '通知に最後に成功した時刻が入る'
 );
 
+-- **`skipped` は成功に数えない**（0053、W6 プランの所見 207）。評価の側の不具合でログが
+-- 見えない日も「やることが無かった」と記録されるので、ここで鳴らなければ誰も気づけない
+delete from public.job_runs; delete from public.alert_state;
+insert into public.job_runs (job_name, started_at, finished_at, status)
+values ('pgtap_fake_job', now() - interval '1 minute', now(), 'skipped');
+select is(
+  public.check_jobs_missing() -> 'alerts', '1'::jsonb,
+  '直近が skipped だけなら鳴る（skipped は成功に数えない。0053）'
+);
+
 -- ────────────────────────────────────────────────────────────────
 -- 検査 2：失敗したジョブ
 -- ────────────────────────────────────────────────────────────────
@@ -246,6 +256,14 @@ delete from public.job_runs; delete from public.alert_state;
 insert into public.job_runs (job_name, started_at, finished_at, status)
 values ('pgtap_fake_job', now() - interval '5 hours', now() - interval '5 hours', 'failed');
 select is(public.check_jobs_failed() -> 'alerts', '0'::jsonb, '3 時間より古い失敗では鳴らない');
+
+delete from public.job_runs; delete from public.alert_state;
+insert into public.job_runs (job_name, started_at, finished_at, status)
+values ('pgtap_fake_job', now() - interval '10 minutes', now(), 'skipped');
+select is(
+  public.check_jobs_failed() -> 'alerts', '0'::jsonb,
+  'skipped では鳴らない（失敗ではない。W5 の PR L の完了条件 5。0053）'
+);
 
 -- ────────────────────────────────────────────────────────────────
 -- 通知に「何が失われたか」を書く（0041、W4 プラン §6.8 の PR K）

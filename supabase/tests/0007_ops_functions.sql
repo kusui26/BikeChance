@@ -5,7 +5,7 @@
 -- 到達の確認は本番での強制発火で行う。
 
 begin;
-select plan(66);
+select plan(68);
 
 -- テストはトランザクション内で完結し rollback するので、ここでの削除は外に影響しない
 delete from public.station_status_latest;
@@ -92,6 +92,24 @@ select is(
   (select count(*)::int from public.job_runs
     where job_name = 'pgtap_timing' and status = 'running'),
   0, '閉じ忘れた running が残らない'
+);
+
+-- **`skipped` で閉じられる**（0053）。日次評価は予測ログの無い日をこの値で閉じる。0053 より前は
+-- `job_finished` が弾かれ、Python の記録口がその失敗を飲むので、行が `running` のまま残る形だった
+create function pg_temp.close_as(p_status text) returns text language plpgsql as $$
+declare
+  v_id bigint;
+begin
+  v_id := public.job_started('pgtap_closed');
+  perform public.job_finished(v_id, p_status, jsonb_build_object('status', p_status));
+  return (select status from public.job_runs where id = v_id);
+end;
+$$;
+
+select is(pg_temp.close_as('skipped'), 'skipped', 'job_finished は skipped で閉じられる（0053）');
+select throws_ok(
+  $$select pg_temp.close_as('unknown')$$, '23514', null,
+  '知らない値では閉じられない（Python の記録口は、送る前に failed に倒す）'
 );
 
 -- ────────────────────────────────────────────────────────────────

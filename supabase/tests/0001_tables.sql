@@ -4,7 +4,7 @@
 -- 表を眺めて分かることより、間違った INSERT が落ちることの方が価値が高い。
 
 begin;
-select plan(62);
+select plan(63);
 
 -- このファイルはトランザクション内で完結し rollback するので、ここでの削除は外に影響しない。
 -- ベンチマークや手動確認でデータが残っていても同じ結果になるよう、作業テーブルを空にしてから始める
@@ -194,6 +194,10 @@ select throws_ok(
 select throws_ok(
   $$insert into public.job_runs (job_name, status) values ('x', 'unknown')$$,
   '23514', null, '未知の job status は弾く'
+);
+select lives_ok(
+  $$insert into public.job_runs (job_name, status) values ('x', 'skipped')$$,
+  'skipped は受ける（やることが無かった回。0053、W6 プランの所見 207）'
 );
 select throws_ok(
   $$update public.feed_state set consecutive_errors = -1 where system_id = 'hellocycling'$$,
