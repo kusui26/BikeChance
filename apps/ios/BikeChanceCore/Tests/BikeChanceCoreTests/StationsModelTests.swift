@@ -112,6 +112,31 @@ struct StationsModelTests {
         #expect(message.contains("狭めて"))
     }
 
+    @Test("**セルが返っても失敗の帯にしない**（拡大の案内。W6 プランの所見 194）")
+    func cellResponsesBecomeAZoomHint() async throws {
+        let (model, _) = model(body: try ContractTests.fixture("stations_cells"))
+        model.viewportChanged(to: tokyo)
+        await settle(model)
+        #expect(model.state == .needsZoom(StationsModel.zoomInMessage))
+    }
+
+    @Test("**丸めた後に 9 格子になる表示範囲では問い合わせない**（セルを貰いに行かない）")
+    func doesNotAskWhenRoundingExceedsTheLimit() async throws {
+        let (model, recorder) = model(body: try stationsBody())
+        model.viewportChanged(to: Bbox(west: 139.765, south: 35.67, east: 139.844, north: 35.70))
+        await settle(model)
+        #expect(model.state == .needsZoom(StationsModel.zoomInMessage))
+        #expect(recorder.urls.isEmpty)
+    }
+
+    @Test("ちょうど 8 格子の表示範囲は問い合わせる（経度の端数で止めない）")
+    func asksForExactlyEightQuanta() async throws {
+        let (model, recorder) = model(body: try stationsBody())
+        model.viewportChanged(to: Bbox(west: 139.76, south: 35.67, east: 139.84, north: 35.70))
+        await settle(model)
+        #expect(recorder.urls == ["bbox=139.76,35.67,139.84,35.7"])
+    }
+
     @Test("通信の失敗は failed")
     func networkFailureIsFailed() async throws {
         let (model, _) = model(status: 503, body: Data("nope".utf8))

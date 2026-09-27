@@ -26,22 +26,38 @@ public struct Bbox: Equatable, Sendable {
     /// サーバーが受け付ける 1 辺の上限（度）。超えると 400 が返る。
     public static let serverMaxSpanDegrees = 0.5
 
-    /// **こちらから要求してよい 1 辺の上限（度）。**
+    /// **こちらから要求してよい、丸めた後の長辺（度）。** サーバーがポートで返す上限と
+    /// 同じ値である（`packages/shared/src/cells.ts` の `CELL_STATION_MAX_SPAN_DEG`。W6 の契約 41）。
     ///
-    /// サーバーの上限（0.5°）より厳しくしてある。実測で 0.4° 四方の東京は 6,649 ポートが
-    /// 該当し、件数の上限 1,000 件を超えて 400 になる。0.1° なら最も混んだ地域でも
-    /// 900 件前後で収まる（EDA #1 の密度）。**それでも超えることはある**ので、
+    /// 超えるとサーバーはポートの代わりに格子のセル（`aggregation: cell`）を返す。以前は
+    /// 丸める前の 1 辺 0.1 度で、丸めると最大約 0.12 度になり、セルが返って読めずに失敗の帯を
+    /// 出していた（W6 プランの所見 194）。**同じ値を両側の検査が書いている**ので、変えるときは
+    /// サーバーと同時に直す。件数の上限（1,000 件）は、東京駅まわりの実測（0.10 度で 1,091 件、
+    /// 0.05 度で 295 件）の間なので普通は超えないが、**超えることはある**ので
     /// `tooManyStations` は必ず扱う。
-    public static let requestMaxSpanDegrees = 0.1
+    public static let requestMaxSpanDegrees = 0.08
+
+    /// `requestMaxSpanDegrees` を格子の数にしたもの（8）。**判定はこちらで行う。**
+    public static let requestMaxSpanQuanta = gridIndex(requestMaxSpanDegrees)
 
     public var latSpan: Double { north - south }
     public var lonSpan: Double { east - west }
 
-    /// 1 辺が要求してよい大きさに収まっているか。
+    /// 丸めた後の長辺（格子の数）。**格子の番号の差で数える。**
+    ///
+    /// 度の引き算で比べない。丸めた矩形でも、経度 139.84 − 139.76 は 0.0800000000000125 に
+    /// なり、`<= 0.08` で比べると境目がずれる（W6 プランの所見 205）。サーバーも同じ理由で
+    /// 格子の数で比べる。
+    public var roundedLongSideQuanta: Int {
+        let grid = quantized()
+        let lat = Bbox.gridIndex(grid.north) - Bbox.gridIndex(grid.south)
+        let lon = Bbox.gridIndex(grid.east) - Bbox.gridIndex(grid.west)
+        return max(lat, lon)
+    }
+
+    /// 要求してよいか。**丸めた後の長辺が `requestMaxSpanQuanta` 以下**（W6 の契約 41）。
     public var isRequestable: Bool {
-        latSpan > 0 && lonSpan > 0
-            && latSpan <= Bbox.requestMaxSpanDegrees
-            && lonSpan <= Bbox.requestMaxSpanDegrees
+        latSpan > 0 && lonSpan > 0 && roundedLongSideQuanta <= Bbox.requestMaxSpanQuanta
     }
 
     /// 格子に**外側へ**丸める。要求した範囲は必ず結果の中に入る。
@@ -57,13 +73,16 @@ public struct Bbox: Equatable, Sendable {
         )
     }
 
-    /// 中心を保ったまま 1 辺を上限まで縮める。地図を引きすぎたときに使う。
+    /// 中心を保ったまま、**丸めても上限に収まる大きさ**まで縮める。地図を引きすぎたときに使う。
+    ///
+    /// 縮める先は上限より 1 格子狭い（0.07 度）。外側へ丸めると両端で合わせて最大 1 格子
+    /// 広がるので、**どこに置いても丸めた後の長辺が上限（8 格子）を超えない**。
     ///
     /// **上限の内側なら何もしない。** 中心から計算し直すと浮動小数の端数が乗り、
     /// 同じ矩形なのに別の URL になってキャッシュが外れる。
     public func clampedToRequestable() -> Bbox {
         guard !isRequestable else { return self }
-        let limit = Bbox.requestMaxSpanDegrees
+        let limit = Bbox.requestMaxSpanDegrees - Bbox.quantumDegrees
         let centerLat = (north + south) / 2
         let centerLon = (east + west) / 2
         let halfLat = min(max(latSpan, 0), limit) / 2
@@ -88,6 +107,11 @@ public struct Bbox: Equatable, Sendable {
     // MARK: - 丸めの実装
 
     private enum Rule { case down, up }
+
+    /// 格子の番号（`value` を刻みで割って丸めた整数）。**丸めた後の座標と、刻みの倍数にだけ使う。**
+    private static func gridIndex(_ value: Double) -> Int {
+        Int((value / quantumDegrees).rounded())
+    }
 
     /// 量子の整数倍にそろえる。**端数を先に落としてから丸める**ので、同じ入力で同じ値になる。
     private static func snap(_ value: Double, step: Double, rule: Rule) -> Double {

@@ -5,8 +5,9 @@ import Testing
 
 /// **契約テスト**：`/v1` が実際に返した応答をそのままデコードする。
 ///
-/// `Fixtures/` の JSON は 2026-09-08 に本番から取ったもの。サーバー側のスキーマを
-/// 変えたら、ここが落ちて気づける（CLAUDE.md §3 の「契約テスト」）。
+/// `Fixtures/` の JSON は 2026-09-08 以降に本番から取ったもの（ファイルごとの日付は
+/// `apps/ios/README.md`）。サーバー側のスキーマを変えたら、ここが落ちて気づける
+/// （CLAUDE.md §3 の「契約テスト」）。
 @Suite("契約（/v1 の実応答）")
 struct ContractTests {
     static func fixture(_ name: String) throws -> Data {
@@ -29,6 +30,50 @@ struct ContractTests {
         #expect(response.count > 0)
         #expect(response.feeds.count == 2)
         #expect(response.attribution.count == 2)
+    }
+
+    // MARK: - 粒度（`aggregation`。W6 の PR I）
+
+    @Test("**セル応答**（本番、2026-09-27）は `aggregation: cell` で、`stations` を持たない")
+    func cellResponseIsNotStations() throws {
+        let data = try Self.fixture("stations_cells")
+        let probe = try Self.decode(StationsAggregation.self, "stations_cells")
+        #expect(probe.aggregation == "cell")
+        #expect(!probe.isStations)
+        // **粒度を先に読まずに `StationsResponse` として読むと失敗する**（W6 プランの所見 194）
+        #expect(throws: DecodingError.self) {
+            try V1Client.makeDecoder().decode(StationsResponse.self, from: data)
+        }
+    }
+
+    @Test("いまのポート応答（本番、2026-09-27）は `aggregation: station` を持ち、そのまま読める")
+    func currentStationResponseCarriesAggregation() throws {
+        let probe = try Self.decode(StationsAggregation.self, "stations_aggregation")
+        #expect(probe.aggregation == StationsAggregation.stationValue)
+        #expect(probe.isStations)
+        let response = try Self.decode(StationsResponse.self, "stations_aggregation")
+        #expect(response.count == response.stations.count)
+        #expect(response.count > 0)
+    }
+
+    @Test("**知らない粒度はポートとして読まない**（サーバーが粒度を足しても、失敗の帯を出さない）")
+    func unknownAggregationIsNotStations() throws {
+        // 手で組んだ本文（本番にはまだ無い値）。読むのは粒度の欄だけ
+        let body = Data(#"{"aggregation":"region"}"#.utf8)
+        let probe = try V1Client.makeDecoder().decode(StationsAggregation.self, from: body)
+        #expect(!probe.isStations)
+    }
+
+    @Test(
+        "`aggregation` の無い古い応答はポートとして読む（欄を足す前の本番の形）",
+        arguments: [
+            "stations", "stations_arrival", "stations_arrival_late", "stations_capacity",
+            "stations_partial_forecast",
+        ])
+    func olderResponsesAreStations(name: String) throws {
+        let probe = try Self.decode(StationsAggregation.self, name)
+        #expect(probe.aggregation == nil)
+        #expect(probe.isStations)
     }
 
     @Test("実効矩形が格子にそろっている（サーバーと同じ丸め）")

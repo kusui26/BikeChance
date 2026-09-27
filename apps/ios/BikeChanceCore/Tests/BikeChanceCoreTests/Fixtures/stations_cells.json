@@ -1,0 +1,485 @@
+{
+    "api_version": "v1",
+    "generated_at": "2026-09-27T02:08:42.630Z",
+    "aggregation": "cell",
+    "bbox": {
+        "west": 139.76,
+        "south": 35.67,
+        "east": 139.85,
+        "north": 35.7
+    },
+    "cell_deg": 0.01,
+    "count": 27,
+    "stale": false,
+    "forecast_in_min": null,
+    "feeds": [
+        {
+            "system_id": "docomo-cycle",
+            "display_name": "\u30c9\u30b3\u30e2\u30fb\u30d0\u30a4\u30af\u30b7\u30a7\u30a2",
+            "data_updated_at": "2026-09-27T02:07:23.000Z",
+            "expected_cadence_s": 81,
+            "stale_after_s": 303,
+            "stale": false,
+            "capacity_is_dynamic": true
+        },
+        {
+            "system_id": "hellocycling",
+            "display_name": "HELLO CYCLING",
+            "data_updated_at": "2026-09-27T02:06:37.000Z",
+            "expected_cadence_s": 300,
+            "stale_after_s": 960,
+            "stale": false,
+            "capacity_is_dynamic": false
+        }
+    ],
+    "cells": [
+        {
+            "cell": {
+                "west": 139.76,
+                "south": 35.67,
+                "east": 139.77,
+                "north": 35.68
+            },
+            "n_stations": 6,
+            "bikes": 46,
+            "docks": 41,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 6
+        },
+        {
+            "cell": {
+                "west": 139.77,
+                "south": 35.67,
+                "east": 139.78,
+                "north": 35.68
+            },
+            "n_stations": 21,
+            "bikes": 43,
+            "docks": 105,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 21
+        },
+        {
+            "cell": {
+                "west": 139.78,
+                "south": 35.67,
+                "east": 139.79,
+                "north": 35.68
+            },
+            "n_stations": 8,
+            "bikes": 14,
+            "docks": 56,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 8
+        },
+        {
+            "cell": {
+                "west": 139.79,
+                "south": 35.67,
+                "east": 139.8,
+                "north": 35.68
+            },
+            "n_stations": 10,
+            "bikes": 48,
+            "docks": 92,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 10
+        },
+        {
+            "cell": {
+                "west": 139.8,
+                "south": 35.67,
+                "east": 139.81,
+                "north": 35.68
+            },
+            "n_stations": 14,
+            "bikes": 67,
+            "docks": 40,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 14
+        },
+        {
+            "cell": {
+                "west": 139.81,
+                "south": 35.67,
+                "east": 139.82,
+                "north": 35.68
+            },
+            "n_stations": 7,
+            "bikes": 39,
+            "docks": 19,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 7
+        },
+        {
+            "cell": {
+                "west": 139.82,
+                "south": 35.67,
+                "east": 139.83,
+                "north": 35.68
+            },
+            "n_stations": 7,
+            "bikes": 61,
+            "docks": 66,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 7
+        },
+        {
+            "cell": {
+                "west": 139.83,
+                "south": 35.67,
+                "east": 139.84,
+                "north": 35.68
+            },
+            "n_stations": 12,
+            "bikes": 85,
+            "docks": 45,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 12
+        },
+        {
+            "cell": {
+                "west": 139.84,
+                "south": 35.67,
+                "east": 139.85,
+                "north": 35.68
+            },
+            "n_stations": 3,
+            "bikes": 28,
+            "docks": 3,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 3
+        },
+        {
+            "cell": {
+                "west": 139.76,
+                "south": 35.68,
+                "east": 139.77,
+                "north": 35.69
+            },
+            "n_stations": 9,
+            "bikes": 33,
+            "docks": 94,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 9
+        },
+        {
+            "cell": {
+                "west": 139.77,
+                "south": 35.68,
+                "east": 139.78,
+                "north": 35.69
+            },
+            "n_stations": 13,
+            "bikes": 35,
+            "docks": 132,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 13
+        },
+        {
+            "cell": {
+                "west": 139.78,
+                "south": 35.68,
+                "east": 139.79,
+                "north": 35.69
+            },
+            "n_stations": 18,
+            "bikes": 85,
+            "docks": 94,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 18
+        },
+        {
+            "cell": {
+                "west": 139.79,
+                "south": 35.68,
+                "east": 139.8,
+                "north": 35.69
+            },
+            "n_stations": 23,
+            "bikes": 112,
+            "docks": 92,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 23
+        },
+        {
+            "cell": {
+                "west": 139.8,
+                "south": 35.68,
+                "east": 139.81,
+                "north": 35.69
+            },
+            "n_stations": 14,
+            "bikes": 41,
+            "docks": 63,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 14
+        },
+        {
+            "cell": {
+                "west": 139.81,
+                "south": 35.68,
+                "east": 139.82,
+                "north": 35.69
+            },
+            "n_stations": 12,
+            "bikes": 84,
+            "docks": 70,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 12
+        },
+        {
+            "cell": {
+                "west": 139.82,
+                "south": 35.68,
+                "east": 139.83,
+                "north": 35.69
+            },
+            "n_stations": 9,
+            "bikes": 85,
+            "docks": 47,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 9
+        },
+        {
+            "cell": {
+                "west": 139.83,
+                "south": 35.68,
+                "east": 139.84,
+                "north": 35.69
+            },
+            "n_stations": 15,
+            "bikes": 155,
+            "docks": 39,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 15
+        },
+        {
+            "cell": {
+                "west": 139.84,
+                "south": 35.68,
+                "east": 139.85,
+                "north": 35.69
+            },
+            "n_stations": 2,
+            "bikes": 5,
+            "docks": 14,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 2
+        },
+        {
+            "cell": {
+                "west": 139.76,
+                "south": 35.69,
+                "east": 139.77,
+                "north": 35.7
+            },
+            "n_stations": 15,
+            "bikes": 15,
+            "docks": 120,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 15
+        },
+        {
+            "cell": {
+                "west": 139.77,
+                "south": 35.69,
+                "east": 139.78,
+                "north": 35.7
+            },
+            "n_stations": 28,
+            "bikes": 55,
+            "docks": 151,
+            "stale": true,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 27
+        },
+        {
+            "cell": {
+                "west": 139.78,
+                "south": 35.69,
+                "east": 139.79,
+                "north": 35.7
+            },
+            "n_stations": 12,
+            "bikes": 5,
+            "docks": 67,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 12
+        },
+        {
+            "cell": {
+                "west": 139.79,
+                "south": 35.69,
+                "east": 139.8,
+                "north": 35.7
+            },
+            "n_stations": 20,
+            "bikes": 68,
+            "docks": 56,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 20
+        },
+        {
+            "cell": {
+                "west": 139.8,
+                "south": 35.69,
+                "east": 139.81,
+                "north": 35.7
+            },
+            "n_stations": 18,
+            "bikes": 34,
+            "docks": 74,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 17
+        },
+        {
+            "cell": {
+                "west": 139.81,
+                "south": 35.69,
+                "east": 139.82,
+                "north": 35.7
+            },
+            "n_stations": 19,
+            "bikes": 58,
+            "docks": 57,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 19
+        },
+        {
+            "cell": {
+                "west": 139.82,
+                "south": 35.69,
+                "east": 139.83,
+                "north": 35.7
+            },
+            "n_stations": 13,
+            "bikes": 150,
+            "docks": 95,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 13
+        },
+        {
+            "cell": {
+                "west": 139.83,
+                "south": 35.69,
+                "east": 139.84,
+                "north": 35.7
+            },
+            "n_stations": 12,
+            "bikes": 104,
+            "docks": 8,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 12
+        },
+        {
+            "cell": {
+                "west": 139.84,
+                "south": 35.69,
+                "east": 139.85,
+                "north": 35.7
+            },
+            "n_stations": 9,
+            "bikes": 56,
+            "docks": 52,
+            "stale": false,
+            "p_bike": null,
+            "p_dock": null,
+            "confidence": null,
+            "n_forecast": 9
+        }
+    ],
+    "attribution": [
+        {
+            "system_id": "hellocycling",
+            "provider": "OpenStreet\u682a\u5f0f\u4f1a\u793e / \u516c\u5171\u4ea4\u901a\u30aa\u30fc\u30d7\u30f3\u30c7\u30fc\u30bf\u5354\u8b70\u4f1a",
+            "dataset": "OpenStreet\uff08\u30cf\u30ed\u30fc\u30b5\u30a4\u30af\u30ea\u30f3\u30b0\uff09 \u30d0\u30a4\u30af\u30b7\u30a7\u30a2\u95a2\u9023\u60c5\u5831",
+            "license": "\u30af\u30ea\u30a8\u30a4\u30c6\u30a3\u30d6\u30fb\u30b3\u30e2\u30f3\u30ba\u30fb\u30e9\u30a4\u30bb\u30f3\u30b9 \u8868\u793a4.0\u56fd\u969b",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/deed.ja"
+        },
+        {
+            "system_id": "docomo-cycle",
+            "provider": "\u682a\u5f0f\u4f1a\u793e\u30c9\u30b3\u30e2\u30fb\u30d0\u30a4\u30af\u30b7\u30a7\u30a2 / \u516c\u5171\u4ea4\u901a\u30aa\u30fc\u30d7\u30f3\u30c7\u30fc\u30bf\u5354\u8b70\u4f1a",
+            "dataset": "\u30c9\u30b3\u30e2\u30fb\u30d0\u30a4\u30af\u30b7\u30a7\u30a2 \u30d0\u30a4\u30af\u30b7\u30a7\u30a2\u95a2\u9023\u60c5\u5831",
+            "license": "\u30af\u30ea\u30a8\u30a4\u30c6\u30a3\u30d6\u30fb\u30b3\u30e2\u30f3\u30ba\u30fb\u30e9\u30a4\u30bb\u30f3\u30b9 \u8868\u793a4.0\u56fd\u969b",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/deed.ja"
+        }
+    ]
+}
