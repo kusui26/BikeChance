@@ -10,14 +10,18 @@
 """
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 
+import pyarrow as pa
 import pytest
 
 from bikechance_ml.baselines.artifact import artifact_path as baseline_path
 from bikechance_ml.baselines.artifact import to_bytes as baseline_to_bytes
 from bikechance_ml.features.constants import FEATURE_SET
+from bikechance_ml.features.schema import PROFILE_COLUMNS
 from bikechance_ml.models import artifact as lightgbm_artifact
 from bikechance_ml.models import registry
+from bikechance_ml.models.predictor import BaselinePredictor, Prediction
 from tests.test_infer import ARTIFACT as BASELINE
 from tests.test_model_artifact import ARTIFACT as LGBM_ARTIFACT
 
@@ -255,3 +259,42 @@ def test_the_serving_statuses_are_the_ones_the_database_protects() -> None:
     （shadow を外す）と、shadow の成果物を黙って差し替えられる。どちらも決め直しである。
     """
     assert frozenset({"active", "shadow"}) == registry.SERVING_STATUSES
+
+
+# ── `prof_*` を読むモデルか（W6 の契約 33）───────────────────────
+def test_the_baseline_does_not_read_the_profile() -> None:
+    """**B3 は `prof_*` を読まない**（読むのは 6 列と台数）。プロファイルが無い周期も配れる。"""
+    assert registry.reads_profile(BaselinePredictor(artifact=BASELINE)) is False
+
+
+def test_a_v4_forest_reads_the_profile() -> None:
+    """**v4 の森は `prof_*` を読む**（成果物の列に入っている）。読めなかった周期には配らない。"""
+    assert any(name in PROFILE_COLUMNS for name in LGBM_ARTIFACT.columns)
+    assert registry.reads_profile(lightgbm_artifact.to_predictor(LGBM_ARTIFACT)) is True
+
+
+def test_a_forest_without_profile_columns_does_not() -> None:
+    """**決めるのは成果物の列**（種類の名前ではない）。`prof_*` の無い森は読まない。"""
+    columns = tuple(name for name in LGBM_ARTIFACT.columns if name not in PROFILE_COLUMNS)
+    forest = replace(LGBM_ARTIFACT, columns=columns)
+    assert registry.reads_profile(lightgbm_artifact.to_predictor(forest)) is False
+
+
+@dataclass(frozen=True)
+class _Unknown:
+    """**知らない種類**の予測器（合成器より前に作られた道の外）。"""
+
+    model_version: str = "someday-v1"
+    kind: str = "composite"
+    feature_set: str = FEATURE_SET
+
+    def predict(self, system_id: str, at: datetime, table: pa.Table) -> Prediction:
+        raise AssertionError("呼ばれないはず")
+
+    def unknown_ports(self, system_id: str, table: pa.Table) -> int:
+        return 0
+
+
+def test_an_unknown_kind_is_taken_to_read_the_profile() -> None:
+    """**分からないときは「読む」**——読めなかった周期に配らない側に倒す。"""
+    assert registry.reads_profile(_Unknown()) is True

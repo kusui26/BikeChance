@@ -17,6 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Final
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 from fastapi.testclient import TestClient
@@ -25,17 +26,24 @@ from bikechance_ml.api import build_app
 from bikechance_ml.baselines.artifact import Artifact, artifact_path, to_bytes
 from bikechance_ml.baselines.climatology import FromSamples
 from bikechance_ml.eval.dataset import to_samples
+from bikechance_ml.features import profile
 from bikechance_ml.features.build import NowStats
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN, MAX_STALENESS_S
-from bikechance_ml.features.grid import JST
+from bikechance_ml.features.grid import JST, profile_path
 from bikechance_ml.features.schema import PROFILE_COLUMNS
 from bikechance_ml.features.weather import WeatherRow
+from bikechance_ml.io.range_file import TAIL_PROBE_B, Piece
+from bikechance_ml.io.supabase import SupabaseError, SupabaseFailure
 from bikechance_ml.jobs import forecast_log
+from bikechance_ml.jobs.build_features import to_parquet_bytes
+from bikechance_ml.jobs.build_profiles import profile_bytes
 from bikechance_ml.jobs.fit_baseline import build_artifact
 from bikechance_ml.jobs.infer import (
     IN_COLUMNS,
+    PROFILE_FALLBACK_DAYS,
     Forecast,
     InferSummary,
+    ProfileRequiredError,
     batches,
     confidence_of,
     grid_time,
@@ -60,6 +68,7 @@ from bikechance_ml.models.registry import (
 )
 from tests import eval_fixture as fixture
 from tests import infer_fixture as serving
+from tests import range_fixture
 
 
 @pytest.fixture(autouse=True)
@@ -106,7 +115,7 @@ ARTIFACT = artifact()
 # ── 予測 ──────────────────────────────────────────────────────
 def features(port: "FakePort", system_id: str = "hellocycling") -> pa.Table:
     """**本番と同じ経路**で特徴量を作る（参照スナップショットと 2 つの窓）。"""
-    return read_features(port, system_id, AT, frozenset())[1].table
+    return read_features(port, system_id, AT, frozenset()).ready.table
 
 
 def forecasts(
@@ -250,6 +259,14 @@ class FakePort:
     logs: dict[str, bytes] = field(default_factory=dict)
     #: 予測ログだけを失敗させる。**落ちても配信は続く**ことを確かめるため
     fail_forecast_log: bool = False
+    #: 置いてあるプロファイル（パス → バイト列）。**既定は無い**（2 日とも無い朝と同じ）
+    profiles: dict[str, bytes] = field(default_factory=dict)
+    #: Range 要求の記録（パス・範囲）。**どの版のどこを取りに来たか**が分かる
+    ranges: list[tuple[str, str]] = field(default_factory=list)
+    #: Range 要求を失敗させる（Storage の不調）
+    fail_range: bool = False
+    #: 祝日（`list_holidays`）
+    holidays: tuple[date, ...] = ()
 
     def read_base_observed_at(self, system_id: str) -> datetime | None:
         return self.base
@@ -265,7 +282,15 @@ class FakePort:
         return serving.fill(start, end, self.rows)
 
     def list_holidays(self) -> tuple[date, ...]:
-        return ()
+        return self.holidays
+
+    def download_range(self, bucket: str, path: str, byte_range: str) -> Piece | None:
+        """**本番と同じ規則で範囲を返す**（`range_fixture.serve`）。無い版は None。"""
+        self.ranges.append((path, byte_range))
+        if self.fail_range:
+            raise SupabaseError(SupabaseFailure("storage", 503, "HttpStatus", "unavailable"))
+        body = self.profiles.get(path)
+        return None if body is None else range_fixture.serve(body, byte_range)
 
     def active_model(self) -> Registered | None:
         """**登録簿がいまの版を返す**（W4-08。環境変数からの移行）。"""
@@ -325,6 +350,19 @@ class FakePort:
 
 def ready_port(rows: Sequence[tuple[str, int, int, int]] = STATIONS) -> FakePort:
     return FakePort(body=to_bytes(ARTIFACT), rows=rows)
+
+
+#: 仕込みのポート全部（2 系統 × 3 ポート）の、**全セル**を持つプロファイル。セルごとに値が違う。
+PROFILE_TABLE: Final[pa.Table] = range_fixture.full_profile(
+    tuple((system, station) for system in serving.SYSTEMS for station in STATION_IDS)
+)
+
+
+def put_profile(port: FakePort, day: date, body: bytes | None = None) -> FakePort:
+    """その日の版を置く。**既定は本番の書き手（契約 28）で書いたもの。**"""
+    path = profile_path(day, profile.PROFILE_NAME)
+    port.profiles[path] = profile_bytes(PROFILE_TABLE) if body is None else body
+    return port
 
 
 def test_a_full_cycle_writes_one_row_per_port() -> None:
@@ -495,6 +533,12 @@ def test_the_record_does_not_repeat_the_columns() -> None:
         "model_kind",
         "model_feature_set",
         "profile_date",
+        # **J2 で足した**（W6 の PR D。完了条件 2・3 の材料と、読めなかった理由）
+        "profile_bytes",
+        "profile_load_ms",
+        "profile_reason",
+        "model_load_ms",
+        "rss_mb",
     }
     assert to_record(_summary(cpu_ms=42))["cpu_ms"] == 42
 
@@ -726,7 +770,9 @@ def test_the_ports_without_weather_and_reference_are_recorded() -> None:
 
     # **計算元と突き合わせる。** 要約どうしで比べると、2 つを取り違えていても
     # 記録と要約が同じ値になるので気づけない
-    _, ready = read_features(TroubledPort(body=to_bytes(ARTIFACT)), "hellocycling", AT, frozenset())
+    ready = read_features(
+        TroubledPort(body=to_bytes(ARTIFACT)), "hellocycling", AT, frozenset()
+    ).ready
     stats = ready.stats
 
     # 仕込みが効いていること。**2 つが違う数**でなければ取り違えを見抜けない
@@ -775,7 +821,7 @@ def test_the_dry_run_reports_the_same_diagnostics() -> None:
     from bikechance_ml.models import artifact as lightgbm_artifact
     from tests.test_model_artifact import ARTIFACT as LGBM
 
-    port = ready_port()
+    port = put_profile(ready_port(), _yesterday())
     port.candidate = Registered(
         model_version=LGBM.model_version,
         kind="lightgbm",
@@ -857,9 +903,9 @@ def test_it_falls_back_to_an_older_reference_before_dawn() -> None:
             return super().download(bucket, path)
 
     port = OnlyOlder(body=to_bytes(ARTIFACT))
-    reference_day, ready = read_features(port, "hellocycling", AT, frozenset())
-    assert reference_day == _yesterday() - timedelta(days=1)
-    assert ready.table.num_rows > 0
+    features = read_features(port, "hellocycling", AT, frozenset())
+    assert features.reference_day == _yesterday() - timedelta(days=1)
+    assert features.ready.table.num_rows > 0
 
 
 def _yesterday() -> date:
@@ -1041,7 +1087,7 @@ def test_a_lightgbm_candidate_produces_probabilities() -> None:
     from bikechance_ml.models import artifact as lightgbm_artifact
     from tests.test_model_artifact import ARTIFACT as LGBM
 
-    port = ready_port()
+    port = put_profile(ready_port(), _yesterday())
     port.candidate = Registered(
         model_version=LGBM.model_version,
         kind="lightgbm",
@@ -1087,25 +1133,242 @@ def test_a_lightgbm_model_refuses_another_feature_set() -> None:
         run_inference(port, "hellocycling", NOW, stale.model_version)
 
 
-# ── ポートプロファイル（W5 プラン §6.10 の PR J1）────────────────
-def test_the_inference_does_not_read_the_profile_yet() -> None:
-    """**J1 の推論はプロファイルを読まない**（J1 の完了条件 2。読むのは J2）。
-
-    **読んでいないことが記録から読める**——`detail.profile_date` が null で出る。
-    `feature_set` は v4 なのに `prof_*` は NULL、という状態を**黙って**作らない。
-    """
-    port = ready_port()
-    run_inference(port, "hellocycling", NOW)
-    assert not any(path.startswith("profiles/") for path in port.downloads)
+# ── ポートプロファイル（W6 の PR D、J2）──────────────────────────
+def _recorded(port: FakePort) -> Mapping[str, object]:
     recorded = port.details[0]
     assert recorded is not None
-    assert recorded["profile_date"] is None
+    return recorded
+
+
+def test_the_inference_reads_yesterdays_profile() -> None:
+    """**前日の版を読む**（J2 の完了条件 1。学習と同じ `source_day`）。日付は記録に出る。"""
+    port = put_profile(ready_port(), _yesterday())
+    run_inference(port, "hellocycling", NOW)
+    recorded = _recorded(port)
+    assert recorded["profile_date"] == _yesterday().isoformat()
+    assert recorded["profile_reason"] is None
     assert recorded["feature_set"] == "v4"
 
 
-def test_the_served_table_has_empty_profile_columns() -> None:
-    """**配信の表の `prof_*` は NULL、`prof_n_days` は 0**（契約 29 の「J1 と J2 のあいだ」）。"""
-    _, ready = read_features(ready_port(), "hellocycling", AT, frozenset())
+def test_the_profile_columns_are_filled_from_the_edition() -> None:
+    """**読めたら `prof_*` が埋まる**（学習と同じ値。セルが在るのに NULL で配らない）。"""
+    features = read_features(
+        put_profile(ready_port(), _yesterday()), "hellocycling", AT, frozenset()
+    )
+    table = features.ready.table
+    assert table.num_rows > 0
+    assert table.column("prof_p_bike").null_count == 0
+    assert min(table.column("prof_n_days").to_pylist()) > 0
+    assert features.ready.stats.profile_date == _yesterday().isoformat()
+
+
+def test_the_morning_hole_reads_the_edition_before() -> None:
+    """**前日の版がまだ無い朝は、1 つ古い版を読む**（W6-04、契約 32）。まず前日の版を見に行く。"""
+    older = _yesterday() - timedelta(days=1)
+    port = put_profile(ready_port(), older)
+    run_inference(port, "hellocycling", NOW)
+    assert _recorded(port)["profile_date"] == older.isoformat()
+    assert port.ranges[0][0] == profile_path(_yesterday(), profile.PROFILE_NAME)
+
+
+def test_two_days_without_a_profile_still_serve_the_baseline() -> None:
+    """**2 日とも無くても配る**（B3 は `prof_*` を読まない）。理由は記録に残る（W6-05）。"""
+    port = ready_port()
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    assert len(port.written) == len(STATIONS)
+    recorded = _recorded(port)
+    assert (recorded["profile_date"], recorded["profile_reason"]) == (None, "missing")
+    assert len({path for path, _ in port.ranges}) == PROFILE_FALLBACK_DAYS, "2 日前まで探して止める"
+
+
+def test_an_edition_in_the_old_order_is_neither_read_nor_skipped() -> None:
+    """**前の並びの版は読まない**（丸ごと落とさない）。**1 つ古い版にも下がらない**——在るのに
+    読めない版を飛ばすと、読むはずの版と記録が食い違う。"""
+    old_body = to_parquet_bytes(
+        PROFILE_TABLE.sort_by([(one, "ascending") for one in profile.KEY_COLUMNS])
+    )
+    port = put_profile(ready_port(), _yesterday(), old_body)
+    put_profile(port, _yesterday() - timedelta(days=1))
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    recorded = _recorded(port)
+    assert (recorded["profile_date"], recorded["profile_reason"]) == (None, "failed:LayoutError")
+    # **止まっても、落としたぶんは記録に出る**（末尾の 1 回だけ。行群は取っていない）
+    assert summary.profile_bytes == min(len(old_body), TAIL_PROBE_B)
+
+
+def test_a_storage_failure_is_recorded_not_fatal() -> None:
+    """**Storage が不調でも配る**（その周期の `prof_*` が NULL になるだけ）。"""
+    port = put_profile(ready_port(), _yesterday())
+    port.fail_range = True
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    assert len(port.written) == len(STATIONS)
+    assert _recorded(port)["profile_reason"] == "failed:SupabaseError"
+
+
+def test_an_unknown_failure_is_recorded_not_fatal() -> None:
+    """**知らない失敗でも配る**（W6-05）。種類は `profile_reason` に残る（握り潰しにならない）。"""
+
+    @dataclass
+    class Buggy(FakePort):
+        def download_range(self, bucket: str, path: str, byte_range: str) -> Piece | None:
+            raise ValueError("読み口の不具合")
+
+    port = Buggy(body=to_bytes(ARTIFACT))
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    assert len(port.written) == len(STATIONS)
+    assert _recorded(port)["profile_reason"] == "failed:ValueError"
+
+
+def test_a_broken_edition_is_caught_before_the_build() -> None:
+    """**同じセルが 2 行ある版は、組み立ての前に止めて配る**（途中で止まると B3 まで止まる）。
+
+    重ねるのは**その周期が要るセルの行**——要らない行群は読まないので、そこが壊れていても見えない。
+    """
+    kind, slot = profile.serving_cells(AT, frozenset())[0]
+    needed = PROFILE_TABLE.filter(
+        pc.and_(
+            pc.equal(PROFILE_TABLE.column("dow_type"), kind),
+            pc.equal(PROFILE_TABLE.column("slot15"), slot),
+        )
+    )
+    doubled = pa.concat_tables([PROFILE_TABLE, needed.slice(0, 1)])
+    ordered = doubled.sort_by([(one, "ascending") for one in profile.PROFILE_ORDER])
+    port = put_profile(ready_port(), _yesterday(), profile_bytes(ordered))
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    assert _recorded(port)["profile_reason"] == "failed:CorruptProfileError"
+
+
+def test_only_the_needed_groups_are_fetched() -> None:
+    """**要る行群だけを取る**（J2 の完了条件 3。1 周期 2 MB 未満の土台）。"""
+    port = put_profile(ready_port(), _yesterday())
+    summary = run_inference(port, "hellocycling", NOW)
+    body = port.profiles[profile_path(_yesterday(), profile.PROFILE_NAME)]
+    assert 0 < summary.profile_bytes < len(body)
+    assert len(port.ranges) <= 2 + len(HORIZONS_MIN), "末尾・フッタの残り・行群（多くて 8 範囲）"
+
+
+def test_the_record_carries_the_profile_costs() -> None:
+    """**J2 の完了条件 2・3 の材料が記録に出る**（下り・読み・成果物の読み・プロセスの山）。"""
+    port = put_profile(ready_port(), _yesterday())
+    run_inference(port, "hellocycling", NOW)
+    recorded = _recorded(port)
+    numbers = {
+        name: recorded[name]
+        for name in ("profile_bytes", "profile_load_ms", "model_load_ms", "rss_mb")
+    }
+    assert all(isinstance(value, int) and value >= 0 for value in numbers.values()), numbers
+    assert numbers["profile_bytes"] != 0
+    assert numbers["rss_mb"] != 0
+
+
+#: 読み比べる基準時刻と祝日。**曜日種別の変わり目（金曜の夜・23:55）と祝日の前夜**を含む。
+PARITY_TIMES: Final[tuple[tuple[datetime, tuple[date, ...]], ...]] = (
+    (AT, ()),
+    (datetime(2026, 9, 11, 21, 30, tzinfo=JST).astimezone(UTC), ()),
+    (datetime(2026, 9, 11, 23, 55, tzinfo=JST).astimezone(UTC), ()),
+    (datetime(2026, 9, 22, 23, 0, tzinfo=JST).astimezone(UTC), (date(2026, 9, 23),)),
+)
+
+#: 全セル（3 曜日種別 × 96 枠）。**全部を読んだ版**を作るのに使う。
+ALL_CELLS: Final[tuple[tuple[str, int], ...]] = tuple(
+    (kind, slot) for kind in ("sat", "sun_holiday", "weekday") for slot in range(96)
+)
+
+
+def _profile_port(at: datetime, holidays: tuple[date, ...]) -> FakePort:
+    port = put_profile(ready_port(), at.astimezone(JST).date() - timedelta(days=1))
+    port.holidays = holidays
+    return port
+
+
+@pytest.mark.parametrize(("at", "holidays"), PARITY_TIMES)
+def test_reading_only_the_needed_cells_gives_the_same_features(
+    at: datetime, holidays: tuple[date, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**要るセルだけを読んでも、全部を読んだときと同じ特徴量が出る**（`serving_cells` の約束）。
+
+    全部を読んだ版は、`serving_cells` を全セルに差し替えて作る。**引くセルが 1 つでも漏れて
+    いれば、ここで違う表になる**（次の検査が、それが本当に起きることを確かめる）。
+    """
+    partial = read_features(_profile_port(at, holidays), "hellocycling", at, frozenset(holidays))
+    monkeypatch.setattr(profile, "serving_cells", lambda at, holidays: ALL_CELLS)
+    full = read_features(_profile_port(at, holidays), "hellocycling", at, frozenset(holidays))
+    assert partial.ready.table.num_rows > 0
+    assert partial.ready.table.column("prof_p_bike").null_count == 0
+    assert full.ready.table.equals(partial.ready.table)
+    assert full.profile.bytes_read > partial.profile.bytes_read
+
+
+def test_a_missing_cell_would_change_the_features(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**上の検査が空振りしていない**：要るセルを 1 つ抜くと、表が変わる。"""
+    full = read_features(_profile_port(AT, ()), "hellocycling", AT, frozenset())
+    needed = profile.serving_cells(AT, frozenset())
+    monkeypatch.setattr(profile, "serving_cells", lambda at, holidays: needed[:-1])
+    short = read_features(_profile_port(AT, ()), "hellocycling", AT, frozenset())
+    assert not short.ready.table.equals(full.ready.table)
+
+
+def test_the_baseline_serves_the_same_probabilities_with_or_without_the_profile() -> None:
+    """**J2 のマージで配る確率は 1 つも変わらない**（B3 は `prof_*` を読まない。戻し方の根拠）。"""
+    with_profile = put_profile(ready_port(), _yesterday())
+    without = ready_port()
+    run_inference(with_profile, "hellocycling", NOW)
+    run_inference(without, "hellocycling", NOW)
+    assert with_profile.written == without.written
+
+
+def _lightgbm_port(status: str) -> FakePort:
+    """**`prof_*` を読む版**（v4 の森）を、`active` か候補として登録した代役。"""
+    from bikechance_ml.models import artifact as lightgbm_artifact
+    from tests.test_model_artifact import ARTIFACT as LGBM
+
+    port = ready_port()
+    row = Registered(
+        model_version=LGBM.model_version,
+        kind="lightgbm",
+        feature_set=LGBM.feature_set,
+        artifact_path=lightgbm_artifact.artifact_path(LGBM.model_version),
+        status=status,
+    )
+    port.registered, port.candidate = (row, None) if status == "active" else (port.registered, row)
+    port.lightgbm_body = lightgbm_artifact.to_bytes(LGBM)
+    return port
+
+
+def test_a_model_that_reads_the_profile_is_not_served_without_it() -> None:
+    """**`prof_*` を読む版は、プロファイルを読めなかった周期に配らない**（W6-05、契約 29・33）。
+
+    黙って NULL で配ると、例外を出さずに確率だけがずれる。**その周期は failed と記録する。**
+    """
+    port = _lightgbm_port("active")
+    summary = run_inference(port, "hellocycling", NOW)
+    assert (summary.status, summary.error) == ("failed", "ProfileRequiredError")
+    assert port.written == []
+
+
+def test_the_same_model_is_served_when_the_profile_is_read() -> None:
+    port = put_profile(_lightgbm_port("active"), _yesterday())
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    assert len(port.written) == len(STATIONS)
+
+
+def test_a_dry_run_of_such_a_model_needs_the_profile_too() -> None:
+    """**試し打ちでも止める**（プロファイル無しの `prof_*` で出した確率は、見ても意味が無い）。"""
+    port = _lightgbm_port("candidate")
+    assert port.candidate is not None
+    with pytest.raises(ProfileRequiredError):
+        run_inference(port, "hellocycling", NOW, port.candidate.model_version)
+
+
+def test_without_a_profile_the_profile_columns_are_empty() -> None:
+    """**読めなければ `prof_*` は NULL、`prof_n_days` は 0**（0 で埋めない。版の無い日と同じ）。"""
+    ready = read_features(ready_port(), "hellocycling", AT, frozenset()).ready
     table = ready.table
     assert table.num_rows > 0
     for name in PROFILE_COLUMNS:
@@ -1123,8 +1386,7 @@ def test_the_baseline_does_not_read_the_profile_columns() -> None:
     表**と NULL のままの表で、**確率も「気候値が引けたか」も 1 ビットも変わらない**ことを
     見る。B3 が読むのは 6 列（システム・ポート・日・水平・日内分・目標の曜日種別）と台数だけ。
     """
-    _, ready = read_features(ready_port(), "hellocycling", AT, frozenset())
-    served = ready.table
+    served = read_features(ready_port(), "hellocycling", AT, frozenset()).ready.table
     filled = served
     for index, name in enumerate(PROFILE_COLUMNS):
         position = filled.schema.get_field_index(name)

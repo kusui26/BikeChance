@@ -20,6 +20,7 @@ from typing import Final, Protocol
 
 from bikechance_ml.baselines.artifact import from_bytes as baseline_from_bytes
 from bikechance_ml.features.constants import FEATURE_SET
+from bikechance_ml.features.schema import PROFILE_COLUMNS
 from bikechance_ml.models import artifact as lightgbm
 from bikechance_ml.models.predictor import BaselinePredictor, Predictor
 
@@ -161,6 +162,20 @@ def load(source: ReadsModels, registered: Registered) -> Predictor:
     _CACHE.clear()
     _CACHE[registered.model_version] = predictor
     return predictor
+
+
+def reads_profile(predictor: Predictor) -> bool:
+    """**`prof_*` を読むモデルか**（W6 の契約 33）。成果物で決める。**種類の分岐はここだけ。**
+
+    B3 は読まない（読むのは 6 列と台数。`BaselinePredictor` の注記）。LightGBM は成果物の
+    `columns` に `prof_*` があれば読む（v4 以降）。**知らない種類は「読む」とみなす**——
+    推論はプロファイルを読めなかった周期にそれを配らないので、分からないときは配らない側に倒す。
+    """
+    if isinstance(predictor, BaselinePredictor):
+        return False
+    if isinstance(predictor, lightgbm.LightGbmPredictor):
+        return any(name in PROFILE_COLUMNS for name in predictor.artifact.columns)
+    return True
 
 
 def _build(registered: Registered, body: bytes) -> Predictor:
