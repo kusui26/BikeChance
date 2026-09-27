@@ -2,13 +2,15 @@
 
 **この 1 ファイルの主題は「転がしの前提が崩れたときに気づけること」。** 数え方は
 `features/profile.py` にあり、そちらは `test_features_profile.py` が 25 件で固めている。
-ここが守るのは 5 つ。
+ここが守るのは 7 つ。
 
   * **読むのは 3 つだけ**（前日の `profile`・当日の観測・28 日前の `daily`）
   * **前日の版が無くても止まらない**（さかのぼって作るときの初日）
   * **成功も失敗も `job_runs` に記録する**（`check_jobs_missing` から見える）
   * **記録の不調でジョブを落とさない**（置けたことのほうが大事）
   * **置かないときは記録しない**（手元の試し打ちで `job_runs` を汚さない）
+  * **置く `profile` は契約 28 の書き方**（並びと行群の中身は `test_profile_layout.py`）
+  * **在れば作らない回（`--skip-if-exists`）は、作らず記録もしない**（1 日 2 回の起動。W6 の PR C）
 
 **`daily` から作り直す入口**（`--from-dailies`）も、ここで固定する——作り直した版が
 **転がして置いた版とバイト単位で一致する**こと（W5 プラン §6.10 の J1 の完了条件 7）。
@@ -19,6 +21,7 @@
 """
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from typing import Final
 
@@ -29,6 +32,7 @@ import pytest
 from bikechance_ml.baselines import climatology
 from bikechance_ml.features import profile
 from bikechance_ml.features.grid import day_start, jst_yesterday, parquet_hours, profile_path
+from bikechance_ml.io.supabase import PARQUET_BUCKET
 from bikechance_ml.jobs import build_profiles as job
 from bikechance_ml.jobs.build_features import to_parquet_bytes
 from bikechance_ml.jobs.build_profiles import JOB_NAME, build_and_upload, build_one_day
@@ -74,6 +78,7 @@ class FakePort:
         self.started: list[str] = []
         self.finished: list[tuple[int, str, Mapping[str, object]]] = []
         self.stored: dict[str, bytes] = {}
+        self.listed: list[tuple[str, str, int]] = []
         self.fail_upload = False
         self.fail_job_started = False
         self.fail_job_finished = False
@@ -93,6 +98,12 @@ class FakePort:
 
     def list_holidays(self) -> tuple[date, ...]:
         return ()
+
+    def list_objects(self, bucket: str, prefix: str, limit: int) -> tuple[str, ...]:
+        """**Storage と同じく `prefix` からの相対名**を返す（1 階層ぶん）。"""
+        self.listed.append((bucket, prefix, limit))
+        names = (path.removeprefix(prefix) for path in self.stored if path.startswith(prefix))
+        return tuple(sorted(name for name in names if "/" not in name))[:limit]
 
     def upload_parquet(self, path: str, body: bytes) -> None:
         if self.fail_upload:
@@ -151,6 +162,14 @@ def test_what_is_uploaded_can_be_read_back() -> None:
     assert rolled.schema == profile.PROFILE_SCHEMA
     assert daily.num_rows > 0
     assert set(rolled.column("n_days").to_pylist()) == {1}, "初日なので 1 日ぶん"
+
+
+def test_the_profile_is_put_in_the_contract_28_layout() -> None:
+    """**置く `profile` は契約 28 の書き方、`daily` は前のまま**（推論が読むのは `profile`）。"""
+    port = FakePort()
+    made = build_and_upload(port, DAY)
+    assert port.uploads[profile_path(DAY, profile.PROFILE_NAME)] == job.profile_bytes(made.profile)
+    assert port.uploads[profile_path(DAY, profile.DAILY_NAME)] == to_parquet_bytes(made.daily)
 
 
 def test_building_without_uploading_touches_nothing() -> None:
@@ -389,12 +408,76 @@ def test_summing_reads_only_the_dailies() -> None:
     assert len(port.reads) == profile.PROFILE_DAYS
 
 
-@pytest.mark.parametrize("argv", [["--compare"], ["--from-dailies", "--upload"]])
-def test_the_from_dailies_mode_refuses_a_wrong_combination(argv: list[str]) -> None:
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--compare"],
+        ["--from-dailies", "--upload"],
+        ["--skip-if-exists"],
+        ["--from-dailies", "--skip-if-exists"],
+    ],
+)
+def test_a_wrong_combination_is_refused(argv: list[str]) -> None:
     """**作り直した版は置かない**（置くのは掃除を入れるときに決める）。
 
-    `--compare` は単独で使わない。
+    `--compare` は単独で使わない。`--skip-if-exists` は置く回のためのもの（`--upload` と使う）。
 
-    どちらも Storage を開く前に止まる（ここで Storage に触れる道が無い）。
+    どれも Storage を開く前に止まる（ここで Storage に触れる道が無い）。
     """
     assert job.run(["--date", "2026-09-23", *argv]) == 2
+
+
+# ── 1 日 2 回の起動（`--skip-if-exists`。W6 の PR C）──────────────
+def _run_daily(port: FakePort, monkeypatch: pytest.MonkeyPatch) -> int:
+    """**定時の回と同じ引数で入口から**走らせる（Storage の代わりに `port`）。"""
+    monkeypatch.setattr(job, "read_storage_config", lambda: None)
+    monkeypatch.setattr(job, "open_storage", lambda config: nullcontext(port))
+    return job.run(["--date", f"{DAY}", "--upload", "--skip-if-exists"])
+
+
+def test_an_existing_profile_is_not_built_again(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**在れば作らず、`job_runs` にも残さない**（00:40 の回が作った日の 06:00 の回）。
+
+    **読んだのは一覧だけ**——毎時の観測も前日の版も読まない。見張りは `ok` の行が来て
+    いるかだけを見るので、残さなくても鳴らない（00:40 の回の `ok` が残っている）。
+    """
+    port = FakePort()
+    port.stored[profile_path(DAY, profile.PROFILE_NAME)] = b"already there"
+    assert _run_daily(port, monkeypatch) == 0
+    assert (port.uploads, port.started, port.finished, port.reads) == ({}, [], [], [])
+    assert '"skipped": "exists"' in capsys.readouterr().out
+
+
+def test_a_missing_profile_is_built_and_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**無ければ作って置き、記録する**（00:40 の回、または 00:40 の回が落ちた日の 06:00 の回）。"""
+    port = FakePort()
+    assert _run_daily(port, monkeypatch) == 0
+    assert sorted(port.uploads) == [
+        profile_path(DAY, profile.DAILY_NAME),
+        profile_path(DAY, profile.PROFILE_NAME),
+    ]
+    assert [status for _, status, _ in port.finished] == ["ok"]
+
+
+def test_a_daily_alone_does_not_count_as_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**見るのは `profile` の有無。** `daily` だけ在る（`profile` を置く前に落ちた）日は作り直す。
+
+    置く順は `daily` → `profile` なので、`profile` が在れば 2 つとも置けている。
+    """
+    port = FakePort()
+    port.stored[profile_path(DAY, profile.DAILY_NAME)] = b"daily only"
+    assert _run_daily(port, monkeypatch) == 0
+    assert profile_path(DAY, profile.PROFILE_NAME) in port.uploads
+
+
+def test_the_listing_asks_for_that_day_only() -> None:
+    """**その日の階層を並べて確かめる**（`HEAD` は無い物に本文の無い 400 を返し、区別できない）。"""
+    port = FakePort()
+    assert job.profile_exists(port, DAY) is False
+    build_and_upload(port, DAY)
+    assert job.profile_exists(port, DAY) is True
+    assert job.profile_exists(port, DAY + timedelta(days=1)) is False
+    folder = profile_path(DAY, profile.PROFILE_NAME).rpartition("/")[0]
+    assert port.listed[0] == (PARQUET_BUCKET, f"{folder}/", job.EXISTS_LIST_LIMIT)

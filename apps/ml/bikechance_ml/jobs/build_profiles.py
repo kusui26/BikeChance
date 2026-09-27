@@ -14,6 +14,18 @@
     profiles/date=YYYY-MM-DD/daily.parquet     ← その日ぶんの素の集計
     profiles/date=YYYY-MM-DD/profile.parquet   ← 直近 28 日の累計（読むのはこちら）
 
+**`profile.parquet` は配信が部分読みする形で書く**（W5 の契約 28、W6 の PR C）：並びは
+`dow_type, slot15, system_id, station_id`、**1 行群 ＝ 1 つの `(dow_type, slot15)`**
+（`profile_bytes`）。推論は周期ごとに要る 8 枠ぶんの行群だけを落とす（W6 の PR D）。
+**1 周期の読みを 2 MB 未満に保つ書き方**も `profile_bytes` の 1 か所に置く（統計は鍵の
+2 列だけ、`station_id` は辞書にしない。W6 プランの所見 204）。`daily.parquet` は推論が
+読まないので、前のままの書き方でよい。
+
+**1 日に 2 回走る**（W6 の PR C、W6-04）。**00:40 JST の回はプロファイルだけ**を作り、
+**06:00 JST の回は学習サンプルを作ったあと、プロファイルが無ければ作る**
+（`--skip-if-exists`）。00:40 の回が作っていれば、06:00 の回は置き直さない——推論が
+読んでいる最中のファイルを差し替える回数を減らす。
+
 **28 日ぶんを毎日読み直さない**（1 回 150〜400 MB になる）。読むのは 3 つだけ——
 前日の `profile`・当日の毎時 Parquet・**28 日前の `daily`**（W5-05）。`build_reference` の
 `capacity_daily_max` と同じ持ち回りである。
@@ -48,6 +60,7 @@ from pathlib import Path
 from typing import Final, Protocol
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from bikechance_ml.baselines import climatology
 from bikechance_ml.config import read_storage_config
@@ -61,9 +74,30 @@ from bikechance_ml.jobs.build_features import (
     read_profile_table,
     to_parquet_bytes,
 )
+from bikechance_ml.jobs.snapshot_table import COMPRESSION
 
-#: `job_runs` と `monitored_jobs` に載る名前。**毎日 1 回**（GitHub Actions）。
+#: `job_runs` と `monitored_jobs` に載る名前。**1 日に 2 回まで**（GitHub Actions の 00:40 と
+#: 06:00。06:00 の回は、00:40 の回が作っていれば何もせず、記録も残さない）。
 JOB_NAME: Final[str] = "build_profiles"
+
+#: 有無を確かめるときに並べる数の上限。**その日の階層には 2 つしか無い**（`daily`・`profile`）。
+EXISTS_LIST_LIMIT: Final[int] = 10
+
+#: `profile.parquet` で**辞書にせず、差分で書く列**（W6 プランの所見 204）。
+#:
+#: 1 行群はほぼ全ポート（約 2 万 1 千）を含むので、`station_id` を辞書にすると**行群ごとに
+#: 2 万語の辞書を持ち直す**——既定の書き方では、1 周期の読み（フッタを含む）の 26% がこれ
+#: だった。行群の中は `system_id, station_id` の順に並んでいて前の行との一致が長いので、
+#: 差分（DELTA_BYTE_ARRAY）で書くと 1 行群 66 → 13 KB になる（2026-09-27、本番の
+#: `profile(09-26)` で測った）。
+DELTA_ENCODED: Final[Mapping[str, str]] = {"station_id": "DELTA_BYTE_ARRAY"}
+
+#: `profile.parquet` で**統計（最小と最大）を書く列**。**行群を選ぶ鍵の 2 列だけ**。
+#:
+#: 配信（W6 の PR D）はこの 2 列の最小と最大で要る行群を選ぶ。ほかの列の統計は誰も読まず、
+#: 3,744 個（288 行群 × 13 列）の断片ごとにフッタを太らせる——配信は周期ごとにフッタを
+#: 読むので、そのまま下りになる（フッタ 359 → 263 KB。所見 204）。
+STATISTICS_COLUMNS: Final[tuple[str, ...]] = profile.ROW_GROUP_KEY
 
 
 class ProfilesPort(ReadsStorage, Protocol):
@@ -74,6 +108,7 @@ class ProfilesPort(ReadsStorage, Protocol):
     """
 
     def list_holidays(self) -> tuple[date, ...]: ...
+    def list_objects(self, bucket: str, prefix: str, limit: int) -> tuple[str, ...]: ...
     def upload_parquet(self, path: str, body: bytes) -> None: ...
     def job_started(self, job_name: str) -> int: ...
     def job_finished(self, run_id: int, status: str, detail: Mapping[str, object]) -> None: ...
@@ -88,10 +123,41 @@ class Made:
     summary: dict[str, object]
 
     def bodies(self) -> dict[str, bytes]:
+        """置く 2 つ。**`profile` だけ契約 28 の形で書く**（`profile_bytes`）。"""
         return {
             profile.DAILY_NAME: to_parquet_bytes(self.daily),
-            profile.PROFILE_NAME: to_parquet_bytes(self.profile),
+            profile.PROFILE_NAME: profile_bytes(self.profile),
         }
+
+
+def profile_bytes(table: pa.Table) -> bytes:
+    """`profile.parquet` のバイト列（**W5 の契約 28**）。**1 行群 ＝ 1 つの `(dow_type, slot15)`。**
+
+    **行数ではなく鍵の変わり目で切る**（`profile.row_groups`。並びが崩れていれば書く前に止まる）。
+    行群ごとに `write_table` を 1 回呼び、その行群の行数ちょうどを上限に渡すので、1 回が
+    1 行群になる。**統計は鍵の 2 列だけ、`station_id` は差分で書く**（`STATISTICS_COLUMNS`・
+    `DELTA_ENCODED`。既定のままだと本番の 1 周期が 2 MB を超えた。所見 204）。
+    **同じ表からは同じバイト列が出る**（圧縮は `to_parquet_bytes` と同じ）。
+    """
+    bounds = profile.row_groups(table)
+    sink = pa.BufferOutputStream()
+    with pq.ParquetWriter(
+        sink,
+        table.schema,
+        compression=COMPRESSION,
+        write_statistics=list(STATISTICS_COLUMNS),
+        use_dictionary=[one for one in table.schema.names if one not in DELTA_ENCODED],
+        column_encoding=dict(DELTA_ENCODED),
+    ) as writer:
+        for start, stop in bounds:
+            writer.write_table(table.slice(start, stop - start), row_group_size=stop - start)
+    return bytes(sink.getvalue())
+
+
+def profile_exists(source: ProfilesPort, day: date) -> bool:
+    """その日の `profile.parquet` が Storage に在るか。**一覧で確かめる**（`list_objects`）。"""
+    folder, _, name = profile_path(day, profile.PROFILE_NAME).rpartition("/")
+    return name in source.list_objects(PARQUET_BUCKET, f"{folder}/", EXISTS_LIST_LIMIT)
 
 
 def read_day(
@@ -178,7 +244,8 @@ class Summed:
     days: tuple[date, ...]
 
     def body(self) -> bytes:
-        return to_parquet_bytes(self.profile)
+        """置いてある `profile.parquet` と同じ書き方（契約 28）。**`--compare` はこれと比べる。**"""
+        return profile_bytes(self.profile)
 
 
 def window_days(day: date) -> tuple[date, ...]:
@@ -210,7 +277,10 @@ def compare_with_stored(source: ReadsStorage, day: date, summed: Summed) -> dict
     """作り直した版を、**置いてある `profile.parquet` とバイト単位で**突き合わせる。
 
     **読み直した表どうしではなく、置いてあるバイト列そのもの**と比べる——同じ表から
-    同じバイト列が出ること（`to_parquet_bytes`）まで含めて確かめるためである。
+    同じバイト列が出ること（`profile_bytes`）まで含めて確かめるためである。
+
+    **比べられるのは契約 28 の書き方で置いた版だけ**（W6 の PR C のマージの後に作った日から）。
+    それより前の版は、中身が同じでも並びと書き方が違うので一致しない。
     """
     stored = source.download(PARQUET_BUCKET, profile_path(day, profile.PROFILE_NAME))
     body = summed.body()
@@ -229,6 +299,11 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--out", default=None, help="書き出し先のディレクトリ")
     parser.add_argument("--upload", action="store_true", help="Storage に置く")
     parser.add_argument(
+        "--skip-if-exists",
+        action="store_true",
+        help="その日の profile.parquet が Storage に在れば作らない（定時の回。--upload と使う）",
+    )
+    parser.add_argument(
         "--from-dailies",
         action="store_true",
         help="転がさず、置いてある daily を 28 日ぶん足して作り直す（置かない）",
@@ -243,31 +318,50 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
 
 def run(argv: Sequence[str] | None = None) -> int:
     args = _arguments(argv)
+    refused = _refused(args)
+    if refused is not None:
+        print(refused, file=sys.stderr)
+        return 2
     day = date.fromisoformat(args.date) if args.date else jst_yesterday(datetime.now(UTC))
-    if args.from_dailies or args.compare:
+    if args.from_dailies:
         return _run_from_dailies(args, day)
     with open_storage(read_storage_config()) as source:
-        made = (
-            build_and_upload(source, day, _path(args.cache))
-            if args.upload
-            else build_one_day(source, day, _path(args.cache))
-        )
+        made = _build(args, source, day)
+    if made is None:
+        print(json.dumps({"date": day.isoformat(), "skipped": "exists"}, ensure_ascii=False))
+        return 0
     _write(args.out, made)
     print(json.dumps({"date": day.isoformat(), **made.summary}, ensure_ascii=False))
     return 0
 
 
+def _refused(args: argparse.Namespace) -> str | None:
+    """一緒に使えない組み合わせなら、その理由。**Storage を開く前に止める。**"""
+    if args.compare and not args.from_dailies:
+        return "--compare は --from-dailies と一緒に使います"
+    if args.from_dailies and args.upload:
+        return "--from-dailies は置きません（作り直した版を置くのは掃除を入れるときに決める。D-28）"
+    if args.skip_if_exists and not args.upload:
+        return "--skip-if-exists は --upload と一緒に使います（置く回が、在れば作らないためのもの）"
+    return None
+
+
+def _build(args: argparse.Namespace, source: ProfilesPort, day: date) -> Made | None:
+    """日次の回。**`--skip-if-exists` で在れば作らずに None。**
+
+    **`job_runs` にも残さない。** 1 行は「作った回」で、見張り（`check_jobs_missing`）は
+    `ok` の行が来ているかだけを見る。00:40 の回が作った日は、その回の `ok` が残っている。
+    """
+    if args.skip_if_exists and profile_exists(source, day):
+        return None
+    cache = _path(args.cache)
+    return (
+        build_and_upload(source, day, cache) if args.upload else build_one_day(source, day, cache)
+    )
+
+
 def _run_from_dailies(args: argparse.Namespace, day: date) -> int:
     """`--from-dailies` の道。**置かない**——作り直した版を置くのは掃除を入れるときに決める。"""
-    if not args.from_dailies:
-        print("--compare は --from-dailies と一緒に使います", file=sys.stderr)
-        return 2
-    if args.upload:
-        print(
-            "--from-dailies は置きません（作り直した版を置くのは掃除を入れるときに決める。D-28）",
-            file=sys.stderr,
-        )
-        return 2
     with open_storage(read_storage_config()) as source:
         summed = sum_from_dailies(source, day)
         compared = compare_with_stored(source, day, summed) if args.compare else {}

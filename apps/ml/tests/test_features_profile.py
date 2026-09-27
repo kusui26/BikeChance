@@ -297,20 +297,30 @@ def test_usable_cells_follow_the_floor_of_each_dow_type() -> None:
     assert summary["serve_days"] == {"sat": None, "sun_holiday": None, "weekday": 3}
 
 
-def test_the_rows_are_sorted_by_the_key() -> None:
-    """**鍵の昇順で書く。** 並びが圧縮に効き、読むときの結合も速い。"""
+def _keys(table: pa.Table, order: tuple[str, ...]) -> list[tuple[object, ...]]:
+    return list(zip(*(table.column(one).to_pylist() for one in order), strict=True))
+
+
+def test_the_rows_are_in_the_contract_28_order() -> None:
+    """**`dow_type, slot15, system_id, station_id` の昇順で返す**（W5 の契約 28）。
+
+    配信は 1 周期ぶんの行群だけを落とす。**ポートが先の並び（`KEY_COLUMNS`）に戻ると、
+    どの行群も全枠を含み、下りが黙って 10 倍になる。** ポートを 2 つ・曜日種別を 2 つにして、
+    **前の並びとは違う順になる表**で確かめる（同じ順になる表では、どちらで並べても通る）。
+    """
     rows = [("hellocycling", "b", 3, 4, OPEN), ("hellocycling", "a", 3, 4, OPEN)]
-    built = profile.roll(None, daily(observations(rows)), None)
-    keys = list(
-        zip(
-            built.column("system_id").to_pylist(),
-            built.column("station_id").to_pylist(),
-            built.column("dow_type").to_pylist(),
-            built.column("slot15").to_pylist(),
-            strict=True,
-        )
-    )
-    assert keys == sorted(keys)
+    weekday = daily(observations(rows))
+    saturday = daily(observations(rows, day=SATURDAY), day=SATURDAY)
+    built = profile.roll(profile.roll(None, weekday, None), saturday, None)
+    assert _keys(built, profile.PROFILE_ORDER) == sorted(_keys(built, profile.PROFILE_ORDER))
+    old = _keys(built, profile.KEY_COLUMNS)
+    assert old != sorted(old), "前の並びと区別できない表では、並びを確かめたことにならない"
+
+
+def test_the_order_has_the_same_four_keys() -> None:
+    """**並びは鍵の並べ替えで、鍵そのものは変えない**（セルを決めるのは `KEY_COLUMNS`）。"""
+    assert sorted(profile.PROFILE_ORDER) == sorted(profile.KEY_COLUMNS)
+    assert profile.ROW_GROUP_KEY == ("dow_type", "slot15")
 
 
 # ── 形 ────────────────────────────────────────────────────────

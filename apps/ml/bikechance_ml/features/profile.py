@@ -19,6 +19,10 @@
 
 **ここは純粋な部分だけを持つ。** Parquet を読むのも置くのも `jobs/build_profiles.py`。
 
+**`profile.parquet` は配信が部分読みする並びで書く**（W5 の契約 28、W6 の PR C）。並びは
+`PROFILE_ORDER`（`dow_type, slot15, system_id, station_id`）で、**1 行群 ＝ 1 つの
+`(dow_type, slot15)`**。並べるのは `_fold` の 1 か所で、行群の区切りは `row_groups` が出す。
+
 **特徴量（`prof_*`）もここから引く**（W5 プラン §6.10 の PR J1）。引き方は `Lookup` の 1 つで、
 学習（`build_day`）も推論（`build_now`）も同じものを通る。
 """
@@ -65,6 +69,20 @@ PROFILE_NAME: Final[str] = "profile"
 
 #: セルを決める鍵。
 KEY_COLUMNS: Final[tuple[str, ...]] = ("system_id", "station_id", "dow_type", "slot15")
+
+#: `profile.parquet` の並び（**W5 の契約 28**）。鍵は `KEY_COLUMNS` と同じ 4 つで、
+#: 並べる順だけが違う。
+#:
+#: **配信は、この並びに依存して 1 周期ぶんの行群だけを落とす**（W5 プラン §6.10 の「先に
+#: 測った」②′。いちばん重い平日の周期で 1.56 MB：9/26 の版と `build_profiles.profile_bytes`
+#: の書き方。W6 プランの所見 204）。前の並び `system_id, station_id, …` では、どの行群も全 96 枠・
+#: 全 3 曜日種別を含むので、絞ってもファイル全体（9/26 の版で 19.3 MB）を落とす。崩れても例外は
+#: 出ず、**下りが黙って 10 倍になる**——だから並べる所を `_fold` の 1 か所にし、書く前に確かめる。
+PROFILE_ORDER: Final[tuple[str, ...]] = ("dow_type", "slot15", "system_id", "station_id")
+
+#: 行群を切る鍵。**1 行群 ＝ 1 つの `(dow_type, slot15)`**（**行数ではなく鍵の変わり目で切る**。
+#: セルの数は枠ごとに揃っていないので、行数で切ると境目がずれて 1 周期が触る群が増える）。
+ROW_GROUP_KEY: Final[tuple[str, ...]] = PROFILE_ORDER[:2]
 
 #: 足し合わせる列と型。**鍵以外はすべて和である**（だから転がせる）。
 #:
@@ -118,6 +136,10 @@ LOOKBACK_HOURS: Final[int] = 2
 
 class SchemaMismatchError(ValueError):
     """読んだ表の列が契約と違う。**足りない列を捏造しない**（W3 プラン §12 の 97）。"""
+
+
+class LayoutError(ValueError):
+    """表が契約 28 の並びになっていない。**そのまま書くと、配信の下りが黙って 10 倍になる。**"""
 
 
 @dataclass(frozen=True)
@@ -381,6 +403,11 @@ def _fold(parts: Sequence[pa.Table]) -> pa.Table:
 
     引いた日にしか寄与が無かったセルは、引いたあと空になる。**0 の行を残すと表が
     単調に太り、「1 度も観測していない」と「28 日前に観測した」が区別できなくなる。**
+
+    **契約 28 の並び（`PROFILE_ORDER`）で返す。** `profile` の表を作るのはここだけ
+    （`roll`・`sum_dailies`）なので、並べる所も 1 つで済む。読み手はどれも並びに依存しない
+    （`Lookup`・`profile_climatology.cells` は鍵で引き、`summarize` は束ねる）——並びが効くのは
+    ファイルの行群だけである。
     """
     joined = pa.concat_tables(parts)
     if joined.num_rows == 0:
@@ -395,7 +422,41 @@ def _fold(parts: Sequence[pa.Table]) -> pa.Table:
         {one: alive.column(f"{one}_sum").cast(PROFILE_SCHEMA.field(one).type) for one in totals}
     )
     built = pa.table(columns, schema=PROFILE_SCHEMA)
-    return built.sort_by([(one, "ascending") for one in KEY_COLUMNS])
+    return built.sort_by([(one, "ascending") for one in PROFILE_ORDER])
+
+
+def row_groups(table: pa.Table) -> tuple[tuple[int, int], ...]:
+    """`profile.parquet` の行群の区切り（`(始まり, 終わり)` の並び。**1 つの `(dow_type, slot15)`
+    ＝ 1 行群**。W5 の契約 28）。
+
+    **並びを確かめてから切る。** 同じ `(dow_type, slot15)` が 1 か所に固まり、昇順に並んで
+    いなければ `LayoutError`——`_fold` が並べた表なら必ず通る。行群の中のポートの並びは
+    `_fold` が決め、ここでは見ない（配信が落とす量には効かない）。
+    """
+    require_schema(table, PROFILE_SCHEMA)
+    if table.num_rows == 0:
+        return ()
+    group = _group_ids(table)
+    changes = np.flatnonzero(np.diff(group)) + 1
+    starts = np.concatenate([np.zeros(1, dtype=np.int64), changes])
+    stops = np.concatenate([changes, np.asarray([len(group)], dtype=np.int64)])
+    if bool(np.any(np.diff(group[starts]) <= 0)):
+        raise LayoutError("(dow_type, slot15) が 1 か所に固まって昇順に並んでいない")
+    return tuple(zip(starts.tolist(), stops.tolist(), strict=True))
+
+
+def _group_ids(table: pa.Table) -> Int64:
+    """行ごとの行群の鍵（`ROW_GROUP_KEY`）を 1 本の整数にする。
+
+    曜日種別は `DOW_TYPE_ORDER` の番号にする。`DOW_TYPE_ORDER` は名前の昇順なので、
+    **文字列で並べた表と同じ順に番号が増える**。
+    """
+    dow_name, slot_name = ROW_GROUP_KEY
+    index = pc.index_in(table.column(dow_name), value_set=pa.array(DOW_TYPE_ORDER))
+    if index.null_count:
+        raise LayoutError(f"知らない曜日種別がある（{DOW_TYPE_ORDER} のどれでもない）")
+    dow = np.asarray(index.to_numpy(zero_copy_only=False), dtype=np.int64)
+    return np.asarray(dow * SLOTS_PER_DAY + _int64(table, slot_name), dtype=np.int64)
 
 
 def require_schema(table: pa.Table, schema: pa.Schema) -> None:
