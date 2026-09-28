@@ -354,10 +354,10 @@ def test_a_cell_below_the_floor_stays_out_of_the_blend() -> None:
 
 
 def test_a_dow_type_that_is_not_served_is_left_out_on_both_sides() -> None:
-    """**配らない曜日種別は、配信でも学習の行でも引かない**（土日祝の既定。D-37）。
+    """**配らない曜日種別は、配信でも学習の行でも引かない**（D-37）。
 
     厚いセル（5 日）でも同じ。混合が「配信では出ない値」を見て係数を決めないように。
-    土日祝の下限を与えれば（9/28 に K を決めたあと）、同じセルが両方で引ける。
+    既定（土日祝 4 日。9/28 に入れた K）なら、同じ 5 日のセルが両方で引ける。
     """
     samples = samples_of([one_sample(SATURDAY) | {"target_dow_type": "sat"}])
     source = source_of(
@@ -366,15 +366,15 @@ def test_a_dow_type_that_is_not_served_is_left_out_on_both_sides() -> None:
         {SATURDAY: to_daily([cell_row(dow="sat", n=3, n_bike_ok=3)])},
         day=SATURDAY,
     )
-    table = source.table(samples, BIKE, only(samples))
-    assert table.cells == 0, "既定では土曜を配らない"
+    unserved = replace(source, floor=climatology.weekend_floor(source.floor, None))
+    table = unserved.table(samples, BIKE, only(samples))
+    assert table.cells == 0, "配らない種別は、厚くても引かない"
     assert table.max_days == {"sat": 5, "sun_holiday": 0, "weekday": 0}, "厚さは数えてある"
-    assert source.leave_out(table, samples, BIKE, np.full(1, 0.9)).fell_back == 1
+    assert unserved.leave_out(table, samples, BIKE, np.full(1, 0.9)).fell_back == 1
 
-    served = replace(source, floor=climatology.weekend_floor(source.floor, 3))
-    table = served.table(samples, BIKE, only(samples))
-    assert table.cells == 1
-    applied = served.leave_out(table, samples, BIKE, np.full(1, 0.9))
+    table = source.table(samples, BIKE, only(samples))
+    assert table.cells == 1, "既定（4 日から）では 5 日の土曜を配る"
+    applied = source.leave_out(table, samples, BIKE, np.full(1, 0.9))
     assert applied.probability.tolist() == pytest.approx([(9 - 3) / (15 - 3)])
 
 
@@ -549,10 +549,12 @@ def test_describe_quotes_the_floor() -> None:
     samples = samples_of([one_sample()])
     source = source_of(samples, [cell_row()], {DAY0: to_daily([cell_row()])}, day=DAY1)
     assert source.describe() == (
-        "プロファイル（profiles/date=2026-09-08、引ける日 1、下限 2 点・sat 配らない・"
-        "sun_holiday 配らない・weekday 3 日（学習の行は 1 日低く）、自分の日は到着日で引く）"
+        "プロファイル（profiles/date=2026-09-08、引ける日 1、下限 2 点・sat 4 日・"
+        "sun_holiday 4 日・weekday 3 日（学習の行は 1 日低く）、自分の日は到着日で引く）"
     )
     assert "weekday 4 日" in replace(source, floor=weekday_floor(4)).describe()
+    unserved = replace(source, floor=climatology.weekend_floor(source.floor, None))
+    assert "sat 配らない・sun_holiday 配らない" in unserved.describe()
 
 
 # ── 端から端まで（PR B と PR D の接ぎ目）──────────────────────
