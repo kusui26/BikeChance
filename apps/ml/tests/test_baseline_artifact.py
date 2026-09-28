@@ -42,6 +42,7 @@ from bikechance_ml.baselines.artifact import (
 from bikechance_ml.baselines.climatology import FromSamples
 from bikechance_ml.eval.dataset import TARGETS, to_samples
 from bikechance_ml.features.arrays import Float64
+from bikechance_ml.features.calendar import DOW_TYPE_ORDER
 from bikechance_ml.jobs.fit_baseline import build_artifact, model_version_for
 from bikechance_ml.models.predictor import BaselinePredictor
 from tests import eval_fixture as fixture
@@ -50,6 +51,9 @@ from tests.test_infer import features as cycle_table
 
 BIKE, DOCK = TARGETS
 DAY0, DAY1, DAY2 = fixture.DAYS
+
+#: PR A で足した下限の欄（D-37）。**書式の版は上げずに足した**ので、PR B の読み手は読み飛ばす。
+FLOOR_FIELDS: Final[tuple[str, ...]] = ("b2_serve_days", "b2_fit_offset_days", "b2_max_days")
 
 #: 版 1 の成果物（gzip を解き、空白だけ整えた JSON）。**PR B の前の書き手の出力。**
 FORMAT_1: Final[Path] = Path(__file__).parent / "fixtures" / "baseline_artifact" / "format_v1.json"
@@ -66,10 +70,10 @@ def scenario() -> list[dict[str, object]]:
     ]
 
 
-def built(min_days: int = climatology.MIN_CELL_DAYS) -> Artifact:
+def built(floor: climatology.DayFloor = climatology.SAMPLES_FLOOR) -> Artifact:
     samples = to_samples(fixture.to_table(scenario()))
-    # **下限は 2 に下げる**（既定の 30 行はフィクスチャでは立たない。§12 の 167）
-    return build_artifact(samples, fixture.DAYS, FromSamples(min_samples=2, min_days=min_days))
+    # **件数の下限は 2 に下げる**（既定の 30 行はフィクスチャでは立たない。§12 の 167）
+    return build_artifact(samples, fixture.DAYS, FromSamples(min_samples=2, floor=floor))
 
 
 ARTIFACT = built()
@@ -251,7 +255,7 @@ def test_an_artifact_without_climatology_cells_round_trips() -> None:
 
     収集を始めたばかりの日や、下限を上げた日にはこうなる。気候値は全部 B1 に落ちる。
     """
-    empty = built(min_days=99)
+    empty = built(climatology.DayFloor.uniform(99))
     assert all(one.b2.cells == 0 for one in empty.targets.values())
     body = to_bytes(empty)
     assert raw_field(body, BIKE.name, RATE_MICROS_FIELD) == b""
@@ -288,7 +292,7 @@ def test_climatology_needs_enough_days() -> None:
 
     **下限は成果物に書かれる**——どの下限で作った B2 かが、配ったあとも読める。
     """
-    assert ARTIFACT.targets["bike"].b2.min_days == climatology.MIN_CELL_DAYS
+    assert ARTIFACT.targets["bike"].b2.floor == climatology.SAMPLES_FLOOR
     assert ARTIFACT.targets["bike"].b2.cells > 0
 
 
@@ -326,10 +330,10 @@ def test_a_format_1_artifact_is_still_read() -> None:
         assert np.flatnonzero(model.b2.usable).tolist() == fields["b2_keys"]
         assert model.b2.rate[model.b2.usable].tolist() == fields["b2_rate"]
         assert not model.b2.rate[~model.b2.usable].any()
-        assert (model.b2.min_samples, model.b2.min_days) == (
-            fields["b2_min_samples"],
-            fields["b2_min_days"],
-        )
+        assert model.b2.min_samples == fields["b2_min_samples"]
+        # **下限の欄の無い成果物は、全曜日種別に `b2_min_days` を当てた形**（PR A より前）
+        assert model.b2.floor == climatology.DayFloor.uniform(fields["b2_min_days"])
+        assert model.b2.max_days is None
         assert model.b1.rate.tolist() == fields["b1_rate"]
         assert model.b1.fallback.tolist() == fields["b1_fallback"]
         assert model.b1.seen.tolist() == fields["b1_seen"]
@@ -342,7 +346,9 @@ def test_a_format_1_artifact_is_still_read() -> None:
 def test_the_formats_differ_only_in_the_two_b2_fields() -> None:
     """**版 1 と版 2 は B2 の 2 欄と版の番号だけが違う**（ほかは同じ名前・同じ値）。
 
-    版 1 で読んだものを版 2 に書き直して、残りの欄を JSON のまま比べる。
+    版 1 で読んだものを版 2 に書き直して、残りの欄を JSON のまま比べる。**PR A で足した
+    下限の欄**（`b2_serve_days`・`b2_fit_offset_days`・`b2_max_days`）は版とは別の足し算で、
+    版 1 の下限（全種別に同じ `b2_min_days`、学習の行も同じ）をそのまま書いている。
     """
     before = json.loads(FORMAT_1.read_bytes())
     moved = replace(from_bytes(format_1_body()), format_version=FORMAT_VERSION)
@@ -355,9 +361,12 @@ def test_the_formats_differ_only_in_the_two_b2_fields() -> None:
         added = {
             k: v
             for k, v in new_targets[name].items()
-            if k not in (USABLE_BITS_FIELD, RATE_MICROS_FIELD)
+            if k not in (USABLE_BITS_FIELD, RATE_MICROS_FIELD, *FLOOR_FIELDS)
         }
         assert kept == added
+        floor = {k: new_targets[name][k] for k in FLOOR_FIELDS}
+        uniform = dict.fromkeys(DOW_TYPE_ORDER, fields["b2_min_days"])
+        assert floor == {"b2_serve_days": uniform, "b2_fit_offset_days": 0, "b2_max_days": None}
 
 
 def test_format_1_and_2_serve_the_same_probabilities_bit_for_bit() -> None:
@@ -509,3 +518,107 @@ def test_a_format_1_rate_above_one_is_refused() -> None:
 
     with pytest.raises(ArtifactFormatError, match="0〜1"):
         from_bytes(rewritten(format_1_body(), spoil, BIKE.name))
+
+
+# ── 下限の形（W6 の PR A、D-37）──────────────────────────────
+#: 形の見本。**平日 3・土曜は配らない・日祝 4、学習の行は 1 日低く**。
+SHAPED: Final = climatology.DayFloor(
+    serve={"sat": None, "sun_holiday": 4, "weekday": 3}, fit_offset=1
+)
+THICKNESS: Final[dict[str, int]] = {"sat": 2, "sun_holiday": 4, "weekday": 10}
+
+
+def with_floor(floor: climatology.DayFloor, max_days: dict[str, int] | None) -> Artifact:
+    """全ターゲットの B2 に、下限の形と厚さを付けた成果物（**書き方だけを見る**）。"""
+    targets = {
+        name: replace(model, b2=replace(model.b2, floor=floor, max_days=max_days))
+        for name, model in ARTIFACT.targets.items()
+    }
+    return replace(ARTIFACT, targets=targets)
+
+
+def fields_of(body: bytes, target: str = BIKE.name) -> dict[str, object]:
+    document = json.loads(gzip.decompress(body))
+    fields = document["targets"][target]
+    assert isinstance(fields, dict)
+    return fields
+
+
+def test_the_floor_shape_is_written_as_added_fields() -> None:
+    """**形は欄を足して書く**（書式の版は上げない）。配らない種別は JSON の null。"""
+    fields = fields_of(to_bytes(with_floor(SHAPED, THICKNESS)))
+    assert fields["b2_serve_days"] == {"sat": None, "sun_holiday": 4, "weekday": 3}
+    assert fields["b2_fit_offset_days"] == 1
+    assert fields["b2_max_days"] == THICKNESS
+
+
+def test_b2_min_days_stays_an_integer() -> None:
+    """**PR B の読み手が読める形のまま**：`b2_min_days` は整数で、配る種別の最も低い下限。
+
+    PR B の読み手は `int(str(...))` で読み、知らない欄は読み飛ばす。配列や null に変えると、
+    PR A の書き手が作った成果物（当てはめ直し #1）を、PR B の配信が読めずに止まる。
+    """
+    fields = fields_of(to_bytes(with_floor(SHAPED, THICKNESS)))
+    assert type(fields["b2_min_days"]) is int
+    assert fields["b2_min_days"] == 3
+    known = {"b1_rate", "b1_seen", "b1_fallback", "b1_n_systems", "b2_min_samples", "b2_min_days"}
+    assert known | {USABLE_BITS_FIELD, RATE_MICROS_FIELD, "b3_intercept"} <= fields.keys()
+
+
+def test_the_floor_shape_reads_back() -> None:
+    restored = from_bytes(to_bytes(with_floor(SHAPED, THICKNESS)))
+    for model in restored.targets.values():
+        assert model.b2.floor == SHAPED
+        assert model.b2.max_days == THICKNESS
+
+
+def test_a_table_fitted_here_records_its_thickness() -> None:
+    """**当てはめた表は厚さを持つ**（曜日種別ごとの日数の最大）。フィクスチャは平日 3 日。"""
+    thickness = ARTIFACT.targets[BIKE.name].b2.max_days
+    assert thickness == {"sat": 0, "sun_holiday": 0, "weekday": 3}
+    assert from_bytes(to_bytes(ARTIFACT)).targets[BIKE.name].b2.max_days == thickness
+
+
+def test_an_artifact_without_the_floor_fields_is_read_as_uniform() -> None:
+    """**欄の無い成果物**（PR B が書いた版 2）は、全種別に `b2_min_days` を当てた形で読む。"""
+
+    def drop(fields: dict[str, object]) -> None:
+        for name in FLOOR_FIELDS:
+            del fields[name]
+
+    body = rewritten(to_bytes(with_floor(SHAPED, THICKNESS)), drop, BIKE.name)
+    model = from_bytes(body).targets[BIKE.name]
+    assert model.b2.floor == climatology.DayFloor.uniform(3)
+    assert model.b2.max_days is None
+
+
+def test_a_floor_that_disagrees_with_b2_min_days_is_refused() -> None:
+    """**2 つの書き方が食い違ったら読まない**（どちらを信じるか決められない）。"""
+    body = rewritten(
+        to_bytes(with_floor(SHAPED, THICKNESS)), set_field("b2_min_days", 2), BIKE.name
+    )
+    with pytest.raises(ArtifactFormatError, match="食い違う"):
+        from_bytes(body)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("b2_serve_days", [3, 3, 3]),  # 曜日種別の名前が無い
+        ("b2_serve_days", {"sat": "3", "sun_holiday": 4, "weekday": 3}),  # 文字列
+        ("b2_serve_days", {"sat": True, "sun_holiday": 4, "weekday": 3}),  # 真偽値（int の子）
+        ("b2_serve_days", {"sun_holiday": 4, "weekday": 3}),  # 種別が欠けている
+        ("b2_serve_days", {"sat": None, "sun_holiday": None, "weekday": None}),  # 何も配らない
+        ("b2_fit_offset_days", "1"),  # 文字列
+        ("b2_fit_offset_days", True),  # 真偽値（`int(str(True))` は読めない）
+        ("b2_fit_offset_days", 3),  # 学習の行の下限が 0 日になる
+        ("b2_max_days", {"sat": 2}),  # 種別が欠けている
+        ("b2_max_days", {"sat": 2.5, "sun_holiday": 4, "weekday": 10}),  # 小数
+        ("b2_max_days", {"sat": True, "sun_holiday": 4, "weekday": 10}),  # 真偽値
+    ],
+)
+def test_a_malformed_floor_is_refused(field: str, value: object) -> None:
+    """**組めない形は読まない。** 配信は下限を使わないが、壊れた記録を信じて点検しない。"""
+    body = rewritten(to_bytes(with_floor(SHAPED, THICKNESS)), set_field(field, value), DOCK.name)
+    with pytest.raises(ArtifactFormatError):
+        from_bytes(body)

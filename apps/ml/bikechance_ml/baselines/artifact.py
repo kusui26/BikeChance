@@ -32,6 +32,13 @@ B2 の気候値・B3 の係数）を 1 つの JSON に固め、Storage に置く
 **版 1 を読む道を消すのは、版 1 の成果物が active・shadow・candidate のどこにも
 無くなってから**（契約 30）。版を上げた PR で読み手を版 2 だけにすると、
 デプロイした瞬間に配信中の版 1 が読めなくなる（W6 プランの所見 191）。
+
+**下限の形は欄を足して書く**（W6 の PR A、D-37）：`b2_serve_days`（曜日種別ごとの配る側）・
+`b2_fit_offset_days`（学習の行の下げ幅）・`b2_max_days`（曜日種別ごとの厚さ）。**書式の版は
+上げない**——配信が読むのは `usable` と率だけで、下限は記録である。**`b2_min_days` は整数の
+まま残す**（配る種別のうち最も低い下限）。PR B の読み手は知らない欄を読み飛ばすので、PR A の
+書き手が書いた成果物もそのまま読める。欄の無い成果物（PR A より前）は、全曜日種別に
+`b2_min_days` を当てた形として読む。
 """
 
 import base64
@@ -171,7 +178,7 @@ def _target_to_json(model: TargetModel) -> dict[str, object]:
         "b1_n_systems": model.b1.n_systems,
         **_b2_to_buffers(model.b2),
         "b2_min_samples": model.b2.min_samples,
-        "b2_min_days": model.b2.min_days,
+        **_floor_to_json(model.b2),
         # **B3 の係数は丸めない。** 4 つずつしか無く、標準化の分母を丸めると
         # ゼロ除算になり得る（W3 プラン §12 の 104）。丸めるのは数が多い B1・B2 だけ
         "b3_intercept": float(model.b3.intercept),
@@ -191,6 +198,17 @@ def _b2_to_buffers(table: climatology.Table) -> dict[str, str]:
     return {
         USABLE_BITS_FIELD: _to_base64(np.packbits(usable, bitorder=BIT_ORDER).tobytes()),
         RATE_MICROS_FIELD: _to_base64(_to_micros(table.rate[usable]).tobytes()),
+    }
+
+
+def _floor_to_json(table: climatology.Table) -> dict[str, object]:
+    """下限の形（D-37）。**`b2_min_days` は整数のまま**、形は欄を足して書く。"""
+    floor = table.floor
+    return {
+        "b2_min_days": floor.legacy_days,
+        "b2_serve_days": {dow: floor.serve[dow] for dow in DOW_TYPE_ORDER},
+        "b2_fit_offset_days": floor.fit_offset,
+        "b2_max_days": None if table.max_days is None else dict(table.max_days),
     }
 
 
@@ -255,8 +273,60 @@ def _b2_from_json(
         days=np.zeros(0, dtype=np.int64),
         usable=usable,
         min_samples=int(str(fields["b2_min_samples"])),
-        min_days=int(str(fields["b2_min_days"])),
+        floor=_floor_from_json(fields, name),
+        max_days=_max_days_from_json(fields, name),
     )
+
+
+def _floor_from_json(fields: Mapping[str, object], name: str) -> climatology.DayFloor:
+    """下限の形を読む。**欄が無ければ PR A より前の成果物**で、全曜日種別が `b2_min_days`。
+
+    欄があるときは `b2_min_days` と食い違わないことも確かめる（配る種別の最も低い下限）。
+    """
+    legacy = int(str(fields["b2_min_days"]))
+    serve = fields.get("b2_serve_days")
+    if serve is None:
+        return climatology.DayFloor.uniform(legacy)
+    floor = _day_floor(serve, fields.get("b2_fit_offset_days", 0), name)
+    if floor.legacy_days != legacy:
+        raise ArtifactFormatError(
+            f"{name}: b2_min_days（{legacy}）が下限の形（{floor.describe()}）と食い違う"
+        )
+    return floor
+
+
+def _day_floor(serve: object, offset: object, name: str) -> climatology.DayFloor:
+    if not isinstance(serve, dict) or not all(_is_days(one) for one in serve.values()):
+        raise ArtifactFormatError(f"{name}.b2_serve_days: 曜日種別ごとの日数（か null）を期待した")
+    if not _is_whole(offset):
+        raise ArtifactFormatError(f"{name}.b2_fit_offset_days: 整数を期待した")
+    try:
+        return climatology.DayFloor(serve=serve, fit_offset=int(str(offset)))
+    except climatology.FloorError as error:
+        raise ArtifactFormatError(f"{name}: 下限の形が組めない（{error}）") from error
+
+
+def _max_days_from_json(fields: Mapping[str, object], name: str) -> dict[str, int] | None:
+    """曜日種別ごとの厚さ。**無い（PR A より前か、読み直した表から書いた）なら None。**"""
+    value = fields.get("b2_max_days")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != set(DOW_TYPE_ORDER)
+        or not all(_is_whole(one) for one in value.values())
+    ):
+        raise ArtifactFormatError(f"{name}.b2_max_days: 曜日種別ごとの整数を期待した")
+    return {str(dow): int(str(days)) for dow, days in value.items()}
+
+
+def _is_whole(value: object) -> bool:
+    """JSON の整数か（**真偽値は整数に数えない**——`True` は `int` の子である）。"""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_days(value: object) -> bool:
+    return value is None or _is_whole(value)
 
 
 def _b3_from_json(fields: Mapping[str, object]) -> blend.Blend:

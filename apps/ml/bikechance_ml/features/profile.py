@@ -405,26 +405,37 @@ def require_schema(table: pa.Table, schema: pa.Schema) -> None:
 
 
 # ── 読む（純粋）────────────────────────────────────────────────
-def summarize(profile: pa.Table, *, min_days: int) -> dict[str, object]:
-    """報告用の要約。**読む側が実際に使えるセルの数**を中心に出す。
+def summarize(profile: pa.Table, *, serve_days: Mapping[str, int | None]) -> dict[str, object]:
+    """報告用の要約。**読む側が実際に配るセルの数**を中心に出す。
 
     **下限は受け取る**（既定を持たない）。下限を決めるのは読む側
-    （`baselines/climatology.py` の `MIN_CELL_DAYS`）で、ここに既定を置くと
-    **同じ数が 2 か所に在る**ことになる——以前はそうで、検査で等しさを縛っていた。
+    （`baselines/climatology.py` の `SERVE_DAYS`。**曜日種別ごと**、D-37）で、ここに既定を
+    置くと**同じ数が 2 か所に在る**ことになる——以前はそうで、検査で等しさを縛っていた。
+    `None` の曜日種別は配らないので、使えるセルは 0 と数える。
     """
     if profile.num_rows == 0:
         return {"cells": 0, "usable_cells": 0, "ports": 0}
     days = profile.column("n_days")
-    usable = pc.greater_equal(days, min_days)
+    usable = _meets_floor(profile, serve_days)
     return {
         "cells": profile.num_rows,
         "usable_cells": int(pc.sum(usable).as_py() or 0),
         "ports": _distinct_ports(profile),
-        "min_days": min_days,
+        "serve_days": dict(serve_days),
         "days_max": int(pc.max(days).as_py() or 0),
         "by_dow_type": _by_dow_type(profile, usable),
         "suspended_share": _suspended_share(profile),
     }
+
+
+def _meets_floor(profile: pa.Table, serve_days: Mapping[str, int | None]) -> pa.ChunkedArray:
+    """行ごとに、**その曜日種別の下限**に日数が届いているか。配らない種別は偽。"""
+    names = list(serve_days)
+    floors = pa.array([serve_days[name] for name in names], type=pa.int64())
+    need = pc.take(floors, pc.index_in(profile.column("dow_type"), value_set=pa.array(names)))
+    met = pc.greater_equal(profile.column("n_days").cast(pa.int64()), need)
+    # 下限が無い（配らない・知らない種別）の行は比べられず空になる——使えないと数える
+    return pc.fill_null(met, False)
 
 
 def _distinct_ports(profile: pa.Table) -> int:
@@ -498,6 +509,16 @@ def target_slot(minute_of_day: npt.ArrayLike, h_min: npt.ArrayLike) -> Int64:
     """
     minute = np.asarray(minute_of_day, dtype=np.int64) + np.asarray(h_min, dtype=np.int64)
     return np.asarray((minute % _MINUTES_PER_DAY) // SLOT_MINUTES, dtype=np.int64)
+
+
+def target_day_offset(minute_of_day: npt.ArrayLike, h_min: npt.ArrayLike) -> Int64:
+    """目標時刻 `t + h` が、基準の日の**何日先**か（水平は 180 分までなので 0 か 1）。
+
+    **`target_slot` と同じ足し算で日をまたぐ。** 枠が 0 に戻った行は、日が 1 つ進んでいる。
+    B2 の leave-one-out が「答えが入った日」を引くのに使う（W5 プランの所見 180）。
+    """
+    minute = np.asarray(minute_of_day, dtype=np.int64) + np.asarray(h_min, dtype=np.int64)
+    return np.asarray(minute // _MINUTES_PER_DAY, dtype=np.int64)
 
 
 @dataclass(frozen=True)
