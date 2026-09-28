@@ -272,8 +272,9 @@ def test_a_new_dow_type_starts_at_zero_days() -> None:
 def test_usable_cells_follow_the_floor_of_each_dow_type() -> None:
     """**使えるセルは曜日種別ごとの下限で数える**（D-37）。配らない種別は 0 と数える。
 
-    `build_profiles` の要約（`job_runs` に残る）が、配信と同じ形で数えるように——土日祝を
-    配らない既定のあいだは、**厚くても 0 が正しい**。下限を知らない種別も 0（数えない）。
+    `build_profiles` の要約（`job_runs` に残る）が、配信と同じ形で数えるように——土日祝は
+    **4 日から配る**既定（K ＝ 4）なので、**3 日の土曜は 0 が正しい**。配らない種別は
+    厚くても 0、下限を知らない種別も 0（数えない）。
     """
     weekday = daily(observations([("hellocycling", "a", 3, 4, OPEN)]))
     saturday = daily(observations([("hellocycling", "a", 3, 4, OPEN)], day=SATURDAY), day=SATURDAY)
@@ -293,8 +294,9 @@ def test_usable_cells_follow_the_floor_of_each_dow_type() -> None:
     assert usable({"sat": 3, "sun_holiday": None, "weekday": 3}) == {"sat": cells, "weekday": cells}
     assert usable({"sat": 4, "sun_holiday": 4, "weekday": 3}) == {"sat": 0, "weekday": cells}
     assert usable({"weekday": 3}) == {"sat": 0, "weekday": cells}
+    assert usable({"sat": None, "sun_holiday": None, "weekday": 3}) == {"sat": 0, "weekday": cells}
     summary = profile.summarize(rolled, serve_days=climatology.SERVE_DAYS)
-    assert summary["serve_days"] == {"sat": None, "sun_holiday": None, "weekday": 3}
+    assert summary["serve_days"] == {"sat": 4, "sun_holiday": 4, "weekday": 3}
 
 
 def test_the_rows_are_sorted_by_the_key() -> None:
