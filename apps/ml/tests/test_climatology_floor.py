@@ -2,8 +2,8 @@
 
 **主題は 3 つ。**
 
-  * **配る側の下限は曜日種別ごと**で、「配らない」を表せる。土日祝は 9/28 に K を入れる
-    までは配らない（W6 プラン §6.1）
+  * **配る側の下限は曜日種別ごと**で、「配らない」を表せる。土日祝は 9/28 に入れた K ＝ 4
+    （W6 プラン §6.1）
   * **学習の行は、配る側より `fit_offset` 日低い下限で判定する**。プロファイルから作ると
     自分の日を丸ごと引くので、1 日下げれば**配るセル ＝ 混合が学習の行で見たセル**になる
     （W5 プランの所見 179）
@@ -43,15 +43,30 @@ SHAPED: Final = DayFloor(serve={"sat": None, "sun_holiday": 4, "weekday": 3}, fi
 FAR_BEYOND_ANY_DAYS: Final[int] = 10**12
 
 
-# ── 既定（9/28 に K を入れるまで）────────────────────────────
-def test_the_default_serves_weekdays_only() -> None:
-    """**PR の既定は、土日祝を配らない**（W6 プラン §6.1）。平日は 3 日のまま（D-30）。
+# ── 既定（9/28 に入れた K）────────────────────────────────────
+def test_the_default_serves_weekends_from_four_days() -> None:
+    """**土日祝は 4 日から配る**（K ＝ 4。W6 プラン §6.1 の基準を 9/27 の行に当てた）。
 
-    9/28 に K が決まったら、`SERVE_DAYS` とこの検査を一緒に直す。**測れなかったときは
-    このまま当てはめ直し #1 に使える**ので、既定は保守側に置く。
+    3 日は効かず（落とすと −0.21%、区間の下限 −0.48%、2 / 4 組）、4 日と 5 日は効いた。
+    **土曜も日曜・祝日と同じ K**（土曜がちょうど 3 日の行は 10/3 まで無い）。平日は 3 日の
+    まま（D-30）。**下げるのは複数日の行で測り直してから**（1 日の行では上げる向きにだけ使う）。
     """
-    assert dict(SERVE_DAYS) == {"sat": None, "sun_holiday": None, "weekday": 3}
+    assert dict(SERVE_DAYS) == {"sat": 4, "sun_holiday": 4, "weekday": 3}
+    assert climatology.WEEKEND_SERVE_DAYS == 4
     assert SERVE_DAYS["weekday"] == climatology.MIN_CELL_DAYS
+
+
+def test_the_weekend_fit_rows_are_judged_at_three_days() -> None:
+    """**学習の行は配る側より 1 日低い**（所見 179）：土日祝は 3 日、平日は 2 日で判定する。
+
+    9/29 の当てはめ直しで**日曜・祝日が 4 日以上のセルを配る**なら、混合は学習の行で
+    3 日以上のセルを見ている——配るセル ＝ 混合が学習の行で見たセル。
+    """
+    fit_days = {
+        dow: None if days is None else days - PROFILE_FLOOR.fit_offset
+        for dow, days in PROFILE_FLOOR.serve.items()
+    }
+    assert fit_days == {"sat": 3, "sun_holiday": 3, "weekday": 2}
 
 
 def test_profiles_lower_the_fit_rows_by_one_day_and_samples_do_not() -> None:
@@ -133,11 +148,16 @@ def test_describe_is_the_line_in_the_report() -> None:
 
 
 def test_weekend_floor_changes_only_the_weekend() -> None:
-    """**候補の版は土日祝の配る側だけが違う**（平日と学習の行の下げ幅はそのまま）。"""
-    candidate = weekend_floor(PROFILE_FLOOR, 4)
-    assert dict(candidate.serve) == {"sat": 4, "sun_holiday": 4, "weekday": 3}
+    """**候補の版は土日祝の配る側だけが違う**（平日と学習の行の下げ幅はそのまま）。
+
+    既定は選んだ K（4）なので、k = 4 の候補は既定そのもの。「配らない」も作れる。
+    """
+    candidate = weekend_floor(PROFILE_FLOOR, 5)
+    assert dict(candidate.serve) == {"sat": 5, "sun_holiday": 5, "weekday": 3}
     assert candidate.fit_offset == 1
-    assert weekend_floor(PROFILE_FLOOR, None) == PROFILE_FLOOR
+    assert weekend_floor(PROFILE_FLOOR, climatology.WEEKEND_SERVE_DAYS) == PROFILE_FLOOR
+    unserved = weekend_floor(PROFILE_FLOOR, None)
+    assert dict(unserved.serve) == {"sat": None, "sun_holiday": None, "weekday": 3}
 
 
 def test_the_floor_does_not_follow_the_dict_it_was_built_from() -> None:
