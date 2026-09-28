@@ -317,13 +317,18 @@ def test_a_candidate_of_another_thickness_is_not_written(
     assert "候補の版になっていません" in capsys.readouterr().err
 
 
-def test_off_is_the_default_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`off` は既定と同じ形（**土日祝を配らない**）。厚さは確かめない。"""
+def test_off_serves_no_weekend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`off` は**土日祝を配らない**形（K を選ぶときの 4 つ目の候補）。厚さは確かめない。
+
+    既定（土日祝 4 日。9/28 に入れた K）とは違う形になる——**測るための候補を、配る既定と
+    取り違えない**。
+    """
     root = _on_sundays(tmp_path / "samples")
     out = tmp_path / "off.json.gz"
     assert _run(Shelf(), root, monkeypatch, "--weekend-days", "off", "--out", str(out)) == 0
     for model in from_bytes(out.read_bytes()).targets.values():
-        assert model.b2.floor == climatology.SAMPLES_FLOOR
+        assert model.b2.floor == climatology.weekend_floor(climatology.SAMPLES_FLOOR, None)
+        assert model.b2.floor != climatology.SAMPLES_FLOOR
 
 
 def test_with_weekend_keeps_the_way_b2_is_made() -> None:

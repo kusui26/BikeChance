@@ -123,7 +123,7 @@ def test_the_climatology_source_is_named_in_the_report() -> None:
     """**同じ日でも作り方で B2 の中身が変わる。** どちらで測ったかを報告書に残す。"""
     described = FromSamples().describe()
     assert OUTCOME.climate == described
-    assert "下限 30 行・sat 配らない・sun_holiday 配らない・weekday 3 日" in described
+    assert "下限 30 行・sat 4 日・sun_holiday 4 日・weekday 3 日" in described
     text = report.render_markdown(OUTCOME, "検査", "", weather=WEATHER)
     assert described in text
 
