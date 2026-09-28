@@ -367,11 +367,17 @@ def test_the_floor_reaches_the_table_through_the_source() -> None:
 
 
 def test_the_floor_is_written_into_the_report_line() -> None:
-    """**下限は報告書と登録簿に残る。** 「どこまで信じた表か」が後から読めること。"""
+    """**下限は報告書と登録簿に残る。** 「どこまで信じた表か」が後から読めること。
+
+    既定は土日祝 4 日（9/28 に入れた K）。**配らない種別は「配らない」と書く**（0 日と書かない）。
+    """
     assert climatology.FromSamples().describe() == (
-        "学習サンプル（features/、下限 30 行・sat 配らない・sun_holiday 配らない・weekday 3 日）"
+        "学習サンプル（features/、下限 30 行・sat 4 日・sun_holiday 4 日・weekday 3 日）"
     )
     assert "下限 2 行" in climatology.FromSamples(min_samples=2).describe()
+    unserved = climatology.weekend_floor(climatology.SAMPLES_FLOOR, None)
+    described = replace(climatology.FromSamples(), floor=unserved).describe()
+    assert "sat 配らない・sun_holiday 配らない・weekday 3 日" in described
 
 
 def test_the_thin_cell_falls_back_to_b1() -> None:
