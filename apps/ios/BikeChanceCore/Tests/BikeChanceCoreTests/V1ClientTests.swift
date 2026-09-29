@@ -66,8 +66,32 @@ struct V1ClientTests {
         let bbox = try #require(items.first { $0.name == "bbox" }?.value)
         let parts = bbox.split(separator: ",").compactMap { Double($0) }
         #expect(parts.count == 4)
-        // 丸めで最大 1 量子ぶん広がる
-        #expect(parts[2] - parts[0] <= Bbox.requestMaxSpanDegrees + 2 * Bbox.quantumDegrees)
+        // **送った矩形は、丸めた後の長辺が上限以下**（W6 の契約 41。超えるとセルが返る）
+        let sent = Bbox(west: parts[0], south: parts[1], east: parts[2], north: parts[3])
+        #expect(sent.roundedLongSideQuanta <= Bbox.requestMaxSpanQuanta)
+    }
+
+    @Test("**セルの応答は失敗ではなく、拡大の案内になる**（W6-30。本番の応答で）")
+    func cellResponsesAskToZoomIn() async throws {
+        let (client, _) = client(body: try ContractTests.fixture("stations_cells"))
+        do {
+            _ = try await client.stations(
+                in: Bbox(west: 139.76, south: 35.67, east: 139.78, north: 35.69))
+            Issue.record("拡大の案内になるはず")
+        } catch let error as V1Error {
+            #expect(error == .aggregated)
+            #expect(error.needsNarrowerBbox)
+            #expect(error.message == V1Error.zoomInMessage)
+        }
+    }
+
+    @Test("`aggregation: station` の応答はそのまま読める（いまの本番の形）")
+    func stationResponsesWithAggregationAreRead() async throws {
+        let (client, _) = client(body: try ContractTests.fixture("stations_aggregation"))
+        let response = try await client.stations(
+            in: Bbox(west: 139.7654, south: 35.6743, east: 139.7712, north: 35.6821))
+        #expect(response.count == response.stations.count)
+        #expect(response.count > 0)
     }
 
     @Test("system を渡したときだけ絞り込む")

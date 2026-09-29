@@ -28,6 +28,9 @@ public struct V1Client: Sendable {
     /// **渡した矩形はそのまま送らない。** 上限まで縮めてから格子に丸める。細かい位置が
     /// 要求に載らず（CLAUDE.md §5）、近い要求が同じ URL になって CDN も効く。
     ///
+    /// **応答の粒度を先に読む。** 低ズームのセル（`aggregation: cell`）が返ったら
+    /// `V1Error.aggregated` を投げる——失敗ではなく、地図を拡大してもらう案内である（W6-30）。
+    ///
     /// - Parameter at: 到着時刻。**渡さなければ予測は返らない**（「いまの確率」は現在値
     ///   そのもの）。**相対の `in_min` ではなく絶対の時刻を送る**：応答は CDN に最大 3 分
     ///   留まりうるので、相対で頼むと指している到着が読むたびにずれる（W4 プラン §12 の 114）。
@@ -42,7 +45,11 @@ public struct V1Client: Sendable {
         if let at {
             items.append(URLQueryItem(name: "at", value: V1Client.timestamp(at)))
         }
-        return try await get(path: "/v1/stations", query: items)
+        let data = try await getData(path: "/v1/stations", query: items)
+        guard try V1Client.decoded(StationsAggregation.self, from: data).isStations else {
+            throw V1Error.aggregated
+        }
+        return try V1Client.decoded(StationsResponse.self, from: data)
     }
 
     /// `at` に載せる時刻。**UTC の `Z` で書く。**
@@ -118,9 +125,13 @@ public struct V1Client: Sendable {
     // MARK: - 実装
 
     private func get<T: Decodable>(path: String, query: [URLQueryItem]) async throws -> T {
-        let data = try await getData(path: path, query: query)
+        try V1Client.decoded(T.self, from: await getData(path: path, query: query))
+    }
+
+    /// 本文を読み解く。**失敗は `malformedBody` に詰め替える**（見せる文言を 1 か所にする）。
+    static func decoded<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do {
-            return try V1Client.makeDecoder().decode(T.self, from: data)
+            return try makeDecoder().decode(type, from: data)
         } catch {
             throw V1Error.malformedBody(String(describing: error))
         }
@@ -185,6 +196,12 @@ public enum V1Error: Error, Equatable, Sendable {
     case notHTTP
     case invalidBaseURL
     case malformedBody(String)
+    /// ポートの代わりに低ズームのセルが返った（`aggregation: cell`）。**地図を拡大すれば直る**
+    /// ので、失敗ではなく案内として出す（W6-30）。
+    case aggregated
+
+    /// 地図を拡大してもらうときの 1 行。
+    public static let zoomInMessage = "地図を拡大すると、この範囲のポートを表示します。"
 
     static func from(status: Int, body: Data) -> V1Error {
         if let problem = try? V1Client.makeDecoder().decode(Problem.self, from: body) {
@@ -195,8 +212,11 @@ public enum V1Error: Error, Equatable, Sendable {
 
     /// 地図を拡大してもらうべき状態か。
     public var needsNarrowerBbox: Bool {
-        if case .problem(let problem) = self { return problem.needsNarrowerBbox }
-        return false
+        switch self {
+        case .problem(let problem): problem.needsNarrowerBbox
+        case .aggregated: true
+        case .http, .notHTTP, .invalidBaseURL, .malformedBody: false
+        }
     }
 
     /// 画面に出す 1 行。
@@ -207,6 +227,7 @@ public enum V1Error: Error, Equatable, Sendable {
         case .notHTTP: "通信に失敗しました。"
         case .invalidBaseURL: "接続先の設定が正しくありません。"
         case .malformedBody: "応答を読み取れませんでした。"
+        case .aggregated: V1Error.zoomInMessage
         }
     }
 }

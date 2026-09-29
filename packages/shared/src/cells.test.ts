@@ -69,3 +69,59 @@ describe("planCells", () => {
     expect(planCells(quantizeBbox(requested))).toEqual({ aggregation: "cell", cell_deg: 0.01 });
   });
 });
+
+/**
+ * **丸めた後の境目**（W6 の契約 41、所見 194・205）。
+ *
+ * iOS は「丸めた後の長辺が 0.08 度以下」の矩形しか要求しない。**その矩形には必ずポートを
+ * 返す**ことを、ここで固定する。
+ */
+describe("丸めた後の境目", () => {
+  /** 西端を格子に揃えた、東西に `span` 度の矩形（南北は 0.03 度）。 */
+  const eastward = (span: number): Bbox => ({
+    west: 139.76,
+    south: 35.67,
+    east: 139.76 + span,
+    north: 35.7,
+  });
+
+  it("**閾値は 0.08 度**（iOS の `Bbox.requestMaxSpanDegrees` と同じ値を、両側の検査が書く）", () => {
+    expect(CELL_STATION_MAX_SPAN_DEG).toBe(0.08);
+  });
+
+  it("**ちょうど 8 格子はポート**——経度の引き算に端数が乗っても", () => {
+    const eight: Bbox = { west: 139.76, south: 35.67, east: 139.84, north: 35.7 };
+    // 端数が乗ることを先に確かめる（139.84 − 139.76 ＝ 0.0800000000000125）
+    expect(eight.east - eight.west).toBeGreaterThan(CELL_STATION_MAX_SPAN_DEG);
+    expect(planCells(eight)).toEqual({ aggregation: "station" });
+  });
+
+  it("緯度でも同じ（34.09 − 34.01 ＝ 0.0800000000000054）", () => {
+    const eight: Bbox = { west: 139.76, south: 34.01, east: 139.8, north: 34.09 };
+    expect(eight.north - eight.south).toBeGreaterThan(CELL_STATION_MAX_SPAN_DEG);
+    expect(planCells(eight)).toEqual({ aggregation: "station" });
+  });
+
+  it.each([
+    { span: 0.079, expected: { aggregation: "station" } },
+    { span: 0.08, expected: { aggregation: "station" } },
+    { span: 0.081, expected: { aggregation: "cell", cell_deg: 0.01 } },
+  ])("要求 $span 度は、丸めた後の格子の数で決まる", ({ span, expected }) => {
+    expect(planCells(quantizeBbox(eastward(span)))).toEqual(expected);
+  });
+
+  it("**9 格子はセル**（本番で `aggregation: cell` を返した矩形。W6 プラン §13.3）", () => {
+    const nine = quantizeBbox({ west: 139.76, south: 35.67, east: 139.85, north: 35.7 });
+    expect(planCells(nine)).toEqual({ aggregation: "cell", cell_deg: 0.01 });
+  });
+
+  it("**経度 139 度台のどこでも**、8 格子はポート・9 格子はセル", () => {
+    const wests = Array.from({ length: 100 }, (_, index) => 139 + index * BBOX_QUANTUM_DEG);
+    const plan = (west: number, quanta: number) =>
+      planCells(
+        quantizeBbox({ west, south: 35.67, east: west + quanta * BBOX_QUANTUM_DEG, north: 35.7 }),
+      ).aggregation;
+    expect(new Set(wests.map((west) => plan(west, 8)))).toEqual(new Set(["station"]));
+    expect(new Set(wests.map((west) => plan(west, 9)))).toEqual(new Set(["cell"]));
+  });
+});

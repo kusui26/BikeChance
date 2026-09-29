@@ -12,7 +12,7 @@ public final class StationsModel {
         case idle
         case loading
         case loaded(StationsResponse)
-        /// 地図を拡大してもらう必要がある（範囲が広すぎる／該当が多すぎる）。
+        /// 地図を拡大してもらう必要がある（範囲が広すぎる／該当が多すぎる／セルが返った）。
         case needsZoom(String)
         case failed(String)
     }
@@ -36,7 +36,10 @@ public final class StationsModel {
     private var task: Task<Void, Never>?
 
     /// 範囲が広すぎるときの案内。**失敗ではなく操作の案内**として出す。
-    public static let zoomInMessage = "地図を拡大すると、この範囲のポートを表示します。"
+    ///
+    /// **要求する前に止めたとき**（丸めた後の長辺が上限を超える）も、**セルが返ったとき**
+    /// （`V1Error.aggregated`）も同じ文言にする——利用者から見れば、どちらも「拡大すれば出る」。
+    public static let zoomInMessage = V1Error.zoomInMessage
 
     /// 開いたまま置かれたときに取り直す間隔（秒）。
     ///
@@ -126,7 +129,7 @@ public final class StationsModel {
                 state = .loaded(response)
             } catch let error as V1Error {
                 guard !Task.isCancelled, !silently else { return }
-                // 「多すぎる」は失敗ではなく操作の案内として出す
+                // 「多すぎる」と「セルが返った」は、失敗ではなく操作の案内として出す
                 state = error.needsNarrowerBbox ? .needsZoom(error.message) : .failed(error.message)
             } catch is CancellationError {
                 return

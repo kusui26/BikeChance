@@ -185,6 +185,25 @@ public struct StationsResponse: Decodable, Equatable, Sendable {
     }
 }
 
+/// `/v1/stations` の応答が**どちらの粒度か**だけを読む（W5-12。W6 の PR I）。
+///
+/// 低ズームではサーバーがポートの代わりに格子のセル（`aggregation: cell` と `cells`）を
+/// 返し、`stations` は入らない。**`StationsResponse` を読む前にこれを読む**——読まずに
+/// `StationsResponse` として読むと、`stations` が無くて失敗の帯になっていた（W6 プランの所見 194）。
+///
+/// **欄が無い応答はポートとして読む**：`aggregation` を足す前（W5 の PR E の前）の本番の応答で、
+/// 契約テストの古いフィクスチャがそれである。**知らない値はポートとして読まない**（拡大の案内に
+/// 落とす。サーバーが別の粒度を足しても、読めずに失敗の帯を出さない）。
+struct StationsAggregation: Decodable, Equatable, Sendable {
+    /// ポートを返したときの値。
+    static let stationValue = "station"
+
+    let aggregation: String?
+
+    /// ポートの応答として読んでよいか。
+    var isStations: Bool { aggregation == nil || aggregation == StationsAggregation.stationValue }
+}
+
 /// ポート詳細の予測曲線（`/v1/stations/{system}/{station_id}`。W5-13）。
 ///
 /// **補間されていない生の 10 点**である。地図（`/v1/stations`）が返すのは「その到着

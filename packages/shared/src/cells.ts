@@ -15,14 +15,30 @@
 import { BBOX_MAX_SPAN_DEG, BBOX_QUANTUM_DEG, bboxSpans, type Bbox } from "./bbox";
 
 /**
- * ここまでの辺なら**ポートをそのまま返す**（度）。
+ * **丸めた後の長辺**がここまでなら**ポートをそのまま返す**（度。サーバーは `quantizeBbox` の後で比べる）。
  *
  * 実測（2026-09-13、本番）で東京駅中心 0.10 度は **1,091 ポート**で上限（1,000）を超え、
- * 0.05 度は 295 ポートで収まる。**0.08 度**は両者の間で、いまの iOS が要求する上限
- * （`Bbox.requestMaxSpanDegrees = 0.1`）よりわずかに狭い——**アプリの挙動は変わらない**
- * （W5-19。そもそも 0.1 度より広い矩形を要求しない）。
+ * 0.05 度は 295 ポートで収まる。**0.08 度**は両者の間にとった。
+ *
+ * **iOS はこれを超える矩形を要求しない**（`Bbox.requestMaxSpanDegrees`。W6 の契約 41）。
+ * **同じ値を両側の検査が書いている**ので、変えるときは両方を同時に直す。以前ここには
+ * 「iOS は 0.1 度より広い矩形を要求しないので、アプリの挙動は変わらない」と書いていたが、
+ * **比べる向きが逆だった**——iOS は 0.08〜0.1 度（丸めると最大約 0.12 度）を要求し、
+ * セルが返ると読めずに失敗の帯を出していた（W6 プランの所見 194）。
  */
 export const CELL_STATION_MAX_SPAN_DEG = 0.08;
+
+/**
+ * 度を格子（`BBOX_QUANTUM_DEG`）の数にする。**辺の比べ方は必ずこれを通す**（W6 プランの所見 205）。
+ *
+ * 丸めた矩形でも、引き算の結果は格子の倍数ちょうどにならない——経度 139.84 − 139.76 は
+ * 0.0800000000000125 になり、度のまま `<= 0.08` で比べると**ちょうど 8 格子の矩形がセルに
+ * 落ちる**（経度 139 度台の 8 格子の矩形の 56%）。`quantizeBbox` と同じく 9 桁で端数を落とす。
+ */
+const inQuanta = (degrees: number): number => Number((degrees / BBOX_QUANTUM_DEG).toFixed(9));
+
+/** 辺が上限以下か。**格子の数で比べる**（端数で境目がずれないように）。 */
+const isWithin = (span: number, limit: number): boolean => inQuanta(span) <= inQuanta(limit);
 
 /** 1 段ぶんの決まり。**辺がここまでなら、この刻み**。 */
 export type CellStep = {
@@ -60,10 +76,10 @@ export type CellPlan =
 export const planCells = (bbox: Bbox): CellPlan => {
   const spans = bboxSpans(bbox);
   const span = Math.max(spans.lat, spans.lon);
-  if (span <= CELL_STATION_MAX_SPAN_DEG) {
+  if (isWithin(span, CELL_STATION_MAX_SPAN_DEG)) {
     return { aggregation: "station" };
   }
-  const step = CELL_STEPS.find((one) => span <= one.max_span_deg) ?? CELL_STEPS.at(-1);
+  const step = CELL_STEPS.find((one) => isWithin(span, one.max_span_deg)) ?? CELL_STEPS.at(-1);
   // `CELL_STEPS` は空にしない（上の `at(-1)` が undefined になるのはそのときだけ）
   return step === undefined
     ? { aggregation: "station" }

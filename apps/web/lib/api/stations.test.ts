@@ -593,6 +593,18 @@ describe("低ズームはセルを返す", () => {
     expect("cells" in response).toBe(false);
   });
 
+  it("**丸めた後にちょうど 8 格子（0.08 度）ならポート**——経度の端数でセルに落ちない（W6 の契約 41）", async () => {
+    // 139.84 − 139.76 は 0.0800000000000125。度のまま比べるとセルになっていた（所見 205）
+    const { outcome, cellCalls } = await run("bbox=139.76,35.67,139.84,35.70");
+    expect(outcome.ok && outcome.response.aggregation).toBe("station");
+    expect(cellCalls).toHaveLength(0);
+  });
+
+  it("**9 格子ならセル**（本番で `aggregation: cell` を返した矩形。W6 プラン §13.3）", async () => {
+    const { response } = await cellsOf("bbox=139.76,35.67,139.85,35.70", { cells: [cell()] });
+    expect(response.cell_deg).toBe(0.01);
+  });
+
   it("セルの矩形・台数・stale をそのまま写す", async () => {
     const { response } = await cellsOf(WIDE, { cells: [cell({ stale: true })] });
     const one = response.cells[0];
