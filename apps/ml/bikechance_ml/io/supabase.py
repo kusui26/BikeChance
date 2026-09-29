@@ -540,15 +540,23 @@ class SupabaseIo:
         self.upload(FORECAST_LOG_BUCKET, path, body, PARQUET_CONTENT_TYPE)
 
     def list_forecast_log(self, prefix: str, limit: int) -> tuple[str, ...]:
-        """予測ログの 1 階層を並べる（W5 プラン §6.12 の PR L）。
+        """予測ログの 1 階層を並べる（W5 プラン §6.12 の PR L）。"""
+        return self.list_objects(FORECAST_LOG_BUCKET, prefix, limit)
+
+    def list_objects(self, bucket: str, prefix: str, limit: int) -> tuple[str, ...]:
+        """Storage の 1 階層を並べる。**無い階層は空**（例外にしない）。
 
         **返すのは `prefix` からの相対名**（Storage の list はそう返す）。`sortBy` を
         付けるのは**同じ入力から同じ並びを得る**ため——測り直したときに順序だけが
         違う要約が出ると、差分を読むのに手間がかかる。
+
+        **有無を確かめるのにも使う**（`build_profiles --skip-if-exists`）。`HEAD` は、無い
+        オブジェクトに本文の無い 400 を返すので、「無い」と別の誤りを見分けられない
+        （2026-09-27 に本番で確かめた）。
         """
         response = self._request(
             "POST",
-            f"/storage/v1/object/list/{FORECAST_LOG_BUCKET}",
+            f"/storage/v1/object/list/{bucket}",
             "storage",
             json={
                 "prefix": prefix,

@@ -6,6 +6,7 @@
   * ページ送りと半開区間の指定が正しい（1 ページ目だけ読んで終わる事故を防ぐ）
 """
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -14,6 +15,7 @@ import pytest
 
 from bikechance_ml.config import Config
 from bikechance_ml.io.supabase import (
+    FORECAST_LOG_BUCKET,
     PARQUET_BUCKET,
     PARQUET_CONTENT_TYPE,
     STATION_PAGE_SIZE,
@@ -241,6 +243,49 @@ def test_job_finished_sends_the_detail() -> None:
     io, seen = io_with(lambda request: httpx.Response(204))
     io.job_finished(7, "ok", {"n_rows": 6})
     assert b'"p_status":"ok"' in seen[0].content.replace(b" ", b"")
+
+
+# ── Storage の一覧（W5 の PR L・W6 の PR C）─────────────────────
+def test_the_listing_asks_for_one_folder_in_name_order() -> None:
+    """**1 階層を名前の昇順で**並べ、**`prefix` からの相対名**を返す（Storage がそう返す）。"""
+    rows = [{"name": "daily.parquet"}, {"name": "profile.parquet"}]
+    io, seen = io_with(lambda request: json_response(rows))
+    names = io.list_objects(PARQUET_BUCKET, "profiles/date=2026-09-26/", 10)
+    assert names == ("daily.parquet", "profile.parquet")
+    request = seen[0]
+    assert (request.method, request.url.path) == (
+        "POST",
+        f"/storage/v1/object/list/{PARQUET_BUCKET}",
+    )
+    assert json.loads(request.content) == {
+        "prefix": "profiles/date=2026-09-26/",
+        "limit": 10,
+        "sortBy": {"column": "name", "order": "asc"},
+    }
+
+
+def test_a_missing_folder_lists_as_empty() -> None:
+    """**無い階層は空で返る**（例外にならない。2026-09-27 に本番で確かめた）。
+
+    `build_profiles --skip-if-exists` は、これで「まだ無い」を読む。
+    """
+    io, _ = io_with(lambda request: json_response([]))
+    assert io.list_objects(PARQUET_BUCKET, "profiles/date=2030-01-01/", 10) == ()
+
+
+def test_the_forecast_log_listing_goes_through_the_same_call() -> None:
+    """**予測ログの一覧も同じ口を通る**（並べ方を 2 つ作らない）。"""
+    io, seen = io_with(lambda request: json_response([{"name": "a.parquet"}]))
+    assert io.list_forecast_log("hellocycling/date=2026-09-26/hour=00/", 500) == ("a.parquet",)
+    assert seen[0].url.path == f"/storage/v1/object/list/{FORECAST_LOG_BUCKET}"
+
+
+def test_a_listing_failure_is_labelled_storage() -> None:
+    """**一覧が取れなければ止まる**（「無い」と読んで作り直しに進まない）。"""
+    io, _ = io_with(lambda request: httpx.Response(500, text="boom"))
+    with pytest.raises(SupabaseError) as caught:
+        io.list_objects(PARQUET_BUCKET, "profiles/date=2026-09-26/", 10)
+    assert caught.value.failure.phase == "storage"
 
 
 # ── Storage の「無い」の読み方（W3 プラン §12 の 84 と同じ癖）──
