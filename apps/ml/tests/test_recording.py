@@ -8,7 +8,9 @@
 種類だけに切り詰めてあることを機械で固定する。
 """
 
+import re
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Final
 
 import pytest
@@ -88,6 +90,58 @@ def test_the_end_log_carries_only_the_exception_type(capsys: pytest.CaptureFixtu
     assert "RuntimeError" in printed
     assert LEAKY not in printed
     assert FAKE_KEY not in printed
+
+
+# ── 表が受ける値だけを送る（W6 プランの所見 207）─────────────────
+#: `job_runs_status_valid` を定義し、付け替える migration の置き場所。
+MIGRATIONS: Final[Path] = Path(__file__).resolve().parents[3] / "supabase" / "migrations"
+
+#: 制約の定義（`constraint job_runs_status_valid check (status in (...))`）。
+STATUS_CONSTRAINT: Final[re.Pattern[str]] = re.compile(
+    r"constraint\s+job_runs_status_valid\s+check\s*\(\s*status\s+in\s*\(([^)]*)\)\s*\)",
+    re.IGNORECASE,
+)
+
+
+def table_statuses() -> frozenset[str]:
+    """migration の `job_runs_status_valid` の**最後の定義**が受ける値（migration は前進のみ）。"""
+    found = [
+        match.group(1)
+        for path in sorted(MIGRATIONS.glob("*.sql"))
+        for match in STATUS_CONSTRAINT.finditer(path.read_text(encoding="utf-8"))
+    ]
+    assert found, "job_runs_status_valid の定義が migration に見つからない"
+    return frozenset(re.findall(r"'([^']*)'", found[-1]))
+
+
+def test_the_finished_statuses_are_what_the_table_accepts() -> None:
+    """**記録口が送る値 ＝ 表が受ける値 − `running`**（`running` は `job_started` が DB で書く）。
+
+    偽の口は値を何でも受けるので、ずれても検査は通り、**本番でだけ弾かれる**——日次評価の
+    `skipped` がそうだった。`test_features_constants.py` が TypeScript と突き合わせるのと同じ
+    形で、**本物の制約と突き合わせる**。
+    """
+    assert table_statuses() == {"running", *recording.FINISHED_STATUSES}
+
+
+def test_the_statuses_the_table_accepts_are_sent_as_they_are() -> None:
+    port = FakePort()
+    for status in sorted(recording.FINISHED_STATUSES):
+        recording.record_quietly(port, 7, status, {"date": "2026-09-10"})
+    assert [status for _, status, _ in port.finished] == sorted(recording.FINISHED_STATUSES)
+    assert all(detail == {"date": "2026-09-10"} for _, _, detail in port.finished)
+
+
+def test_a_status_the_table_refuses_is_closed_as_failed(capsys: pytest.CaptureFixture[str]) -> None:
+    """**表が受けない値は `failed` で閉じる**（行を `running` のまま残さない）。
+
+    そのまま送ると DB が弾き、ここはその失敗を飲むので、行が `running` のまま残る
+    （見張りからは「殺された回」に見える）。
+    """
+    port = FakePort()
+    recording.record_quietly(port, 7, "sucess", {"date": "2026-09-10"})
+    assert port.finished == [(7, "failed", {"date": "2026-09-10", "unknown_status": "sucess"})]
+    assert "sucess" in capsys.readouterr().err
 
 
 #: `JOB_NAME` を持つのに `job_runs` に書かないモジュールと、その理由。

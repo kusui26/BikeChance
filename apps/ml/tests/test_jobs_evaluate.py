@@ -247,10 +247,17 @@ def test_running_the_same_day_twice_writes_the_same_rows() -> None:
 
 
 def test_a_day_without_logs_is_skipped() -> None:
-    """**ログの無い日は `skipped`。** 埋めないし、失敗にもしない（完了条件 5）。"""
-    summary = run_evaluation(FakePort(), DAY)
+    """**ログの無い日は `skipped`。** 埋めないし、失敗にもしない（完了条件 5）。
+
+    **記録に届く値まで見る。** 要約だけを見ていたので、`job_runs` が `skipped` を受けず行が
+    `running` のまま残る形に気づかなかった（W6 プランの所見 207）。記録口は表が受けない値を
+    `failed` に倒すので、ここで `skipped` が届けば、表もそれを受ける。
+    """
+    port = FakePort()
+    summary = run_evaluation(port, DAY)
     assert summary.status == "skipped" and summary.ok
     assert summary.n_written == 0
+    assert [status for _, status, _ in port.finished] == ["skipped"]
 
 
 def test_a_failing_system_does_not_stop_the_other() -> None:
