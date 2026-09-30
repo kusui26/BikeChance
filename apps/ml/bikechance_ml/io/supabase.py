@@ -10,6 +10,7 @@ PostgREST と Storage の REST を httpx で直に叩く。**psycopg を入れ�
 """
 
 import json
+import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from bikechance_ml.features.reference import (
 )
 from bikechance_ml.features.weather import SERIES as WEATHER_SERIES
 from bikechance_ml.features.weather import WeatherRow
+from bikechance_ml.io.range_file import Piece
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
 from bikechance_ml.jobs.weather_archive import SERIES as ARCHIVE_SERIES
 from bikechance_ml.jobs.weather_archive import PendingIssue
@@ -78,6 +80,12 @@ MAX_ERROR_CHARS: Final[int] = 200
 
 #: 「無い」を正常系として扱うための状態コード。
 HTTP_NOT_FOUND: Final[int] = 404
+
+#: Range 要求に応えた（一部を返した）ときの状態コード。
+HTTP_PARTIAL_CONTENT: Final[int] = 206
+
+#: `Content-Range` の形（`bytes 始まり-終わり/全体`。終わりを含む）。**全体が `*` なら読まない。**
+CONTENT_RANGE: Final[re.Pattern[str]] = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
 
 #: Storage が「無い」を表すときに本文へ入れる符号。**HTTP の状態コードは 400 で来る。**
 STORAGE_NOT_FOUND_CODES: Final[frozenset[str]] = frozenset({"NoSuchKey", "NotFound"})
@@ -603,6 +611,36 @@ class SupabaseIo:
         )
         return as_int(response.json(), "job_started")
 
+    def _object_url(self, bucket: str, path: str) -> str:
+        return f"{self._config.supabase_url}/storage/v1/object/{bucket}/{path}"
+
+    def download_range(self, bucket: str, path: str, byte_range: str) -> Piece | None:
+        """Storage の 1 オブジェクトの**一部**を取る（Range 要求。W6 の PR D）。**無ければ None。**
+
+        206 なら `Content-Range` から始まりと全体の大きさを読む。**範囲を無視して 200 で全体が
+        返っても読める**（始まり 0・大きさは本文の長さ）。版は `ETag` で持ち、1 回の読みの中で
+        揃っているかは `io/range_file.py` が確かめる（応答は Cloudflare のキャッシュを通る）。
+        """
+        headers = {**self._headers(), "Range": byte_range}
+        try:
+            response = self._client.request("GET", self._object_url(bucket, path), headers=headers)
+        except httpx.HTTPError as cause:
+            raise SupabaseError(
+                SupabaseFailure("storage", None, type(cause).__name__, self._mask(str(cause)))
+            ) from None
+        if response.status_code == HTTP_PARTIAL_CONTENT:
+            return _to_piece(response)
+        if response.is_success:
+            body = response.content
+            return Piece(start=0, body=body, size=len(body), etag=response.headers.get("etag"))
+        if is_missing_object(response.status_code, response.text):
+            return None
+        raise SupabaseError(
+            SupabaseFailure(
+                "storage", response.status_code, "HttpStatus", self._mask(response.text)
+            )
+        )
+
     def download(self, bucket: str, path: str) -> bytes | None:
         """Storage の 1 オブジェクトを取る。**無ければ None**（例外にしない）。
 
@@ -611,9 +649,7 @@ class SupabaseIo:
         """
         try:
             response = self._client.request(
-                "GET",
-                f"{self._config.supabase_url}/storage/v1/object/{bucket}/{path}",
-                headers=self._headers(),
+                "GET", self._object_url(bucket, path), headers=self._headers()
             )
         except httpx.HTTPError as cause:
             raise SupabaseError(
@@ -636,6 +672,26 @@ class SupabaseIo:
             "rest",
             json={"p_id": run_id, "p_status": status, "p_detail": dict(detail)},
         )
+
+
+def _to_piece(response: httpx.Response) -> Piece:
+    """206 の応答を `Piece` にする。**`Content-Range` と本文の長さが食い違えば止める。**"""
+    matched = CONTENT_RANGE.match(response.headers.get("content-range", ""))
+    if matched is None:
+        raise SupabaseError(
+            SupabaseFailure(
+                "storage", response.status_code, "ContentRange", "Content-Range を読めない"
+            )
+        )
+    start, last, size = (int(one) for one in matched.groups())
+    body = response.content
+    if last - start + 1 != len(body):
+        raise SupabaseError(
+            SupabaseFailure(
+                "storage", response.status_code, "ContentRange", "本文の長さが範囲と違う"
+            )
+        )
+    return Piece(start=start, body=body, size=size, etag=response.headers.get("etag"))
 
 
 def _to_registered(row: object) -> Registered:

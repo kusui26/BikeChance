@@ -18,8 +18,15 @@ LightGBM は W4 以降（W3-18）。**予測テーブルを埋め始め、5 分�
 `t` を切り下げると観測のほうが新しくなって学習と形が合わない。`t = いま` なら
 観測は必ず過去で、しかも学習時（HELLO で 205 秒古い）より新しい。**モデルが訓練より
 不利な材料で当てることはない。**
+
+**ポートプロファイルは前日の版を、要る行群だけ Range 要求で読む**（W6 の PR D、J2）。
+00:40 JST の回が前日の版を置くまで（Actions の遅れで 2 時間前後）は 1 つ古い版を読み、
+**読んだ版の日付を必ず記録に残す**（`profile_date`。契約 32）。**読めなくても配信は止めない**——
+B3 は `prof_*` を読まないので、配る確率は変わらない。**`prof_*` を読む版は、読めなかった周期に
+配らない**（W6-05、契約 33）。
 """
 
+import resource
 import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -30,16 +37,18 @@ from typing import Final, Protocol
 import numpy as np
 import pyarrow as pa
 
-from bikechance_ml.features import build, neighbors, static, weather
+from bikechance_ml.features import build, neighbors, profile, static, weather
 from bikechance_ml.features.arrays import Bools, Float64, Int16
 from bikechance_ml.features.constants import (
     GRID_MINUTES,
     HORIZONS_MIN,
     MAX_STALENESS_S,
 )
-from bikechance_ml.features.grid import from_epoch_ms, jst_date, to_epoch_ms
+from bikechance_ml.features.grid import from_epoch_ms, jst_date, profile_path, to_epoch_ms
 from bikechance_ml.features.reference import SystemReference
 from bikechance_ml.features.weather import WeatherRow
+from bikechance_ml.io import range_file
+from bikechance_ml.io.supabase import PARQUET_BUCKET
 from bikechance_ml.jobs import forecast_log
 from bikechance_ml.jobs.build_features import (
     SYSTEM_IDS,
@@ -64,6 +73,10 @@ UPSERT_BATCH: Final[int] = 4_000
 MS_PER_S: Final[int] = 1000
 NS_PER_MS: Final[int] = 1_000_000
 
+#: `getrusage` の `ru_maxrss` の単位。**本番（Linux）は KiB、macOS はバイト。**
+RSS_UNIT_B: Final[int] = 1 if sys.platform == "darwin" else 1024
+BYTES_PER_MB: Final[int] = 1024 * 1024
+
 
 class InferPort(Protocol):
     """入出力の口。テストはここだけを置き換える。"""
@@ -78,6 +91,9 @@ class InferPort(Protocol):
     def active_model(self) -> registry.Registered | None: ...
     def find_model(self, model_version: str) -> registry.Registered | None: ...
     def download(self, bucket: str, path: str) -> bytes | None: ...
+    def download_range(
+        self, bucket: str, path: str, byte_range: str
+    ) -> range_file.Piece | None: ...
     def begin_inference(
         self, system_id: str, base_observed_at: datetime, model_version: str
     ) -> int | None: ...
@@ -121,47 +137,164 @@ def read_observations(port: InferPort, system_id: str, windows: Windows) -> pa.T
     return to_snapshot_table(system_id, station_ids, snapshots)
 
 
+@dataclass(frozen=True)
+class ProfileRead:
+    """推論が読んだポートプロファイル（W6 の PR D）。**読めなければ `edition` は None。**"""
+
+    edition: profile.Edition | None
+    #: **実際に落としたバイト数**（フッタ・読み直し・無い版の確かめ・止まった読みも含む）。
+    #: **1 周期 2 MB 未満**が約束（J2 の完了条件 3）
+    bytes_read: int
+    #: 読むのに掛かった時間（無い版を確かめる往復・読み・形の確かめを含む）
+    load_ms: int
+    #: 読めなかった理由。`missing`（2 日とも無い）か `failed:<例外の種類>`。読めたら None
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class Features:
+    """推論 1 回ぶんの特徴量と、**材料の版**（どちらも記録に出す）。
+
+    参照スナップショットの日付を持つのは、00:00〜05:00 JST に 1 つ古い版を使うことがあるため
+    （`read_reference_available`）。プロファイルも同じく、朝の穴では 1 つ古い版になる。
+    """
+
+    reference_day: date
+    ready: build.Ready
+    profile: ProfileRead
+
+
+#: プロファイルを何日前までさかのぼって探すか（W6-04、契約 32）。**前日の版は 00:40 JST の回が
+#: 置く**（Actions の遅れで 2 時間前後）ので、それまでの周期は 1 つ古い版を読む。
+PROFILE_FALLBACK_DAYS: Final[int] = 2
+
+
 def read_features(
     port: InferPort, system_id: str, at: datetime, holidays: frozenset[date]
-) -> tuple[date, build.Ready]:
+) -> Features:
     """推論 1 回ぶんの特徴量を作る。**学習と同じ `features/` を通る。**
 
     読むのは 4 つ。
       1. **前日の参照スナップショット**（学習と同じ規則。W3 プラン §14.3）
-      2. **自系統の 2 つの窓**（`build.serving_windows`）
-      3. **他系統の直近**（近傍の集計に要るのは「いまの状態」だけ。§6.3）
-      4. **`at` までに入手できた予報**（`weather.serving_window`。W4 プラン §6.4）
-
-    **ポートプロファイルはまだ読まない**（W5 プラン §6.10 の J1）。`prof_*` の 6 列は NULL、
-    `prof_n_days` は 0 で出る——配っている B3 は `prof_*` を読まないので確率は変わらない。
-    **読むのは J2**（前日の版。下りとメモリを測ってから）で、それまで **`prof_*` を使う
-    モデルは配らない**（W5 プラン §9 の契約 29）。
-
-    返すのは**使った参照スナップショットの日付**と組み立ての結果。日付を返すのは、
-    00:00〜05:00 JST に 1 つ古い版を使うことがあるため（`read_reference_available`）。
+      2. **自系統の 2 つの窓**（`build.serving_windows`）と、**他系統の直近**（近傍の集計に
+         要るのは「いまの状態」だけ。§6.3）
+      3. **`at` までに入手できた予報**（`weather.serving_window`。W4 プラン §6.4）
+      4. **前日のポートプロファイルの、要る行群だけ**（W6 の PR D。`read_profile_edition`）
     """
     reference_day, systems, estimates = read_reference_available(port, jst_date(at))
     facts = static.to_facts(systems, estimates)
     links = neighbors.to_links(systems, facts.station_keys())
-    windows = build.serving_windows(at)
-    tables = [read_observations(port, system_id, windows)]
-    tables.extend(
-        read_observations(port, other, (_neighbour_window(at),))
-        for other in SYSTEM_IDS
-        if other != system_id
-    )
+    read = read_profile_edition(port, at, holidays)
     ready = build.build_now(
         build.NowInputs(
             at=at,
             system_id=system_id,
             reference=build.Reference(facts=facts, links=links, holidays=holidays),
-            table=pa.concat_tables(tables),
+            table=_observations(port, system_id, at),
             weather=weather.to_weather(port.list_weather(*weather.serving_window(at))),
-            # **J1 では読まない。** 読んでいないことは `detail.profile_date = null` に出る
-            profile=None,
+            profile=read.edition,
         )
     )
-    return reference_day, ready
+    return Features(reference_day=reference_day, ready=ready, profile=read)
+
+
+def _observations(port: InferPort, system_id: str, at: datetime) -> pa.Table:
+    """自系統の 2 つの窓と、他系統の直近を 1 つの長形式にする。"""
+    tables = [read_observations(port, system_id, build.serving_windows(at))]
+    tables.extend(
+        read_observations(port, other, (_neighbour_window(at),))
+        for other in SYSTEM_IDS
+        if other != system_id
+    )
+    return pa.concat_tables(tables)
+
+
+def read_profile_edition(port: InferPort, at: datetime, holidays: frozenset[date]) -> ProfileRead:
+    """**前日の版を読み、まだ無ければ 1 つ古い版**（最大 2 日前。W6-04、契約 32）。要る行群だけ。
+
+    **どんな失敗でも止めない**（W6-05）。B3 は `prof_*` を読まないので、配る確率は変わらない。
+    `prof_*` を読む版は、呼ぶ側が止める（`_refuse_without_profile`）。**握り潰しにはならない**
+    ——失敗の種類は `profile_reason` に残る（Storage の不調・前の並びの版・壊れた版・知らない失敗）。
+    **下がるのは無いときだけ**——在るのに読めない版を飛ばして古い版を使うと、読むはずの版と
+    記録が食い違う。
+    """
+    started = time.monotonic_ns()
+    counted = _Counted(port)
+    try:
+        cells = profile.serving_cells(at, holidays)
+        edition = _first_edition(counted, _edition_days(at), cells)
+    except Exception as cause:
+        reason: str | None = f"failed:{type(cause).__name__}"
+        edition = None
+    else:
+        reason = None if edition is not None else "missing"
+    return ProfileRead(edition, sum(counted.sizes), _ms_since(started), reason)
+
+
+@dataclass
+class _Counted:
+    """Range 要求で**実際に落としたバイト**を数える口（読み直し・無い版の確かめ・失敗も含む）。
+
+    **並行に呼ばれる**（`io/fanout`）。数は足し込まずに `append` で残す——CPython の
+    `list.append` は 1 つの操作なので、並行でも取りこぼさない。
+    """
+
+    source: range_file.FetchesRanges
+    sizes: list[int] = field(default_factory=list)
+
+    def download_range(self, bucket: str, path: str, byte_range: str) -> range_file.Piece | None:
+        piece = self.source.download_range(bucket, path, byte_range)
+        self.sizes.append(0 if piece is None else len(piece.body))
+        return piece
+
+
+def _edition_days(at: datetime) -> list[date]:
+    """読みに行く版の日（新しい順）。**1 つ目は学習と同じ `source_day`**（前日）。"""
+    first = profile.source_day(jst_date(at))
+    return [first - timedelta(days=back) for back in range(PROFILE_FALLBACK_DAYS)]
+
+
+def _first_edition(
+    source: range_file.FetchesRanges, days: Sequence[date], cells: Sequence[tuple[str, int]]
+) -> profile.Edition | None:
+    """在る中でいちばん新しい版。**無い版の確かめは末尾の 1 往復だけ**で済む（本文は無い）。"""
+    reads = (_read_edition(source, day, cells) for day in days)
+    return next((one for one in reads if one is not None), None)
+
+
+def _read_edition(
+    source: range_file.FetchesRanges, day: date, cells: Sequence[tuple[str, int]]
+) -> profile.Edition | None:
+    """1 日ぶんの版の、要る行群だけを読む。**無ければ None。** 読めたら形を確かめる。"""
+    read = range_file.read_row_groups(
+        source,
+        PARQUET_BUCKET,
+        profile_path(day, profile.PROFILE_NAME),
+        lambda metadata: profile.wanted_groups(metadata, cells),
+    )
+    if read is None:
+        return None
+    edition = profile.Edition(day=day, table=read.table)
+    profile.check_edition(edition)
+    return edition
+
+
+class ProfileRequiredError(RuntimeError):
+    """`prof_*` を読む版を、プロファイル無しで配ろうとした。**配らない**（W6-05、契約 29・33）。"""
+
+
+def _refuse_without_profile(predictor: Predictor, read: ProfileRead) -> None:
+    """**`prof_*` を読む版は、プロファイルを読めなかった周期に配らない。**
+
+    学習では値が在り、配信では NULL のまま配ると、例外を出さずに確率だけがずれる（契約 29）。
+    合成器（PR H）は全セルを B3 に落として配り、shadow（PR E）は歩かない——**LightGBM 単体を
+    active にしない**のが決まりなので、ここで止まるのはその決まりが破られたときだけである。
+    """
+    if read.edition is None and registry.reads_profile(predictor):
+        raise ProfileRequiredError(
+            f"{predictor.model_version} は prof_* を読むが、この周期はプロファイルが無い"
+            f"（{read.reason}）"
+        )
 
 
 #: 参照スナップショットを何日前までさかのぼって探すか。
@@ -249,8 +382,19 @@ class InferSummary:
     #: その版を**当てはめたときの**特徴量の版。**`feature_set` と一致しなくてよい**
     #: （ベースラインが読む 6 列は v0 から v4 まで変わっていない。W4-17）
     model_feature_set: str = ""
-    #: **読んだポートプロファイルの版**の日付。**J1 では読まないので None**（J2 で日付が出る）
+    #: **読んだポートプロファイルの版**の日付。前日の版、朝の穴では 1 つ古い版（契約 32）。
+    #: 読めなければ None で、理由は `profile_reason`
     profile_date: str | None = None
+    #: プロファイルで落としたバイト数（フッタを含む）。**1 周期 2 MB 未満**（J2 の完了条件 3）
+    profile_bytes: int = 0
+    #: プロファイルを読むのに掛かった時間。**`features_ms` の内側**に入っている
+    profile_load_ms: int = 0
+    #: プロファイルを読めなかった理由（`missing` か `failed:<例外の種類>`）。読めたら None
+    profile_reason: str | None = None
+    #: 成果物を読むのに掛かった時間。**温まっていれば 0**（版ごとに持つ。`registry.load`）
+    model_load_ms: int = 0
+    #: このプロセスの**最大** RSS（MB）。周期ごとではなく起動からの山（J2 の完了条件 2・5）
+    rss_mb: int = 0
     #: 予測ログ（`forecast-log/`）を置けたか。`"ok"` か `"failed:<例外の種類>"`。
     #: **置けなくても推論は落とさない**ので（D-24）、失敗はここにしか出ない。
     #: 試し打ちは何も書かないので空のままになる
@@ -457,47 +601,39 @@ def _dry_run(
     そこは `active` の版が 5 分毎に通している経路と**同じ 1 本**である
     （`to_payload` → `batches` → `upsert_forecasts`）。
     """
-    predictor = registry.load(port, chosen)
-    holidays = frozenset(port.list_holidays())
+    predictor, model_load_ms = _load(port, chosen)
     at = grid_time(now)
     features_started = time.monotonic_ns()
-    reference_day, ready = read_features(port, system_id, at, holidays)
-    features_ms = int((time.monotonic_ns() - features_started) // NS_PER_MS)
+    features = read_features(port, system_id, at, frozenset(port.list_holidays()))
+    features_ms = _ms_since(features_started)
+    # **試し打ちでも止める。** プロファイル無しの `prof_*` で出した確率は、見ても意味が無い
+    _refuse_without_profile(predictor, features.profile)
     base = port.read_base_observed_at(system_id)
     stale = base is None or (at - base).total_seconds() > MAX_STALENESS_S
-    forecasts = predict(predictor, system_id, at, ready.table, stale)
-    return replace(
-        _completed(
-            system_id=system_id,
-            status="dry_run",
-            base=base,
-            predictor=predictor,
-            ready=ready,
-            started=started,
-            cpu_started=cpu_started,
-            features_ms=features_ms,
-            reference_day=reference_day,
-            # **書いていないので 0。** 出せた数は `predicted` に出る
-            n_rows=0,
-            # **試し打ちは予測ログも書かない**（W4-18。どこにも書かないのが試し打ち）
-            forecast_log_status="",
-        ),
-        n_predicted=len(forecasts),
-        sample=_sample_of(forecasts),
-    )
+    forecasts = predict(predictor, system_id, at, features.ready.table, stale)
+    done = Done(started, cpu_started, features_ms, model_load_ms)
+    # **書いていないので 0。** 出せた数は `predicted` に出る。予測ログも書かない（W4-18）
+    summary = _completed(system_id, "dry_run", base, predictor, features, done, 0, "")
+    return replace(summary, n_predicted=len(forecasts), sample=_sample_of(forecasts))
+
+
+@dataclass(frozen=True)
+class Done:
+    """走り切った 1 回の時間の記録（`_completed` に渡す）。"""
+
+    started: datetime
+    cpu_started: int
+    features_ms: int
+    model_load_ms: int
 
 
 def _completed(
-    *,
     system_id: str,
     status: str,
     base: datetime | None,
     predictor: Predictor,
-    ready: build.Ready,
-    started: datetime,
-    cpu_started: int,
-    features_ms: int,
-    reference_day: date,
+    features: Features,
+    done: Done,
     n_rows: int,
     forecast_log_status: str,
 ) -> InferSummary:
@@ -508,27 +644,33 @@ def _completed(
     入らなかった**——計算されているのに `inference_log` に出ない状態が続いた
     （W4 プラン §8.5.8）。**写す場所を 1 つにして、次に足したものが片方だけに入る道を消す。**
     """
+    stats = features.ready.stats
     return InferSummary(
         system_id=system_id,
         status=status,
         base_observed_at=base,
         model_version=predictor.model_version,
-        n_stations=ready.stats.stations,
-        n_skipped=sum(ready.stats.excluded.values()),
-        n_unknown_ports=predictor.unknown_ports(system_id, ready.table),
+        n_stations=stats.stations,
+        n_skipped=sum(stats.excluded.values()),
+        n_unknown_ports=predictor.unknown_ports(system_id, features.ready.table),
         n_rows=n_rows,
-        duration_ms=_elapsed_ms(started),
-        cpu_ms=_cpu_ms(cpu_started),
-        features_ms=features_ms,
-        excluded=dict(sorted(ready.stats.excluded.items())),
-        reference_date=reference_day.isoformat(),
-        weather_issues=ready.stats.weather_issues,
-        n_without_weather=ready.stats.stations_without_weather,
-        n_unreferenced=ready.stats.stations_unreferenced,
-        feature_set=ready.stats.feature_set,
+        duration_ms=_elapsed_ms(done.started),
+        cpu_ms=_cpu_ms(done.cpu_started),
+        features_ms=done.features_ms,
+        excluded=dict(sorted(stats.excluded.items())),
+        reference_date=features.reference_day.isoformat(),
+        weather_issues=stats.weather_issues,
+        n_without_weather=stats.stations_without_weather,
+        n_unreferenced=stats.stations_unreferenced,
+        feature_set=stats.feature_set,
         model_kind=predictor.kind,
         model_feature_set=predictor.feature_set,
-        profile_date=ready.stats.profile_date,
+        profile_date=stats.profile_date,
+        profile_bytes=features.profile.bytes_read,
+        profile_load_ms=features.profile.load_ms,
+        profile_reason=features.profile.reason,
+        model_load_ms=done.model_load_ms,
+        rss_mb=_rss_mb(),
         forecast_log=forecast_log_status,
     )
 
@@ -555,35 +697,37 @@ def _produce(
     started: datetime,
     cpu_started: int,
 ) -> InferSummary:
-    predictor = registry.load(port, chosen)
-    holidays = frozenset(port.list_holidays())
+    predictor, model_load_ms = _load(port, chosen)
     # **基準時刻は 5 分格子に落とす。** 水平の起点は `generated_at` なので、
     # 書き込む `generated_at` も同じ時刻にする（W4 プラン §12 の 114）
     at = grid_time(now)
     features_started = time.monotonic_ns()
-    reference_day, ready = read_features(port, system_id, at, holidays)
-    features_ms = int((time.monotonic_ns() - features_started) // NS_PER_MS)
+    features = read_features(port, system_id, at, frozenset(port.list_holidays()))
+    features_ms = _ms_since(features_started)
+    _refuse_without_profile(predictor, features.profile)
     stale = (at - base).total_seconds() > MAX_STALENESS_S
-    forecasts = predict(predictor, system_id, at, ready.table, stale)
+    forecasts = predict(predictor, system_id, at, features.ready.table, stale)
     payload = to_payload(forecasts, at, base, predictor.model_version)
     written = sum(port.upsert_forecasts(chunk) for chunk in batches(payload, UPSERT_BATCH))
     # **配ってから記録する。** 順番に意味がある：ログを置けなくても配信は済んでいる
     logged = _record_forecasts(
-        port, forecasts, system_id=system_id, at=at, base=base, ready=ready, chosen=predictor
-    )
-    return _completed(
+        port,
+        forecasts,
         system_id=system_id,
-        status="ok",
+        at=at,
         base=base,
-        predictor=predictor,
-        ready=ready,
-        started=started,
-        cpu_started=cpu_started,
-        features_ms=features_ms,
-        reference_day=reference_day,
-        n_rows=written,
-        forecast_log_status=logged,
+        ready=features.ready,
+        chosen=predictor,
     )
+    done = Done(started, cpu_started, features_ms, model_load_ms)
+    return _completed(system_id, "ok", base, predictor, features, done, written, logged)
+
+
+def _load(port: InferPort, chosen: registry.Registered) -> tuple[Predictor, int]:
+    """成果物を読み、**掛かった時間**も返す（温まっていれば 0 に近い。J2 の完了条件 2）。"""
+    started = time.monotonic_ns()
+    predictor = registry.load(port, chosen)
+    return predictor, _ms_since(started)
 
 
 def _record_forecasts(
@@ -664,6 +808,21 @@ def _elapsed_ms(started: datetime) -> int:
     return int((datetime.now(UTC) - started).total_seconds() * 1000)
 
 
+def _ms_since(started_ns: int) -> int:
+    """`time.monotonic_ns()` で測り始めてからのミリ秒。"""
+    return int((time.monotonic_ns() - started_ns) // NS_PER_MS)
+
+
+def _rss_mb() -> int:
+    """このプロセスの**最大** RSS（MB）。周期ごとではなく、起動からの山である。
+
+    本番（Linux）の値は `peak memory footprint` と比べられる。**手元の macOS の `ru_maxrss` は
+    圧縮したページを数えず 2.6 倍低く出る**ので、手元では比べない（W5 プランの所見 168）。
+    """
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(peak * RSS_UNIT_B // BYTES_PER_MB)
+
+
 def to_detail(summary: InferSummary) -> dict[str, object]:
     """応答の JSON。**秘密を含めない**（例外は種別だけ）。"""
     return {
@@ -700,9 +859,15 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         "feature_set": summary.feature_set,
         "model_kind": summary.model_kind,
         "model_feature_set": summary.model_feature_set,
-        # **読んだポートプロファイルの版。J1 では null**——`feature_set` が v4 でも
-        # `prof_*` は NULL で配っていることが、記録から読める（W5 プラン §6.10、契約 29）
+        # **読んだポートプロファイルの版**（契約 32）。前日の版、朝の穴では 1 つ古い版。
+        # 読めなければ null で、理由が `profile_reason` に出る（W6 の PR D）
         "profile_date": summary.profile_date,
+        "profile_bytes": summary.profile_bytes,
+        "profile_load_ms": summary.profile_load_ms,
+        "profile_reason": summary.profile_reason,
+        # **成果物を読む時間と、プロセスの山**（J2 の完了条件 2。増分を証明するのに要る）
+        "model_load_ms": summary.model_load_ms,
+        "rss_mb": summary.rss_mb,
         # **試し打ちのときだけ載せる。** 通常の推論では 0 と空になる
         **(
             {"predicted": summary.n_predicted, "sample": dict(summary.sample)}

@@ -22,6 +22,8 @@
 **`profile.parquet` は配信が部分読みする並びで書く**（W5 の契約 28、W6 の PR C）。並びは
 `PROFILE_ORDER`（`dow_type, slot15, system_id, station_id`）で、**1 行群 ＝ 1 つの
 `(dow_type, slot15)`**。並べるのは `_fold` の 1 か所で、行群の区切りは `row_groups` が出す。
+**推論が 1 周期に要るセル**（`serving_cells`）と、**それを持つ行群**（`wanted_groups`）も
+ここで決める（W6 の PR D）——並びの約束を知っているのがここだからである。
 
 **特徴量（`prof_*`）もここから引く**（W5 プラン §6.10 の PR J1）。引き方は `Lookup` の 1 つで、
 学習（`build_day`）も推論（`build_now`）も同じものを通る。
@@ -29,19 +31,20 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Final
 
 import numpy as np
 import numpy.typing as npt
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from bikechance_ml.features import asof, exclude, flow, labels
 from bikechance_ml.features.arrays import Bools, Float32, Float64, Int16, Int32, Int64
 from bikechance_ml.features.calendar import DOW_TYPE_ORDER, DowType, day_type, dow_type
-from bikechance_ml.features.constants import GRID_MINUTES, MISSING
-from bikechance_ml.features.grid import Grid, build_grid
+from bikechance_ml.features.constants import GRID_MINUTES, HORIZONS_MIN, MISSING
+from bikechance_ml.features.grid import Grid, build_grid, jst_date, jst_minute_of_day
 from bikechance_ml.features.schema import PROFILE_COLUMNS
 
 _MINUTES_PER_DAY: Final[int] = 24 * 60
@@ -459,6 +462,34 @@ def _group_ids(table: pa.Table) -> Int64:
     return np.asarray(dow * SLOTS_PER_DAY + _int64(table, slot_name), dtype=np.int64)
 
 
+def wanted_groups(metadata: pq.FileMetaData, cells: Iterable[tuple[str, int]]) -> tuple[int, ...]:
+    """`cells` のどれかを持つ行群の番号（昇順。W6 の PR D）。**契約 28 の揃えでなければ止める。**
+
+    行群の鍵（`ROW_GROUP_KEY`）の統計の最小と最大で選ぶ——PR C の書き手は、この 2 列にだけ
+    統計を書く（W6 プランの所見 204）。**1 つの行群が 2 組以上の `(dow_type, slot15)` を持てば
+    `LayoutError`**：前の並び（ポートが先）の版は、どの行群も全枠を含むので、選ぶと丸ごと落とす
+    ことになる（下りが黙って 10 倍。W5 の契約 28）。**読まずに止め、理由を記録に残させる。**
+    """
+    wanted = frozenset(cells)
+    positions = [metadata.schema.names.index(name) for name in ROW_GROUP_KEY]
+    keys = [
+        _stats_key(metadata.row_group(index), positions) for index in range(metadata.num_row_groups)
+    ]
+    return tuple(index for index, key in enumerate(keys) if key in wanted)
+
+
+def _stats_key(group: pq.RowGroupMetaData, positions: Sequence[int]) -> tuple[str, int]:
+    """行群の `(dow_type, slot15)`。**統計の最小と最大が等しい**ことを確かめて取る。"""
+    stats = [group.column(position).statistics for position in positions]
+    if any(one is None or not one.has_min_max for one in stats):
+        raise LayoutError("行群を選ぶ鍵に統計が無い（契約 28 の書き方でない）")
+    if any(one.min != one.max for one in stats):
+        raise LayoutError(
+            "1 つの行群に 2 組以上の (dow_type, slot15) がある（契約 28 の並びでない）"
+        )
+    return (str(stats[0].min), int(stats[1].min))
+
+
 def require_schema(table: pa.Table, schema: pa.Schema) -> None:
     """**ファイル自身の列**が契約どおりか（W3 プラン §12 の 97 と同じ理由）。"""
     if table.schema.names != schema.names:
@@ -582,6 +613,24 @@ def target_day_offset(minute_of_day: npt.ArrayLike, h_min: npt.ArrayLike) -> Int
     return np.asarray(minute // _MINUTES_PER_DAY, dtype=np.int64)
 
 
+def serving_cells(at: datetime, holidays: frozenset[date]) -> tuple[tuple[str, int], ...]:
+    """基準時刻 `at` の推論が引くセル `(曜日種別, 枠)`（昇順・重複なし。W6 の PR D）。
+
+    **学習と同じ部品で決める**——枠は `target_slot`、曜日種別は目標時刻の日（`target_day_offset`
+    が 1 なら翌日）の `day_dow_type`。`build._profile_columns` が引くセルと同じになることは、
+    検査が「要るセルだけを読んだ表と、全部を読んだ表から同じ特徴量が出る」ことで固定している。
+    **水平は最長 180 分なので、セルは 7〜8 個、曜日種別は多くて 2 つ**（翌日にまたぐのは 21:00
+    から）。
+    """
+    day = jst_date(at)
+    minute = jst_minute_of_day(at)
+    horizons = np.asarray(HORIZONS_MIN, dtype=np.int64)
+    kinds = (day_dow_type(day, holidays), day_dow_type(day + timedelta(days=1), holidays))
+    slots = target_slot(minute, horizons).tolist()
+    ahead = target_day_offset(minute, horizons).tolist()
+    return tuple(sorted({(kinds[step], slot) for slot, step in zip(slots, ahead, strict=True)}))
+
+
 @dataclass(frozen=True)
 class Edition:
     """**どの日の版か**を一緒に持ったプロファイル（`profile(day)`）。`prof_*` の源。
@@ -672,6 +721,30 @@ def lookup(edition: Edition | None, ports: Sequence[tuple[str, str]]) -> Lookup:
         values={name: np.asarray(one, dtype=np.float32) for name, one in derive(summed).items()},
         n_days=np.asarray(_int64(table, "n_days")[inside][order], dtype=np.int16),
     )
+
+
+def check_edition(edition: Edition) -> None:
+    """読んだ版が**引ける形か**を、`lookup` と同じ検査で確かめる（列・同じセルが 2 行・格子点 0）。
+
+    推論は読んだ時点で確かめる。組み立て（`build_now`）の途中で止まると、プロファイルを
+    読まない B3 の配信まで止まるからである（W6-05）。ポートは表に在るものを全部使う。
+    """
+    require_schema(edition.table, PROFILE_SCHEMA)
+    lookup(edition, _table_ports(edition.table))
+
+
+def _table_ports(table: pa.Table) -> list[tuple[str, str]]:
+    """表に在るポート `(system_id, station_id)`。つなぐのは `_port_index` と同じ区切り。"""
+    names = pc.binary_join_element_wise(
+        table.column("system_id"), table.column("station_id"), _PORT_SEPARATOR
+    )
+    return [_split_port(str(one)) for one in pc.unique(names).to_pylist()]
+
+
+def _split_port(name: str) -> tuple[str, str]:
+    """`system_id/station_id` を分ける。**最初の区切りで切る**（`system_id` に区切りは無い）。"""
+    system_id, _, station_id = name.partition(_PORT_SEPARATOR)
+    return (system_id, station_id)
 
 
 def derive(summed: Mapping[str, Float64]) -> dict[str, Float64]:

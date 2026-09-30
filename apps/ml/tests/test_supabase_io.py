@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from bikechance_ml.config import Config
+from bikechance_ml.io.range_file import Piece
 from bikechance_ml.io.supabase import (
     FORECAST_LOG_BUCKET,
     PARQUET_BUCKET,
@@ -286,6 +287,83 @@ def test_a_listing_failure_is_labelled_storage() -> None:
     with pytest.raises(SupabaseError) as caught:
         io.list_objects(PARQUET_BUCKET, "profiles/date=2026-09-26/", 10)
     assert caught.value.failure.phase == "storage"
+
+
+# ── Range 要求（W6 の PR D）──────────────────────────────────
+PROFILE: str = "profiles/date=2026-09-26/profile.parquet"
+
+
+def test_a_range_request_sends_the_range_and_reads_the_content_range() -> None:
+    """**`Range` を見出しで送り、`Content-Range` から始まりと全体の大きさを読む**（本番の形）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            206, content=b"PAR1", headers={"content-range": "bytes 96-99/100", "etag": '"e1"'}
+        )
+
+    io, seen = io_with(handler)
+    piece = io.download_range(PARQUET_BUCKET, PROFILE, "bytes=-4")
+    assert piece == Piece(start=96, body=b"PAR1", size=100, etag='"e1"')
+    request = seen[0]
+    assert request.headers["range"] == "bytes=-4"
+    assert request.url.path == f"/storage/v1/object/{PARQUET_BUCKET}/{PROFILE}"
+    assert KEY not in str(request.url)
+
+
+def test_a_server_that_ignores_the_range_is_read_as_the_whole() -> None:
+    """**200 で全体が返っても読める**（始まり 0・大きさは本文の長さ）。"""
+    io, _ = io_with(lambda request: httpx.Response(200, content=b"whole", headers={"etag": '"e1"'}))
+    assert io.download_range(PARQUET_BUCKET, PROFILE, "bytes=0-1") == Piece(
+        start=0, body=b"whole", size=5, etag='"e1"'
+    )
+
+
+def test_a_missing_object_in_a_range_request_is_none() -> None:
+    """**無い物は None**（本番は 400 と `NoSuchKey` の本文で返す）。朝の穴の確かめはこれを通る。"""
+    body = (
+        '{"statusCode":"404","error":"not_found","message":"Object not found","code":"NoSuchKey"}'
+    )
+    io, _ = io_with(lambda request: httpx.Response(400, text=body))
+    assert io.download_range(PARQUET_BUCKET, PROFILE, "bytes=-65536") is None
+
+
+@pytest.mark.parametrize(
+    ("content_range", "body"),
+    [("bytes */100", b""), ("bytes 0-9/100", b"short"), ("", b"x")],
+)
+def test_a_content_range_that_does_not_fit_stops(content_range: str, body: bytes) -> None:
+    """**読めない `Content-Range`、本文の長さと食い違う範囲は止める**（ずれた位置で読まない）。"""
+    io, _ = io_with(
+        lambda request: httpx.Response(206, content=body, headers={"content-range": content_range})
+    )
+    with pytest.raises(SupabaseError) as caught:
+        io.download_range(PARQUET_BUCKET, PROFILE, "bytes=0-9")
+    assert (caught.value.failure.phase, caught.value.failure.error_name) == (
+        "storage",
+        "ContentRange",
+    )
+
+
+def test_a_range_failure_keeps_the_status_and_hides_the_url() -> None:
+    """**範囲外（416）などの失敗は状態コードを持って止まり、URL と鍵を出さない。**"""
+    io, _ = io_with(lambda request: httpx.Response(416, text=f"no ({URL}, {KEY})"))
+    with pytest.raises(SupabaseError) as caught:
+        io.download_range(PARQUET_BUCKET, PROFILE, "bytes=99999999-")
+    failure = caught.value.failure
+    assert (failure.phase, failure.status) == ("storage", 416)
+    assert URL not in failure.message
+    assert KEY not in failure.message
+
+
+def test_a_range_transport_error_hides_the_host() -> None:
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("failed to connect", request=request)
+
+    io, _ = io_with(explode)
+    with pytest.raises(SupabaseError) as caught:
+        io.download_range(PARQUET_BUCKET, PROFILE, "bytes=-65536")
+    assert URL not in caught.value.failure.message
+    assert caught.value.failure.error_name == "ConnectError"
 
 
 # ── Storage の「無い」の読み方（W3 プラン §12 の 84 と同じ癖）──
