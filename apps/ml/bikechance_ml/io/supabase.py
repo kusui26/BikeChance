@@ -417,6 +417,13 @@ class SupabaseIo:
         """版を名指しで引く（候補を手で試すとき）。"""
         return self._one_model({"model_version": f"eq.{model_version}"})
 
+    def shadow_model(self) -> Registered | None:
+        """いま shadow の版（W6 の PR E）。**無ければ None**——shadow は無いのが普通である。
+
+        2 つ以上無いことは、0038 の部分一意索引（`model_versions_one_shadow`）が守る。
+        """
+        return self._one_model({"status": "eq.shadow"})
+
     def _one_model(self, where: Mapping[str, str]) -> Registered | None:
         rows = self._rows(
             "/rest/v1/model_versions",

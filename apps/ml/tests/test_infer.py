@@ -29,7 +29,12 @@ from bikechance_ml.eval.dataset import to_samples
 from bikechance_ml.features import profile
 from bikechance_ml.features.build import NowStats
 from bikechance_ml.features.calendar import DOW_TYPE_ORDER
-from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN, MAX_STALENESS_S
+from bikechance_ml.features.constants import (
+    FEATURE_SET,
+    GRID_MINUTES,
+    HORIZONS_MIN,
+    MAX_STALENESS_S,
+)
 from bikechance_ml.features.grid import JST, profile_path
 from bikechance_ml.features.schema import PROFILE_COLUMNS
 from bikechance_ml.features.weather import WeatherRow
@@ -42,6 +47,7 @@ from bikechance_ml.jobs.fit_baseline import build_artifact
 from bikechance_ml.jobs.infer import (
     IN_COLUMNS,
     PROFILE_FALLBACK_DAYS,
+    SHADOW_NO_PROFILE,
     Forecast,
     InferSummary,
     ProfileRequiredError,
@@ -268,6 +274,16 @@ class FakePort:
     fail_range: bool = False
     #: 祝日（`list_holidays`）
     holidays: tuple[date, ...] = ()
+    #: `model_versions` の `shadow` の行（W6 の PR E）。**既定は無い**（いまの本番と同じ）
+    shadow: Registered | None = None
+    #: shadow の行を引くのを失敗させる（登録簿の不調）
+    fail_shadow_lookup: bool = False
+    #: パスごとに置く成果物（shadow の成果物など）。**無いパスは `body`・`lightgbm_body` の決まり**
+    model_bodies: dict[str, bytes] = field(default_factory=dict)
+    #: 成果物を取りに来たパス。**2 周期目に取り直さない**ことを数える（契約 31）
+    model_downloads: list[str] = field(default_factory=list)
+    #: 書いた順（`upsert` と `log`）。**shadow は配って記録してから**を見る（契約 34）
+    events: list[str] = field(default_factory=list)
 
     def read_base_observed_at(self, system_id: str) -> datetime | None:
         return self.base
@@ -297,6 +313,11 @@ class FakePort:
         """**登録簿がいまの版を返す**（W4-08。環境変数からの移行）。"""
         return self.registered
 
+    def shadow_model(self) -> Registered | None:
+        if self.fail_shadow_lookup:
+            raise SupabaseError(SupabaseFailure("rest", 503, "HttpStatus", "unavailable"))
+        return self.shadow
+
     def find_model(self, model_version: str) -> Registered | None:
         if self.registered is not None and self.registered.model_version == model_version:
             return self.registered
@@ -313,6 +334,9 @@ class FakePort:
 
     def download(self, bucket: str, path: str) -> bytes | None:
         if bucket == MODEL_BUCKET:
+            self.model_downloads.append(path)
+            if path in self.model_bodies:
+                return self.model_bodies[path]
             return self.lightgbm_body if path.startswith("lightgbm/") else self.body
         # **頼まれた日の版**を返す（どの日を読みに来たかは `downloads` に残る）
         self.downloads.append(path)
@@ -340,10 +364,12 @@ class FakePort:
         self.details.append(detail)
 
     def upsert_forecasts(self, rows: Sequence[Mapping[str, object]]) -> int:
+        self.events.append("upsert")
         self.written.extend(rows)
         return len(rows)
 
     def upload_forecast_log(self, path: str, body: bytes) -> None:
+        self.events.append("log")
         if self.fail_forecast_log:
             raise TimeoutError("storage が応答しない")
         self.logs[path] = body
@@ -1405,3 +1431,296 @@ def test_the_baseline_does_not_read_the_profile_columns() -> None:
     for target in ("bike", "dock"):
         assert plain.probability[target].tobytes() == noisy.probability[target].tobytes()
         assert plain.informed[target].tobytes() == noisy.informed[target].tobytes()
+
+
+# ── shadow（W6 の PR E、契約 31・33・34）───────────────────────────
+#: shadow に置く B3 の版の名前。
+SHADOW_VERSION: Final[str] = "baseline-b3-v0-shadow"
+
+
+def shadow_artifact() -> Artifact:
+    """**確率が active と違う** B3（ポートの台数を入れ替えた実績で当てはめる）。
+
+    active と同じ確率だと、shadow が active の口で歩いていても、予測ログの中身で見分けられない。
+    """
+    rows = [
+        fixture.row(day, system, station, horizon, bikes, 9 - bikes, 1 if bikes else 0, 1)
+        for day in fixture.DAYS
+        for system in ("hellocycling", "docomo-cycle")
+        for horizon in HORIZONS_MIN
+        for station, bikes in (("a", 7), ("b", 0), ("c", 1))
+    ]
+    built = build_artifact(
+        to_samples(fixture.to_table(rows)), fixture.DAYS, FromSamples(min_samples=2)
+    )
+    return replace(built, model_version=SHADOW_VERSION)
+
+
+SHADOW_ARTIFACT: Final[Artifact] = shadow_artifact()
+
+
+def _shadow_row() -> Registered:
+    return Registered(
+        model_version=SHADOW_VERSION,
+        kind="baseline",
+        feature_set=SHADOW_ARTIFACT.feature_set,
+        artifact_path=artifact_path(SHADOW_VERSION),
+        status="shadow",
+    )
+
+
+def shadow_port(body: bytes | None = None) -> FakePort:
+    """active（B3）に、**確率の違う B3 を shadow として**足した代役。`body` で中身を差し替える。"""
+    port = ready_port()
+    port.shadow = _shadow_row()
+    port.model_bodies[port.shadow.artifact_path] = (
+        to_bytes(SHADOW_ARTIFACT) if body is None else body
+    )
+    return port
+
+
+def _log_path(model_version: str) -> str:
+    return forecast_log.log_path("hellocycling", BASE, model_version)
+
+
+def _logged_bikes(port: FakePort, model_version: str) -> dict[str, list[int]]:
+    """予測ログに残った `p_bike_x1000`（ポート → 水平ごと）。"""
+    table = pq.read_table(pa.BufferReader(port.logs[_log_path(model_version)]))
+    return dict(
+        zip(
+            table.column("station_id").to_pylist(),
+            table.column("p_bike_x1000").to_pylist(),
+            strict=True,
+        )
+    )
+
+
+def _shadow_detail(port: FakePort) -> Mapping[str, object]:
+    shadow = _recorded(port)["shadow"]
+    assert isinstance(shadow, dict)
+    return shadow
+
+
+def _served_alone() -> FakePort:
+    """shadow の無い同じ周期（**比べる相手**。active の結果はこれと同じでなければならない）。"""
+    port = ready_port()
+    run_inference(port, "hellocycling", NOW)
+    return port
+
+
+def test_without_a_shadow_the_record_is_what_it_was() -> None:
+    """**shadow が無い本番では、記録がデプロイの前と同じ**（PR E の完了条件 1）。欄も出さない。"""
+    port = ready_port()
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.shadow is None
+    assert "shadow" not in _recorded(port)
+    assert list(port.logs) == [_log_path(ARTIFACT.model_version)]
+
+
+def test_the_shadow_writes_only_its_forecast_log() -> None:
+    """**shadow は予測ログにだけ書く**（契約 34）。`station_forecasts` と記録の列は active のもの。
+
+    shadow の結果は `detail.shadow` にだけ出る。
+    """
+    alone = _served_alone()
+    port = shadow_port()
+    summary = run_inference(port, "hellocycling", NOW)
+    assert (summary.status, summary.model_version) == ("ok", ARTIFACT.model_version)
+    assert port.written == alone.written
+    assert port.finished == alone.finished
+    assert list(port.logs) == [_log_path(ARTIFACT.model_version), _log_path(SHADOW_VERSION)]
+    shadow = _shadow_detail(port)
+    assert (shadow["model_version"], shadow["status"], shadow["forecast_log"]) == (
+        SHADOW_VERSION,
+        "ok",
+        "ok",
+    )
+    assert set(shadow) == {"model_version", "status", "forecast_log", "model_load_ms", "predict_ms"}
+
+
+def test_the_shadow_predicts_as_it_would_if_it_were_active() -> None:
+    """**shadow の確率は、同じ版を active にしたときと同じ**——同じ特徴量の表から、自分の口で出す。
+
+    予測ログの 2 つの時刻（`generated_at`・`base_observed_at`）も active と同じになる。
+    """
+    port = shadow_port()
+    run_inference(port, "hellocycling", NOW)
+    as_active = FakePort(body=to_bytes(SHADOW_ARTIFACT))
+    as_active.registered = replace(_shadow_row(), status="active")
+    run_inference(as_active, "hellocycling", NOW)
+    shadow_bikes = _logged_bikes(port, SHADOW_VERSION)
+    assert shadow_bikes == {row["station_id"]: row["p_bike_x1000"] for row in as_active.written}
+    assert shadow_bikes != _logged_bikes(port, ARTIFACT.model_version), "仕込みの確率が同じ"
+    active_log, shadow_log = (
+        pq.read_table(pa.BufferReader(port.logs[_log_path(one)]))
+        for one in (ARTIFACT.model_version, SHADOW_VERSION)
+    )
+    assert shadow_log.schema.metadata == active_log.schema.metadata
+    assert shadow_log.column("base_observed_at").equals(active_log.column("base_observed_at"))
+
+
+def test_the_shadow_walks_after_the_active_is_served_and_logged() -> None:
+    """**配って予測ログを置いてから shadow を歩く**（契約 34。配ってから記録する、を崩さない）。"""
+    port = shadow_port()
+    run_inference(port, "hellocycling", NOW)
+    first_log = port.events.index("log")
+    assert set(port.events[:first_log]) == {"upsert"}
+    assert port.events[first_log:] == ["log", "log"]
+
+
+def _missing_shadow() -> Registered:
+    """成果物が Storage に無い shadow（`lightgbm/` に何も置いていない）。"""
+    return Registered(
+        model_version="lgbm-v1-missing",
+        kind="lightgbm",
+        feature_set=FEATURE_SET,
+        artifact_path="lightgbm/lgbm-v1-missing.json.gz",
+        status="shadow",
+    )
+
+
+def test_a_failing_shadow_leaves_the_active_as_it_is() -> None:
+    """**shadow の例外で active は変わらない**（W6-06）。理由は `detail.shadow` にだけ残る。"""
+    alone = _served_alone()
+    port = ready_port()
+    port.shadow = _missing_shadow()
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    assert (port.written, port.logs, port.finished) == (alone.written, alone.logs, alone.finished)
+    shadow = _shadow_detail(port)
+    assert (shadow["model_version"], shadow["status"], shadow["forecast_log"]) == (
+        "lgbm-v1-missing",
+        "failed:MissingArtifactError",
+        "",
+    )
+
+
+def test_a_shadow_lookup_failure_leaves_the_active_as_it_is() -> None:
+    """**shadow の行を引けなくても配る**。引けなかったことは `detail.shadow` に残る（黙らない）。"""
+    alone = _served_alone()
+    port = ready_port()
+    port.fail_shadow_lookup = True
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    assert (port.written, port.logs) == (alone.written, alone.logs)
+    assert _shadow_detail(port) == {
+        "model_version": None,
+        "status": "failed:SupabaseError",
+        "forecast_log": "",
+        "model_load_ms": 0,
+        "predict_ms": 0,
+    }
+
+
+def test_a_shadow_claiming_the_active_version_does_not_overwrite_its_log() -> None:
+    """**成果物が active と同じ版を名乗る shadow は歩かない**——予測ログの置き場所が重なる。
+
+    行の名前は主キーなので重ならないが、成果物の中の版は登録簿が確かめていない。
+    """
+    alone = _served_alone()
+    port = shadow_port(body=to_bytes(ARTIFACT))
+    run_inference(port, "hellocycling", NOW)
+    assert port.logs == alone.logs
+    assert _shadow_detail(port)["status"] == "failed:ShadowSameAsActiveError"
+
+
+def _lightgbm_shadow_port() -> FakePort:
+    """**`prof_*` を読む版**（v4 の森）を shadow にした代役。active は B3 のまま。"""
+    from bikechance_ml.models import artifact as lightgbm_artifact
+    from tests.test_model_artifact import ARTIFACT as LGBM
+
+    port = ready_port()
+    port.shadow = Registered(
+        model_version=LGBM.model_version,
+        kind="lightgbm",
+        feature_set=LGBM.feature_set,
+        artifact_path=lightgbm_artifact.artifact_path(LGBM.model_version),
+        status="shadow",
+    )
+    port.lightgbm_body = lightgbm_artifact.to_bytes(LGBM)
+    return port
+
+
+def test_a_shadow_that_reads_the_profile_waits_for_it() -> None:
+    """**`prof_*` を読む shadow は、プロファイルを読めなかった周期に歩かない**（契約 33、W6-05）。
+
+    NULL のまま歩くと、例外を出さずに確率だけがずれた予測ログが残り、実運用 Brier を汚す。
+    """
+    port = _lightgbm_shadow_port()
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    assert _shadow_detail(port)["status"] == SHADOW_NO_PROFILE
+    assert list(port.logs) == [_log_path(ARTIFACT.model_version)]
+
+
+def test_the_same_shadow_walks_once_the_profile_is_read() -> None:
+    from tests.test_model_artifact import ARTIFACT as LGBM
+
+    port = put_profile(_lightgbm_shadow_port(), _yesterday())
+    run_inference(port, "hellocycling", NOW)
+    assert _shadow_detail(port)["status"] == "ok"
+    assert list(port.logs) == [_log_path(ARTIFACT.model_version), _log_path(LGBM.model_version)]
+
+
+def _next_cycle(port: FakePort, cycles: int) -> None:
+    """`cycles` 周期あとの推論（観測も同じだけ進める。掴めるように）。"""
+    step = timedelta(minutes=GRID_MINUTES * cycles)
+    port.base = BASE + step
+    run_inference(port, "hellocycling", NOW + step)
+
+
+def test_the_second_cycle_fetches_no_artifact() -> None:
+    """**2 周期目は成果物を取りに行かない**——active と shadow を版ごとに持つ（契約 31、所見 189）。
+
+    1 つだけ持つキャッシュでは、互いを追い出して毎周期 2 つとも落とし直す。
+    """
+    port = shadow_port()
+    run_inference(port, "hellocycling", NOW)
+    assert sorted(port.model_downloads) == sorted(
+        artifact_path(one) for one in (ARTIFACT.model_version, SHADOW_VERSION)
+    )
+    port.model_downloads.clear()
+    _next_cycle(port, 1)
+    assert port.model_downloads == []
+    assert [status for _, status, _ in port.finished] == ["ok", "ok"]
+
+
+def test_a_retired_shadow_leaves_the_cache() -> None:
+    """**下ろした shadow はキャッシュから捨てる**（その周期に使う版だけを残す。W6-02）。"""
+    port = shadow_port()
+    run_inference(port, "hellocycling", NOW)
+    row = port.shadow
+    port.shadow = None
+    _next_cycle(port, 1)
+    port.shadow = row
+    port.model_downloads.clear()
+    _next_cycle(port, 2)
+    assert port.model_downloads == [artifact_path(SHADOW_VERSION)], "捨てていれば取り直す"
+
+
+def test_a_lookup_failure_keeps_the_warm_shadow() -> None:
+    """**shadow の行を引けなかった周期は、キャッシュを触らない**（一時の不調で捨てない）。"""
+    port = shadow_port()
+    run_inference(port, "hellocycling", NOW)
+    port.fail_shadow_lookup = True
+    _next_cycle(port, 1)
+    port.fail_shadow_lookup = False
+    port.model_downloads.clear()
+    _next_cycle(port, 2)
+    assert port.model_downloads == []
+
+
+def test_the_dry_run_does_not_walk_the_shadow() -> None:
+    """**試し打ちは shadow を歩かない**（どこにも書かないのが試し打ち。W4-18）。"""
+    port = shadow_port()
+    port.candidate = Registered(
+        model_version="baseline-candidate",
+        kind="baseline",
+        feature_set=ARTIFACT.feature_set,
+        artifact_path=artifact_path("baseline-candidate"),
+        status="candidate",
+    )
+    summary = run_inference(port, "hellocycling", NOW, "baseline-candidate")
+    assert (summary.status, summary.shadow) == ("dry_run", None)
+    assert port.logs == {}
+    assert "shadow" not in to_detail(summary)
