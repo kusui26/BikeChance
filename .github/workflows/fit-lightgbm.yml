@@ -1,0 +1,177 @@
+name: LightGBM v1 を当てはめる
+
+# **`ubuntu-latest` で 28 日ぶんを当てはめ、候補を並べた報告書と門の表を出す**
+# （W6 の PR F、W6-18）。28 日ぶんの当てはめは常駐 12.1〜12.5 GiB で、手元（8 GB）に載らない。
+#
+# **既定では何も書かない。** 置くのは `upload`、登録するのは `register` を明示した回だけで、
+# どちらも**選んだ 1 つの候補**しか扱わない（候補が 2 つ以上なら `choose` が要る。選ぶのは
+# 報告書の ⑩ を読んだ人である）。登録は candidate にしかならず、**配信を切り替える段は
+# このワークフローに無い**（W6 の契約 22・39。切り替えは人が psql から行う）。
+#
+# **置くのは `models` の 2 つ**：森（`lightgbm/<版>.json.gz`）と、その森と組の門の表
+# （`lightgbm/<版>.gates.json.gz`。表は森の SHA-256 を持つ）。**配信中（active・shadow）の
+# 版と同じ名前なら、当てはめる前と、置く直前に止まる**（W6-19、契約 38）。
+#
+# **登録する回はモデルカードを先に書く**（`docs/model_cards/<版>.md`。カードの無い版を登録
+# しない。CLAUDE.md §6）。**このワークフローはリポジトリに書かない**（`permissions: {}`）ので、
+# 記録に出したカードを人がコミットする。登録簿の `card_path` はその場所を指す。
+#
+# **分割は W6-14 の形に固定する**：学習 `days` 日・パージ 1 日・検証 2 日（平日）で、
+# 窓はちょうど `to_date` で終わる。**`to_date` の学習サンプルが無ければ当てはめない**
+# （検証日が 1 日ずれて、1 日短い v1 が本物の名前で置かれるのを防ぐ。W6 プラン §8.7）。
+#
+# **定時では走らせない。** `push` / `pull_request` も付けない——秘密を使うワークフローだから
+# である（D-12）。**ファイル名を変えない**（`workflow_dispatch` の登録もファイル単位）。
+on:
+  workflow_dispatch:
+    inputs:
+      to_date:
+        description: "窓の最後の日（検証の 2 日目。JST、YYYY-MM-DD）"
+        required: true
+        type: string
+      days:
+        description: "学習の日数（to_date から逆に数える。W6-14 は 28、10/8 の比較は 27）"
+        required: false
+        type: string
+        default: "28"
+      candidates:
+        description: "候補（本数:学習率 をカンマで並べる。例 50:0.15,100:0.15,300:0.05）"
+        required: false
+        type: string
+        default: "300:0.05"
+      choose:
+        description: "置く候補（本数:学習率）。候補が 2 つ以上のときに置くなら要る"
+        required: false
+        type: string
+        default: ""
+      label:
+        description: "版の名前に挟む印（予行演習は rehearsal。空なら付けない）"
+        required: false
+        type: string
+        default: ""
+      upload:
+        description: "選んだ候補の森と門の表を Storage に置く"
+        required: false
+        type: boolean
+        default: false
+      register:
+        description: "model_versions に candidate で登録する（upload も要る。昇格はしない）"
+        required: false
+        type: boolean
+        default: false
+
+# 読むのは Storage だけ。**このジョブは GITHUB_TOKEN を 1 つも使わない。**
+permissions: {}
+
+# **同じ名前に 2 本が同時に置かない。** 後から来た回は、前の回が終わるまで待つ
+# （置いている途中の回を殺すと、森だけ置かれて門の表が古いままになりうる）。
+concurrency:
+  group: fit-lightgbm
+  cancel-in-progress: false
+
+jobs:
+  fit:
+    name: 学習 ${{ inputs.days }} 日（${{ inputs.to_date }} まで）
+    runs-on: ubuntu-latest
+    # 学習 8 日・300 本で 26 分（W5 プラン §12 の 168）。28 日・候補 3 つ（450 本）は
+    # その数倍を見ておく。**6 時間がジョブの上限**（公開リポジトリ）
+    timeout-minutes: 300
+    # **ここが鍵の在り処。** `training` 環境の secrets だけがこのジョブに渡る
+    environment: training
+    defaults:
+      run:
+        working-directory: apps/ml
+    steps:
+      - uses: actions/checkout@v7
+
+      # measure-fit.yml と同じ組み立て。**サードパーティのアクションに依存しない**
+      - name: uv を入れる
+        run: pip install --upgrade uv
+
+      - name: Python 3.12 を用意する
+        run: uv python install 3.12
+
+      # **`--extra dev` が要る。** 当てはめるので lightgbm を入れる（本番の依存には入れない。W4-19）
+      - name: 依存を入れる（uv.lock どおり、当てはめる側も）
+        run: uv sync --frozen --extra dev --python 3.12
+
+      # **要約欄だけに書かない**（`GITHUB_STEP_SUMMARY` は API から取れない）。記録にも流す
+      - name: 機械の大きさを記録する
+        run: |
+          {
+            echo "### 機械"
+            echo ''
+            echo '```'
+            grep -E '^(MemTotal|SwapTotal)' /proc/meminfo
+            echo "nproc: $(nproc)"
+            echo '```'
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      # **入力は `env:` で渡す**（`${{ }}` をスクリプトに直接埋めない）。
+      #
+      # **試し直さない。** 置く回を 2 度走らせると、1 回目の森を 2 回目が上書きする。
+      # 落ちたら記録を読んでから、人がもう 1 度起こす。
+      #
+      # **カードは `docs/model_cards/{version}.md` に書く**（登録簿の `card_path` がそこを指す）。
+      # 候補を選んでいない回は、当てはめる側が書かずにそう言う。
+      - name: 当てはめる
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          TO_DATE: ${{ inputs.to_date }}
+          TRAIN_DAYS: ${{ inputs.days }}
+          CANDIDATES: ${{ inputs.candidates }}
+          CHOOSE: ${{ inputs.choose }}
+          LABEL: ${{ inputs.label }}
+          UPLOAD: ${{ inputs.upload }}
+          REGISTER: ${{ inputs.register }}
+        run: |
+          args=(
+            --to "${TO_DATE}" --train-days "${TRAIN_DAYS}" --eval-days 2 --purge-days 1
+            --candidates "${CANDIDATES}"
+            --report "${RUNNER_TEMP}/fit.md"
+            --card "../../docs/model_cards/{version}.md"
+          )
+          if [ -n "${CHOOSE}" ]; then
+            args+=(--choose "${CHOOSE}")
+          fi
+          if [ -n "${LABEL}" ]; then
+            args+=(--label "${LABEL}")
+          fi
+          if [ "${UPLOAD}" = "true" ]; then
+            args+=(--upload)
+          fi
+          if [ "${REGISTER}" = "true" ]; then
+            args+=(--register)
+          fi
+          uv run python -m bikechance_ml.jobs.fit_lightgbm "${args[@]}"
+
+      # **報告書とカードを要約に畳み、記録にも残す**（measure-fit.yml の作法）。
+      # カードは**この回に書かれたもの**だけを出す（チェックアウトに在った古いカードは出さない）。
+      # 落ちた回には報告書が無いので、**在るときだけ**。
+      - name: 報告書とカードを要約に畳み、記録にも残す
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/fit.md" ]; then
+            cat "${RUNNER_TEMP}/fit.md"
+            {
+              echo '<details><summary>当てはめの報告書</summary>'
+              echo ''
+              cat "${RUNNER_TEMP}/fit.md"
+              echo ''
+              echo '</details>'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo '（報告書が無い。当てはめが最後まで行かなかった）' | tee -a "${GITHUB_STEP_SUMMARY}"
+          fi
+          git -C ../.. status --porcelain -- docs/model_cards | while read -r _ path; do
+            echo "::notice::モデルカードを書いた（コミットする）: ${path}"
+            cat "../../${path}"
+            {
+              echo "<details><summary>モデルカード ${path}</summary>"
+              echo ''
+              cat "../../${path}"
+              echo ''
+              echo '</details>'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          done

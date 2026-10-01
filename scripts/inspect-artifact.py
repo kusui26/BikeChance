@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""配っている成果物を開いて、**曜日種別ごとに使えるセルを数える**（W5 プラン §8.4）。
+"""配っている成果物を開いて確かめる（W5 プラン §8.4、W6 の PR F）。
+
+**ベースライン**は曜日種別ごとに使えるセルを数え、**LightGBM** は森と門の表を照合する
+（下の「LightGBM の成果物」）。種類は登録簿の `kind` で分ける（`--file` なら中身の `kind`）。
+
+## ベースライン：曜日種別ごとに使えるセルを数える
 
 **数字だけでなく、配っている物そのものを開く。** W5 の着手前にこれをして、
 「配信中の確率は 1 システム 1 水平あたり 4〜6 個の値しか取らない」——つまり
@@ -36,10 +41,26 @@
 あとに「書式 2 で置けたか」「セルの数と率が崩れていないか」を目で見るためである
 （W6 プラン §8.1 の 2）。版 1 と版 2 のどちらも開ける（契約 30）。率が 0〜1 の外なら
 読み手が開く前に止めるので、ここに出るのは必ず 0〜1 の中である。
+
+## LightGBM の成果物（W6 の PR F、W6 プラン §8.7 の 3）
+
+**読めた＝いまのコードと一致。** 読み手（`models/artifact.py`）が書式の版・列の並び・
+カテゴリ・語彙を照合し、違えば読まずに止める（木は位置で特徴量を見るので、ずれても例外は
+出ず確率だけが変わる）。ここでは**特徴量の版**も照合し、**木の本数・節の数・最大の深さ**を出す。
+
+**門の表も開く**（`lightgbm/<版>.gates.json.gz`。`--file` のときは `--gates`）。**この森と
+組か**（表が持つ森の SHA-256）を確かめ、LightGBM に回すセルの数を system × ターゲットで出す。
+**合格**：特徴量の版がいまと同じで、門の表があり、この森と組であること。
+
+    ./.venv/bin/python ../../scripts/inspect-artifact.py --version lgbm-v1-20261008
+    ./.venv/bin/python ../../scripts/inspect-artifact.py --file a.json.gz --gates a.gates.json.gz
 """
 
 import argparse
+import gzip
+import json
 import sys
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
@@ -55,8 +76,11 @@ from bikechance_ml.config import read_storage_config
 from bikechance_ml.features import profile
 from bikechance_ml.features.arrays import Bools
 from bikechance_ml.features.calendar import DOW_TYPE_ORDER
+from bikechance_ml.features.constants import FEATURE_SET
 from bikechance_ml.features.grid import profile_path
 from bikechance_ml.io.supabase import PARQUET_BUCKET, open_storage
+from bikechance_ml.models import artifact as lightgbm_artifact
+from bikechance_ml.models import gates as gate_tables
 from bikechance_ml.models import registry
 
 
@@ -225,38 +249,148 @@ def _floor_text(days: int | None) -> str:
     return "配らない" if days is None else f"下限 {days} 日"
 
 
-def fetch(source: registry.ReadsModels, options: argparse.Namespace) -> bytes:
-    """成果物のバイト列を取る。**手元のファイルか、Storage の版か。**"""
-    if options.file:
-        return Path(options.file).read_bytes()
-    wanted = options.version
-    found = registry.named(source, wanted) if wanted else registry.active(source)
-    print(f"（登録簿：{found.model_version} / {found.status}）", file=sys.stderr)
-    body = source.download(registry.MODEL_BUCKET, found.artifact_path)
-    if body is None:
-        raise SystemExit(f"成果物が Storage にありません: {found.artifact_path}")
-    return body
+# ── LightGBM の成果物（W6 の PR F）──────────────────────────────
+def lightgbm_header(artifact: lightgbm_artifact.LightGbmArtifact, size_bytes: int) -> list[str]:
+    """森そのものの素性。**読めたので、列の並び・カテゴリ・語彙はいまのコードと同じ。**"""
+    days = artifact.train_days
+    params = artifact.params
+    return [
+        f"{artifact.model_version}（書式 {artifact.format_version}、feature_set "
+        f"{artifact.feature_set}、{size_bytes:,} B）",
+        f"  学習 {days[0]}〜{days[-1]}（{len(days)} 日） / 作成 {artifact.created_at}",
+        f"  本数 {params.get('num_boost_round', '—')}・学習率 {params.get('learning_rate', '—')}",
+        f"  列 {len(artifact.columns)}（カテゴリ {len(artifact.categorical)}）："
+        "並び・カテゴリ・語彙はいまのコードと一致（読めた）",
+    ]
 
 
-def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="成果物を開いて曜日種別ごとのセルを数える")
-    parser.add_argument("--version", default=None, help="登録簿の版（既定は active）")
-    parser.add_argument("--file", default=None, help="Storage の代わりに読む成果物")
-    return parser.parse_args(argv)
+def forest_lines(artifact: lightgbm_artifact.LightGbmArtifact) -> list[str]:
+    """ターゲットごとの木の本数・節の数・最大の深さ（**深さは歩く回数**。`models/forest.py`）。"""
+    return [
+        f"  {name} の森：木 {len(one):,} / 節 {one.n_nodes:,} / 最大の深さ {one.max_depth}"
+        for name, one in sorted(artifact.forests.items())
+    ]
 
 
-def run(argv: Sequence[str] | None = None) -> int:
-    options = _arguments(argv)
-    with open_storage(read_storage_config()) as source:
-        body = fetch(source, options)
-        one = baseline_artifact.from_bytes(body)
-        days = profile_days(source, one.train_days[-1])
+def read_gates(source: registry.ReadsModels, model_version: str, local: str | None) -> bytes | None:
+    """門の表のバイト列。**`--file` のときは `--gates` の手元のもの**（無ければ None）。"""
+    if local is not None:
+        return Path(local).read_bytes()
+    return source.download(registry.MODEL_BUCKET, gate_tables.gates_path(model_version))
+
+
+def gate_lines(table: gate_tables.GateTable) -> list[str]:
+    """門の表の要約。**理由ごとの数**と、**LightGBM に回すセル**の system × ターゲット別。"""
+    reasons = Counter(one.reason for one in table.cells)
+    routed = Counter(
+        (one.system, one.target) for one in table.cells if one.route == gate_tables.TO_LIGHTGBM
+    )
+    return [
+        "",
+        f"  門の表：検証日 {', '.join(table.evaluate_days)} / 規則 {dict(table.rule)}",
+        "  セル：" + " / ".join(f"{name} {reasons[name]}" for name in sorted(gate_tables.REASONS)),
+        *[
+            f"  LightGBM に回すセル（{system} / {target}）：{count}"
+            for (system, target), count in sorted(routed.items())
+        ],
+    ]
+
+
+def lightgbm_verdict(
+    artifact: lightgbm_artifact.LightGbmArtifact, gates_body: bytes | None, body: bytes
+) -> tuple[str, gate_tables.GateTable | None]:
+    """判定の文と、この森と組の門の表。**表が None なら不合格。**
+
+    合格は、特徴量の版がいまと同じで、門の表があり、この森と組であること。
+    """
+    if artifact.feature_set != FEATURE_SET:
+        return f"**不合格**：特徴量の版が {artifact.feature_set}（いまは {FEATURE_SET}）", None
+    if gates_body is None:
+        path = gate_tables.gates_path(artifact.model_version)
+        return f"**不合格**：門の表がありません（{path}。合成器を組めない）", None
+    try:
+        table = gate_tables.from_bytes(gates_body)
+        gate_tables.refuse_other_forest(table, body)
+    except gate_tables.GateTableError as error:
+        return f"**不合格**：門の表が使えません（{error}）", None
+    return "**合格**：いまの特徴量の版で読め、門の表はこの森と組です", table
+
+
+def inspect_lightgbm(source: registry.ReadsModels, body: bytes, gates: str | None) -> int:
+    """LightGBM の成果物を開く。**読めなければ（照合に落ちれば）不合格**で 1 を返す。"""
+    try:
+        artifact = lightgbm_artifact.from_bytes(body)
+    except (ValueError, lightgbm_artifact.ArtifactMismatchError) as error:
+        print(f"**不合格**：いまのコードでは読めません（{error}）")
+        return 1
+    message, table = lightgbm_verdict(
+        artifact, read_gates(source, artifact.model_version, gates), body
+    )
+    lines = [*lightgbm_header(artifact, len(body)), *forest_lines(artifact)]
+    shown = [] if table is None else gate_lines(table)
+    print("\n".join([*lines, *shown, "", message]))
+    return 0 if table is not None else 1
+
+
+# ── ベースラインの成果物 ──────────────────────────────────────
+def inspect_baseline(source: registry.ReadsModels, body: bytes) -> int:
+    """ベースラインの成果物を開く。**立つはずの曜日種別にセルがあるか**で判定する。"""
+    one = baseline_artifact.from_bytes(body)
+    days = profile_days(source, one.train_days[-1])
     if days is None:
         print(f"（プロファイル profiles/date={one.train_days[-1]} が読めません）", file=sys.stderr)
     passed, message = verdict(one, days)
     lines = [*header(one, len(body)), *climatology_cells(one), *floors(one), *table(one, days)]
     print("\n".join([*lines, "", message]))
     return 0 if passed else 1
+
+
+# ── 取る ──────────────────────────────────────────────────────
+def kind_of(body: bytes) -> str:
+    """手元の成果物の種類。**LightGBM の成果物は中に `kind` を持つ**（ベースラインは持たない）。"""
+    document = json.loads(gzip.decompress(body).decode())
+    found = document.get("kind") if isinstance(document, dict) else None
+    return str(found) if found else registry.BASELINE_KIND
+
+
+def fetch(source: registry.ReadsModels, options: argparse.Namespace) -> tuple[str, bytes]:
+    """成果物の種類とバイト列を取る。**手元のファイルか、Storage の版か。**
+
+    登録簿から引いたときは、**行の `kind` と中身の `kind` が食い違えば止める**（登録の誤り）。
+    """
+    if options.file:
+        body = Path(options.file).read_bytes()
+        return kind_of(body), body
+    wanted = options.version
+    found = registry.named(source, wanted) if wanted else registry.active(source)
+    print(f"（登録簿：{found.model_version} / {found.kind} / {found.status}）", file=sys.stderr)
+    downloaded = source.download(registry.MODEL_BUCKET, found.artifact_path)
+    if downloaded is None:
+        raise SystemExit(f"成果物が Storage にありません: {found.artifact_path}")
+    if kind_of(downloaded) != found.kind:
+        raise SystemExit(f"登録簿は {found.kind}、成果物は {kind_of(downloaded)} と言っています")
+    return found.kind, downloaded
+
+
+def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="配っている成果物を開いて確かめる")
+    parser.add_argument("--version", default=None, help="登録簿の版（既定は active）")
+    parser.add_argument("--file", default=None, help="Storage の代わりに読む成果物")
+    parser.add_argument(
+        "--gates",
+        default=None,
+        help="手元の LightGBM の門の表（無ければ Storage の lightgbm/<版>.gates.json.gz を読む）",
+    )
+    return parser.parse_args(argv)
+
+
+def run(argv: Sequence[str] | None = None) -> int:
+    options = _arguments(argv)
+    with open_storage(read_storage_config()) as source:
+        kind, body = fetch(source, options)
+        if kind == registry.LIGHTGBM_KIND:
+            return inspect_lightgbm(source, body, options.gates)
+        return inspect_baseline(source, body)
 
 
 if __name__ == "__main__":

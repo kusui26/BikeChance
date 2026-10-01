@@ -24,6 +24,7 @@ from bikechance_ml.eval.slices import ALL
 from bikechance_ml.eval.split import DaySplit
 from bikechance_ml.features.constants import FEATURE_SET
 from bikechance_ml.features.coverage import MAX_SPREAD_PP, Coverage, restrict, spread_pp
+from bikechance_ml.features.fingerprint import Fingerprint
 from bikechance_ml.features.grid import JST
 from bikechance_ml.features.schema import WEATHER_COLUMNS
 
@@ -61,6 +62,7 @@ def render_markdown(
         f"（`bikechance_ml.jobs.{generator}`、`feature_set = {FEATURE_SET}`）",
         f"- **分割**：{outcome.split.describe()}",
         f"- **件数**：学習 {outcome.n_fit:,} 行 / 検証 {outcome.n_eval:,} 行",
+        *_baseline_line(outcome),
         "",
         note,
         "",
@@ -104,6 +106,17 @@ def render_markdown(
         "",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _baseline_line(outcome: Outcome) -> list[str]:
+    """**B0〜B3 を学習期間の一部で当てはめたときだけ**、その日を書く（W6-10）。"""
+    days = outcome.baseline_days
+    if not days or tuple(days) == tuple(outcome.split.fit):
+        return []
+    return [
+        f"- **B0〜B3 の当てはめ**：{days[0]}〜{days[-1]}（{len(days)} 日・"
+        f"{outcome.n_baseline_fit:,} 行）。**本番と同じ作り方**（学習窓の最後の日。W6-10）"
+    ]
 
 
 # ── 判定 ──────────────────────────────────────────────────────
@@ -183,6 +196,21 @@ def weather_block(weather: Mapping[date, Coverage], split: DaySplit) -> list[str
         "",
         *_spread_lines(weather, split),
         *_uniform_lines(weather),
+    ]
+
+
+def fingerprint_block(prints: Mapping[date, Fingerprint], split: DaySplit) -> list[str]:
+    """読んだ日ごとのバイト列の SHA-256（W6-17）。**報告書とモデルカードの両方から呼ぶ。**
+
+    **64 桁をそのまま出す。** 縮めると、同じパスで作り直した日と見分けられなくなる。
+    """
+    return [
+        _row("日", "役割", "行", "SHA-256"),
+        "|---|---|---:|---|",
+        *(
+            _row(f"{day:%Y-%m-%d}", _role(day, split), f"{one.rows:,}", f"`{one.sha256}`")
+            for day, one in sorted(prints.items())
+        ),
     ]
 
 

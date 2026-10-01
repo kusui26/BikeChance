@@ -20,6 +20,7 @@
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import date
 from typing import Final
 
 import numpy as np
@@ -87,6 +88,10 @@ class Outcome:
     models: tuple[str, ...] = BASELINE_MODELS
     #: B2 をどこから作ったか（`climatology.Source.describe`）。**報告書に出す**
     climate: str = ""
+    #: **B0〜B3 を当てはめた日**（W6-10）。空なら学習期間ぜんぶ。`n_fit` は学習期間ぜんぶの行
+    baseline_days: tuple[date, ...] = ()
+    #: B0〜B3 の当てはめに使った行の数
+    n_baseline_fit: int = 0
 
 
 #: 外から渡す予測。`extra["LGBM"]["bike"]` が**検証期間の行に対応する確率**。
@@ -100,12 +105,17 @@ class MisalignedPredictionError(ValueError):
     """外から渡された予測の行数が検証期間と合わない。**別の行で測らない。**"""
 
 
+class BaselineDaysError(ValueError):
+    """ベースラインを当てはめる日が、学習期間の中に無い。**検証日の答えを見せない。**"""
+
+
 def run(
     samples: Samples,
     split: DaySplit,
     extra: ExtraModels | None = None,
     *,
     climate: climatology.Source,
+    baseline_days: Sequence[date] | None = None,
 ) -> Outcome:
     """分割にしたがって当てはめ、測る。
 
@@ -117,16 +127,22 @@ def run(
     ——置いていたときは `fit_lightgbm` が渡し忘れ、**同じ日の同じ `v3` で違う B2 が
     出ていた**のに、例外も警告も出なかった。決め方は `jobs/climate.py` の `source_for`
     に 1 つだけある。
+
+    `baseline_days` は **B0〜B3 を当てはめる日**（W6-10、W6 の契約 36）。**配る B3 は学習窓の
+    最後の 7 日**で当てはめるので、LightGBM の門の相手もそれに揃える——学習窓ぜんぶ（28 日）で
+    当てはめた B3 は**本番に無いもの**で、比べる相手が違う（W6 プランの所見 198）。渡すなら
+    学習期間の中の日でなければならず、`climate` もその最後の日の版でなければならない。
     """
     source = climate
-    fit_mask = mask_of(samples, split.fit)
+    fitted_days = _baseline_days(split, baseline_days)
+    fit_mask = mask_of(samples, fitted_days)
     eval_mask = mask_of(samples, split.evaluate)
     evaluated = samples.take(eval_mask)
     fits = tuple(_fit_target(samples, fit_mask, eval_mask, target, source) for target in TARGETS)
     named = _with_extra(fits, extra, len(evaluated))
     return Outcome(
         split=split,
-        n_fit=int(fit_mask.sum()),
+        n_fit=int(mask_of(samples, split.fit).sum()),
         n_eval=int(eval_mask.sum()),
         fits=named,
         overall=_score_all(evaluated, named, _overall_slices(evaluated)),
@@ -136,7 +152,19 @@ def run(
         by_time_of_day=_score_all(evaluated, named, _cut_slices(evaluated, slices.by_time_of_day)),
         models=(*BASELINE_MODELS, *sorted(extra or {})),
         climate=source.describe(),
+        baseline_days=fitted_days,
+        n_baseline_fit=int(fit_mask.sum()),
     )
+
+
+def _baseline_days(split: DaySplit, wanted: Sequence[date] | None) -> tuple[date, ...]:
+    """B0〜B3 を当てはめる日。**学習期間の外の日を渡されたら止める**（検証日の答えを見せない）。"""
+    if wanted is None:
+        return tuple(split.fit)
+    chosen = tuple(sorted(set(wanted)))
+    if not chosen or not set(chosen) <= set(split.fit):
+        raise BaselineDaysError(f"学習期間 {split.describe()} の外の日を渡されました: {chosen}")
+    return chosen
 
 
 def _with_extra(

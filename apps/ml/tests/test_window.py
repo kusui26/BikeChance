@@ -15,6 +15,7 @@
 こない日を並べると、**番号を振り直さなくても一致してしまう**。
 """
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import fields
 from datetime import date
@@ -132,6 +133,17 @@ def distinct(tmp_path: Path) -> tuple[window.Window, pa.Table]:
 
 
 # ── 読めた日 ──────────────────────────────────────────────────
+def test_the_fingerprint_is_taken_from_the_bytes_that_were_read(samples: Path) -> None:
+    """**置いてあるファイルのバイト列そのもの**の SHA-256 と行数（W6-17）。"""
+    prints = window.fingerprints(read_local(samples, BOTH))
+    assert tuple(prints) == BOTH
+    for day in BOTH:
+        body = (samples / features_path(day)).read_bytes()
+        assert prints[day].sha256 == hashlib.sha256(body).hexdigest()
+        assert prints[day].rows == GOLDEN.num_rows
+    assert prints[DAY_WITH].sha256 != prints[DAY_WITHOUT].sha256, "日ごとに別のバイト列のはず"
+
+
 def test_the_days_that_exist_are_read(samples: Path) -> None:
     opened = read_local(samples, BOTH)
     assert opened.days == BOTH
