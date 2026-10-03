@@ -23,11 +23,14 @@ from typing import Final
 
 import numpy as np
 
-from bikechance_ml.features.arrays import Float32, Int32, Int64, Span
+from bikechance_ml.features.arrays import Bools, Float32, Int32, Int64
 from bikechance_ml.features.asof import Observations
 from bikechance_ml.features.constants import CHANGE_CAP_MINUTES, FLOW_MINUTES, MISSING
 
 _MS_PER_MINUTE: Final[int] = 60_000
+
+#: 流量の鍵（ポート × 幅 + 時刻）の上限。
+_KEY_MAX: Final[int] = int(np.iinfo(np.int64).max)
 
 
 @dataclass(frozen=True)
@@ -46,7 +49,14 @@ class Flow:
 
 
 def compute_flow(observations: Observations, window_minutes: int = FLOW_MINUTES) -> Flow:
-    """全ポートぶんの流量。ポート毎に、そのポートの観測列だけを見る。"""
+    """全ポートぶんの流量。ポート毎に、そのポートの観測列だけを見る。
+
+    **ポートごとに回さず、全ポートを 1 本の鍵の上で一度に数える**（W6 の PR G の④、
+    契約 40）。鍵は「ポートの番号 × 幅 + 起点からの時刻」で、**幅は時刻の広がりより窓
+    ぶん広い**。だから窓が隣のポートに届かず、数えるのは必ず同じポートの差分になる。
+    答えはポートごとに `searchsorted` していた前の実装と 1 ビットも違わない
+    （`tests/legacy_feature_path.py` と比べる）。
+    """
     n_rows = observations.n_rows
     flow = Flow(
         rentals=np.zeros(n_rows, dtype=np.int32),
@@ -54,46 +64,93 @@ def compute_flow(observations: Observations, window_minutes: int = FLOW_MINUTES)
         n_changes=np.zeros(n_rows, dtype=np.int32),
         minutes_since_last_change=np.full(n_rows, np.nan, dtype=np.float32),
     )
-    window_ms = window_minutes * _MS_PER_MINUTE
-    for station in range(observations.n_stations):
-        rows = observations.rows_of(station)
-        if rows.stop == rows.start:
-            continue
-        _fill_station(observations, rows, window_ms, flow)
+    if n_rows > 0:
+        _fill(observations, window_minutes * _MS_PER_MINUTE, flow)
     return flow
 
 
-def _fill_station(observations: Observations, rows: Span, window_ms: int, flow: Flow) -> None:
-    """1 ポートぶんを書き込む。**観測された行だけで差分を取る。**"""
-    times = observations.observed_at_ms[rows]
-    bikes = observations.bikes[rows]
-    seen = bikes != MISSING
-    if int(seen.sum()) < 2:
-        return
-    change_times = times[seen][1:]
-    delta = np.diff(bikes[seen].astype(np.int32)).astype(np.int32)
+def _fill(observations: Observations, window_ms: int, flow: Flow) -> None:
+    """**観測された行が 2 つ以上あるポートの行だけ**に書く（他は 0 と NaN のまま）。"""
+    keyed = _keyed(observations, window_ms)
+    at_to = np.searchsorted(keyed.change_keys, keyed.row_keys, side="right")
+    at_from = np.searchsorted(keyed.change_keys, keyed.row_keys - window_ms, side="right")
+    rows, delta = keyed.eligible, keyed.delta
+    rentals = _windowed_sum(np.clip(-delta, 0, None).astype(np.int32), at_from, at_to)
+    returns = _windowed_sum(np.clip(delta, 0, None).astype(np.int32), at_from, at_to)
+    changes = _windowed_sum((delta != 0).astype(np.int32), at_from, at_to)
+    since = _since_last_change(keyed, observations.observed_at_ms)
+    flow.rentals[rows] = rentals[rows]
+    flow.returns[rows] = returns[rows]
+    flow.n_changes[rows] = changes[rows]
+    flow.minutes_since_last_change[rows] = since[rows]
 
-    at_from, at_to = _window_bounds(times, change_times, window_ms)
-    flow.rentals[rows] = _windowed_sum(np.clip(-delta, 0, None).astype(np.int32), at_from, at_to)
-    flow.returns[rows] = _windowed_sum(np.clip(delta, 0, None).astype(np.int32), at_from, at_to)
-    flow.n_changes[rows] = _windowed_sum((delta != 0).astype(np.int32), at_from, at_to)
-    flow.minutes_since_last_change[rows] = _since_last_change(times, change_times[delta != 0])
+
+@dataclass(frozen=True)
+class _Keyed:
+    """全ポートの行と差分を、1 本の鍵の上に並べたもの。**鍵はどちらも昇順。**
+
+    差分は**観測された行**（`-1` でない行）と、同じポートの 1 つ前の観測された行との
+    差で、時刻は後ろの行のもの（前の実装の `np.diff(bikes[seen])` と同じ並び）。
+    """
+
+    row_keys: Int64
+    row_station: Int64
+    change_keys: Int64
+    change_station: Int64
+    change_times: Int64
+    delta: Int32
+    #: 観測された行が 2 つ以上あるポートの行。**前の実装が書き込んだ行**
+    eligible: Bools
 
 
-def _window_bounds(times: Int64, change_times: Int64, window_ms: int) -> tuple[Int64, Int64]:
-    """各観測時刻について、窓に入る差分の範囲 `[from, to)` を返す。"""
-    at_to = np.searchsorted(change_times, times, side="right")
-    at_from = np.searchsorted(change_times, times - window_ms, side="right")
-    return at_from, at_to
+def _keyed(observations: Observations, window_ms: int) -> _Keyed:
+    starts = observations.starts
+    station = np.repeat(np.arange(observations.n_stations, dtype=np.int64), np.diff(starts))
+    times = observations.observed_at_ms
+    row_keys = _row_keys(station, times, observations.n_stations, window_ms)
+    seen_rows = np.flatnonzero(observations.bikes != MISSING)
+    seen_station = station[seen_rows]
+    later = np.flatnonzero(np.diff(seen_station) == 0) + 1
+    change_rows = seen_rows[later]
+    bikes = observations.bikes.astype(np.int32)
+    seen_count = np.bincount(seen_station, minlength=observations.n_stations)
+    return _Keyed(
+        row_keys=row_keys,
+        row_station=station,
+        change_keys=row_keys[change_rows],
+        change_station=station[change_rows],
+        change_times=times[change_rows],
+        delta=(bikes[change_rows] - bikes[seen_rows[later - 1]]).astype(np.int32),
+        eligible=seen_count[station] >= 2,
+    )
+
+
+def _row_keys(station: Int64, times: Int64, n_stations: int, window_ms: int) -> Int64:
+    """ポートの番号と時刻を 1 本の鍵にする。**ポートの間は窓より広く空ける。**
+
+    窓は前にも後ろにも隣へ届かない（`abs`。負の窓でも前の実装と同じ答えになる）。
+    **鍵が `int64` に収まらなければ止める**——黙って桁があふれると、隣のポートの差分を
+    数えてしまう。実データ（2 万ポート・数日の幅）の上限は 1 万年を超えるので、
+    これに当たるのは時刻が壊れた入力だけである。
+    """
+    origin = int(times.min())
+    stride = int(times.max()) - origin + abs(window_ms) + 1
+    if stride * n_stations > _KEY_MAX:
+        raise ValueError(f"流量の鍵が int64 に収まらない（ポート {n_stations}・幅 {stride} ms）")
+    return station * stride + (times - origin)
 
 
 def _windowed_sum(values: Int32, at_from: Int64, at_to: Int64) -> Int32:
-    """累積和の差で窓の合計を出す。**`int64` で足す**（`int16` のままだと桁があふれる）。"""
+    """累積和の差で窓の合計を出す。**`int64` で足す**（`int16` のままだと桁があふれる）。
+
+    累積和は全ポートを通したものだが、差を取るのは同じポートの中だけなので、手前の
+    ポートのぶんは打ち消し合う。
+    """
     cumulative = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(values, dtype=np.int64)])
     return np.asarray(cumulative[at_to] - cumulative[at_from], dtype=np.int32)
 
 
-def _since_last_change(times: Int64, change_times: Int64) -> Float32:
+def _since_last_change(keyed: _Keyed, times: Int64) -> Float32:
     """最後に台数が変わってからの分。**`CHANGE_CAP_MINUTES` で頭打ちにする。**
 
     上限を入れるのは、**この列だけが読んだ窓の長さで値が変わる**ためである。学習は
@@ -102,13 +159,16 @@ def _since_last_change(times: Int64, change_times: Int64) -> Float32:
     （W4 プラン §4 の W4-10）。
 
     **変化が見えなければ上限そのもの**を返す（NaN にしない）。「180 分以上動いて
-    いない」は分かっている情報で、捨てる理由が無い。
+    いない」は分かっている情報で、捨てる理由が無い。鍵の上で手前にある変化が
+    **別のポートのものなら、このポートの変化はまだ見えていない**。
     """
     cap = float(CHANGE_CAP_MINUTES)
-    if len(change_times) == 0:
+    moved = keyed.delta != 0
+    if not moved.any():
         return np.full(len(times), cap, dtype=np.float32)
-    taken = np.searchsorted(change_times, times, side="right")
-    elapsed = np.where(
-        taken > 0, (times - change_times[np.maximum(taken - 1, 0)]) / _MS_PER_MINUTE, cap
-    )
+    change_times = keyed.change_times[moved]
+    taken = np.searchsorted(keyed.change_keys[moved], keyed.row_keys, side="right")
+    previous = np.maximum(taken - 1, 0)
+    same = (taken > 0) & (keyed.change_station[moved][previous] == keyed.row_station)
+    elapsed = np.where(same, (times - change_times[previous]) / _MS_PER_MINUTE, cap)
     return np.asarray(np.minimum(elapsed, cap), dtype=np.float32)
