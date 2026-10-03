@@ -7,8 +7,10 @@
   * 観測されていない値（`-1`）を容量として数えない
 """
 
+import random
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
+from functools import reduce
 
 import pyarrow as pa
 import pytest
@@ -27,6 +29,7 @@ from bikechance_ml.features.reference_snapshot import (
     capacity_estimates,
     capacity_rows,
     daily_capacity_max,
+    merge_daily_max,
     to_daily_max,
     to_neighbors_table,
     to_reference,
@@ -177,6 +180,77 @@ def test_the_two_systems_do_not_collide() -> None:
 
 def test_an_empty_day_gives_no_estimate() -> None:
     assert daily_capacity_max(SNAPSHOT_SCHEMA.empty_table()) == {}
+
+
+# ── 1 時間ずつ畳む（W6-35、D-40）──────────────────────────────
+#: 性質検査で選ぶポート。**`station_id` はシステムを跨いで衝突する**ので、同じ "1" を両方に置く
+PORTS: tuple[tuple[str, str], ...] = (
+    ("hellocycling", "1"),
+    ("hellocycling", "2"),
+    ("docomo-cycle", "1"),
+    ("docomo-cycle", "x"),
+)
+
+
+def test_merging_keeps_the_larger_total_and_adds_new_ports() -> None:
+    best = {("hellocycling", "a"): 11, ("hellocycling", "b"): 4}
+    hour = {("hellocycling", "a"): 9, ("hellocycling", "b"): 6, ("docomo-cycle", "a"): 3}
+    assert merge_daily_max(best, hour) == {
+        ("hellocycling", "a"): 11,
+        ("hellocycling", "b"): 6,
+        ("docomo-cycle", "a"): 3,
+    }
+
+
+def test_merging_does_not_change_its_inputs() -> None:
+    """畳むたびに新しい辞書を返す。**前の時間の答えを書き換えない。**"""
+    best = {("hellocycling", "a"): 1}
+    hour = {("hellocycling", "a"): 5}
+    merge_daily_max(best, hour)
+    assert best == {("hellocycling", "a"): 1}
+    assert hour == {("hellocycling", "a"): 5}
+
+
+def test_merging_nothing_gives_nothing() -> None:
+    """**観測の無い時間は、鍵を作らない**（0 を入れると「容量 0 のポート」になる）。"""
+    assert merge_daily_max({}, {}) == {}
+    assert merge_daily_max({("hellocycling", "a"): 7}, {}) == {("hellocycling", "a"): 7}
+
+
+def test_folding_hour_by_hour_gives_the_same_answer_as_joining_the_day() -> None:
+    """**最大は結合的**：1 日ぶんをつなげて取っても、1 時間ずつ取って畳んでも同じ（所見 212）。
+
+    観測されない値（-1）、ある時間にしか出ないポート、全部が -1 の時間、空の時間を混ぜる。
+    """
+    rng = random.Random(20261003)
+    for _ in range(200):
+        hours = [random_hour(rng) for _ in range(rng.randint(0, 6))]
+        folded = reduce(fold_hour, hours, no_ports())
+        joined = pa.concat_tables(hours) if hours else SNAPSHOT_SCHEMA.empty_table()
+        assert folded == daily_capacity_max(joined)
+
+
+def fold_hour(best: dict[tuple[str, str], int], hour: pa.Table) -> dict[tuple[str, str], int]:
+    """ジョブと同じ畳み方：その時間の最大を出して、ここまでの最大に畳む。"""
+    return merge_daily_max(best, daily_capacity_max(hour))
+
+
+def no_ports() -> dict[tuple[str, str], int]:
+    return {}
+
+
+def random_hour(rng: random.Random) -> pa.Table:
+    """1 時間ぶん：0〜12 行。値の 3 割は -1（観測されない）。"""
+    return snapshot_rows(
+        [
+            (*rng.choice(PORTS), observed_or_missing(rng), observed_or_missing(rng))
+            for _ in range(rng.randint(0, 12))
+        ]
+    )
+
+
+def observed_or_missing(rng: random.Random) -> int:
+    return -1 if rng.random() < 0.3 else rng.randint(0, 30)
 
 
 # ── 直近 7 版の最大 ───────────────────────────────────────────
