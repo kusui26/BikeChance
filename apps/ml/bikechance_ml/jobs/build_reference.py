@@ -45,6 +45,7 @@ from bikechance_ml.features.reference_snapshot import (
     STATIONS_SCHEMA,
     capacity_rows,
     daily_capacity_max,
+    merge_daily_max,
     to_daily_max,
     to_neighbors_table,
     to_stations_table,
@@ -52,7 +53,6 @@ from bikechance_ml.features.reference_snapshot import (
 from bikechance_ml.io.supabase import PARQUET_BUCKET, open_storage
 from bikechance_ml.jobs import recording
 from bikechance_ml.jobs.build_features import SYSTEM_IDS, to_parquet_bytes
-from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from bikechance_ml.jobs.snapshot_table import has_current_schema, parquet_path
 from bikechance_ml.jobs.snapshot_table import read_table as read_snapshot_table
 
@@ -88,33 +88,44 @@ def build_tables(
 ) -> tuple[pa.Table, pa.Table, tuple[str, ...]]:
     """その日ぶんの 2 つの表を作る。**欠けた時間帯は記録して進む**（補間しない）。"""
     systems = tuple(read_reference(source, system_id) for system_id in SYSTEM_IDS)
-    snapshots, missing = load_day(source, day)
+    daily_max, missing = load_daily_max(source, day)
     previous = load_previous(source, day, CAPACITY_DAYS - 1)
-    stations = to_stations_table(
-        systems, daily_capacity_max(snapshots), previous, built_at=built_at
-    )
+    stations = to_stations_table(systems, daily_max, previous, built_at=built_at)
     neighbors = to_neighbors_table(systems, built_at=built_at)
     return stations, neighbors, missing
 
 
-def load_day(source: ReferencePort, day: date) -> tuple[pa.Table, tuple[str, ...]]:
-    """その JST 暦日ちょうどのスナップショットを読む（24 時間 × システム）。"""
-    tables: list[pa.Table] = []
+def load_daily_max(
+    source: ReferencePort, day: date
+) -> tuple[dict[tuple[str, str], int], tuple[str, ...]]:
+    """その JST 暦日の `bikes + docks` の最大を、**1 時間ずつ読んで畳む**（W6-35、D-40）。
+
+    **1 日ぶん（24 時間 × システム）をつなげない。** つなげると 1,100 万行・531 MB の表を
+    抱えて山が 1.35 GB になり、推論と同じインスタンスの山を 2 GB の枠の 97% まで押し上げた
+    （W6 プランの所見 212）。1 時間ずつなら 228 MB で、答えは同じ（10-02 の本番で完全一致）。
+    """
+    best: dict[tuple[str, str], int] = {}
     missing: list[str] = []
     for system_id in SYSTEM_IDS:
         for hour in day_hours(day):
-            body = source.download(PARQUET_BUCKET, parquet_path(system_id, hour))
-            label = f"{system_id} {hour:%Y-%m-%dT%H}Z"
-            if body is None:
+            table, label = read_hour(source, system_id, hour)
+            if table is None:
                 missing.append(label)
-                continue
-            if not has_current_schema(body):
-                # **古い形は使わない。** 静かに null で埋めると容量が過小になる（§12 の 97）
-                missing.append(f"{label}（古い形）")
-                continue
-            tables.append(read_snapshot_table(body, label))
-    table = pa.concat_tables(tables) if tables else SNAPSHOT_SCHEMA.empty_table()
-    return table, tuple(missing)
+            else:
+                best = merge_daily_max(best, daily_capacity_max(table))
+    return best, tuple(missing)
+
+
+def read_hour(source: ReferencePort, system_id: str, hour: datetime) -> tuple[pa.Table | None, str]:
+    """1 時間ぶんのスナップショットを読む。**読めなければ None と、欠けとして残す文言。**"""
+    label = f"{system_id} {hour:%Y-%m-%dT%H}Z"
+    body = source.download(PARQUET_BUCKET, parquet_path(system_id, hour))
+    if body is None:
+        return None, label
+    if not has_current_schema(body):
+        # **古い形は使わない。** 静かに null で埋めると容量が過小になる（§12 の 97）
+        return None, f"{label}（古い形）"
+    return read_snapshot_table(body, label), label
 
 
 def load_previous(

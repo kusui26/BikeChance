@@ -11,12 +11,28 @@
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from bikechance_ml.features.grid import jst_yesterday
+from bikechance_ml.features.grid import day_hours, jst_yesterday
 from bikechance_ml.features.reference import NeighborRow, StationAttributeRow, StationGeoRow
-from bikechance_ml.features.reference_snapshot import NEIGHBORS_NAME, STATIONS_NAME
-from bikechance_ml.jobs.build_reference import JOB_NAME, ReferencePort, build_and_upload
+from bikechance_ml.features.reference_snapshot import (
+    NEIGHBORS_NAME,
+    STATIONS_NAME,
+    daily_capacity_max,
+)
+from bikechance_ml.jobs.build_features import SYSTEM_IDS
+from bikechance_ml.jobs.build_reference import (
+    JOB_NAME,
+    ReferencePort,
+    build_and_upload,
+    load_daily_max,
+    read_hour,
+)
+from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
+from bikechance_ml.jobs.snapshot_table import parquet_path
+from bikechance_ml.jobs.snapshot_table import to_parquet_bytes as snapshot_bytes
 
 DAY = date(2026, 9, 9)
 NOW = datetime(2026, 9, 10, 20, 0, tzinfo=UTC)
@@ -161,3 +177,122 @@ def test_yesterday_is_the_jst_day_before() -> None:
     """05:00 JST に走らせるので、**前日ぶんが揃っている**。"""
     # 2026-09-10 20:00 UTC = 2026-09-11 05:00 JST → 前日は 09-10
     assert jst_yesterday(NOW) == date(2026, 9, 10)
+
+
+# ── 1 時間ずつ畳む（W6-35、D-40）──────────────────────────────
+#: その日の 24 時間（UTC の時の頭。09-08 15:00 〜 09-09 14:00）
+HOURS = day_hours(DAY)
+
+#: 時間ごとのスナップショット：(システム, 何時間目, [(ポート, bikes, docks)])
+HOURLY: tuple[tuple[str, int, tuple[tuple[str, int, int], ...]], ...] = (
+    ("hellocycling", 0, (("a", 3, 5),)),
+    ("hellocycling", 5, (("a", 2, 9), ("b", -1, -1))),
+    ("hellocycling", 7, (("b", 4, 4), ("a", 1, 1))),
+    ("docomo-cycle", 3, (("a", 10, 2),)),
+    ("docomo-cycle", 20, (("a", -1, 30), ("a", 6, 6))),
+)
+
+#: 古い形（`fetched_at` が無い）のファイルが置かれている時間（W3 プラン §12 の 96）
+OLD_FORM = ("hellocycling", 10)
+
+
+def hour_table(system_id: str, index: int, rows: Sequence[tuple[str, int, int]]) -> pa.Table:
+    at = HOURS[index]
+    return pa.Table.from_pylist(
+        [
+            {
+                "system_id": system_id,
+                "station_id": station_id,
+                "observed_at": at,
+                "fetched_at": at,
+                "bikes": bikes,
+                "docks": docks,
+                "flags": 7,
+                "reported_age_s": 0,
+            }
+            for station_id, bikes, docks in rows
+        ],
+        schema=SNAPSHOT_SCHEMA,
+    )
+
+
+def old_form_body() -> bytes:
+    """`fetched_at` の無い古い形。**読めても使わない**（容量が過小になる。§12 の 97）。"""
+    table = hour_table(*OLD_FORM, (("a", 50, 50),)).drop_columns(["fetched_at"])
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink)
+    return bytes(sink.getvalue())
+
+
+class SnapshotPort(FakePort):
+    """その日の毎時スナップショットを持つ Storage。**ほかの時間と前の版は無い。**"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bodies = {
+            parquet_path(system_id, HOURS[index]): snapshot_bytes(
+                hour_table(system_id, index, rows)
+            )
+            for system_id, index, rows in HOURLY
+        }
+        self.bodies[parquet_path(OLD_FORM[0], HOURS[OLD_FORM[1]])] = old_form_body()
+
+    def download(self, bucket: str, path: str) -> bytes | None:
+        return self.bodies.get(path)
+
+
+def joined_day() -> pa.Table:
+    """**前のやり方**：1 日ぶんをつなげた表（答え合わせに使う）。"""
+    return pa.concat_tables(hour_table(system_id, index, rows) for system_id, index, rows in HOURLY)
+
+
+def test_folding_the_hours_gives_the_same_capacity_as_joining_the_day() -> None:
+    """**1 日ぶんをつなげない**（所見 212）。答えはつなげて取ったものと同じ。"""
+    daily_max, _ = load_daily_max(SnapshotPort(), DAY)
+    assert daily_max == daily_capacity_max(joined_day())
+    assert daily_max == {
+        ("hellocycling", "a"): 11,
+        ("hellocycling", "b"): 8,
+        ("docomo-cycle", "a"): 12,
+    }
+
+
+def test_missing_and_old_hours_are_reported_as_before() -> None:
+    """**欠けた時間帯の数と文言は前と同じ**（`missing_hours` の見張りが読む）。古い形は使わない。"""
+    _, missing = load_daily_max(SnapshotPort(), DAY)
+    served = {(system_id, index) for system_id, index, _ in HOURLY}
+    # 並びはシステムごと・時間の順。古い形は「（古い形）」を付けて数える（前のやり方と同じ）
+    expected = tuple(
+        f"{system_id} {hour:%Y-%m-%dT%H}Z"
+        + ("（古い形）" if (system_id, index) == OLD_FORM else "")
+        for system_id in SYSTEM_IDS
+        for index, hour in enumerate(HOURS)
+        if (system_id, index) not in served
+    )
+    assert missing == expected
+    assert len(missing) == 48 - len(HOURLY)
+
+
+def test_one_hour_is_read_on_its_own() -> None:
+    port = SnapshotPort()
+    table, label = read_hour(port, "hellocycling", HOURS[5])
+    assert label == f"hellocycling {HOURS[5]:%Y-%m-%dT%H}Z"
+    assert table is not None and table.num_rows == 2
+    assert read_hour(port, "hellocycling", HOURS[1]) == (
+        None,
+        f"hellocycling {HOURS[1]:%Y-%m-%dT%H}Z",
+    )
+    old, old_label = read_hour(port, OLD_FORM[0], HOURS[OLD_FORM[1]])
+    assert old is None and old_label.endswith("（古い形）")
+
+
+def test_the_whole_job_writes_the_folded_capacity() -> None:
+    """端から端まで：**置く表と DB に写す容量が、畳んだ答えを使う。**"""
+    port = SnapshotPort()
+    summary = run(port)
+    assert summary["missing_hours"] == 48 - len(HOURLY)
+    # 台帳にあるのは両システムの "a" だけ（`FakePort`）。前の版が無いので、当日の最大がそのまま入る
+    assert summary["with_capacity_est"] == 2
+    by_port = {(row["system_id"], row["station_id"]): row for row in port.capacity_rows}
+    assert by_port[("hellocycling", "a")]["capacity_est"] == 11
+    assert by_port[("docomo-cycle", "a")]["capacity_est"] == 12

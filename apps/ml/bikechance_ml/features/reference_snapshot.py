@@ -208,6 +208,19 @@ def daily_capacity_max(snapshots: pa.Table) -> dict[tuple[str, str], int]:
     }
 
 
+def merge_daily_max(
+    best: Mapping[tuple[str, str], int], hour: Mapping[tuple[str, str], int]
+) -> dict[tuple[str, str], int]:
+    """1 時間ぶんの `daily_capacity_max` を、その日の最大に畳み込む（W6-35、D-40）。
+
+    **最大は結合的**なので、1 日ぶんをつなげてから取っても、1 時間ずつ取って畳んでも
+    同じ答えになる。つなげると 1 日 1,100 万行の表を抱えて山が 1.35 GB になり、推論と
+    同じインスタンスの山を 2 GB の枠の 97% まで押し上げた（W6 プランの所見 212）。
+    **どの時間にも観測が無いポートは、鍵ごと出ないまま**（`daily_capacity_max` と同じ）。
+    """
+    return {**best, **{key: max(value, best.get(key, value)) for key, value in hour.items()}}
+
+
 def to_daily_max(stations: pa.Table) -> dict[tuple[str, str], int]:
     """既に書いた版から `capacity_daily_max` を読み直す（前の版を畳むときに使う）。"""
     _require(stations, STATIONS_SCHEMA)
