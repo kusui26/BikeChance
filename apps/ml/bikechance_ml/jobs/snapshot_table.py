@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
+import numpy as np
+import numpy.typing as npt
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -44,6 +46,10 @@ SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("reported_age_s", pa.int16(), nullable=False),
     ]
 )
+
+
+#: 時刻の列の型。**`SCHEMA` と同じ**（ミリ秒・UTC）。
+TIMESTAMP_MS: Final[pa.DataType] = pa.timestamp("ms", tz="UTC")
 
 
 class SchemaMismatchError(ValueError):
@@ -134,18 +140,26 @@ def to_table(
 
     **配列長より外側の `idx` は行にしない**（§9.2）。当時まだ台帳に無かったポートで、
     行を作ると「登録済みだが現れなかった」（`-1`）と区別できなくなる。
+
+    **列は Python の値を 1 つずつ渡さず、まとめて作る**（W6 の PR G の②、契約 40）。時刻は
+    スナップショットごとに 1 回だけ変換して繰り返し、`station_id` は台帳から位置で引く。
+    **並べ替える前の行の順と、並べ替えの呼び方は前と同じ**なので、出力は 1 バイトも変わらない
+    （前の実装は `tests/legacy_feature_path.py` に写してあり、性質検査が突き合わせる）。
     """
-    columns = _accumulate(station_ids, snapshots)
+    ordered = sorted(snapshots, key=lambda one: one.observed_at)
+    for snapshot in ordered:
+        _check(snapshot, len(station_ids))
+    lengths = np.array([one.length() for one in ordered], dtype=np.int64)
     table = pa.table(
         {
-            "system_id": pa.array([system_id] * len(columns.station_id), type=pa.string()),
-            "station_id": pa.array(columns.station_id, type=pa.string()),
-            "observed_at": pa.array(columns.observed_at, type=pa.timestamp("ms", tz="UTC")),
-            "fetched_at": pa.array(columns.fetched_at, type=pa.timestamp("ms", tz="UTC")),
-            "bikes": pa.array(columns.bikes, type=pa.int16()),
-            "docks": pa.array(columns.docks, type=pa.int16()),
-            "flags": pa.array(columns.flags, type=pa.int16()),
-            "reported_age_s": pa.array(columns.reported_age_s, type=pa.int16()),
+            "system_id": pa.repeat(pa.scalar(system_id, pa.string()), int(lengths.sum())),
+            "station_id": pa.array(station_ids, type=pa.string()).take(_positions(lengths)),
+            "observed_at": _repeated_times([one.observed_at for one in ordered], lengths),
+            "fetched_at": _repeated_times([one.fetched_at for one in ordered], lengths),
+            "bikes": _joined([one.bikes for one in ordered]),
+            "docks": _joined([one.docks for one in ordered]),
+            "flags": _joined([one.flags for one in ordered]),
+            "reported_age_s": _joined([one.reported_age_s for one in ordered]),
         },
         schema=SCHEMA,
     )
@@ -153,32 +167,35 @@ def to_table(
     return table.sort_by([("station_id", "ascending"), ("observed_at", "ascending")])
 
 
-@dataclass
-class _Columns:
-    """組み立て途中の列。表を作るまでの間だけ使う。"""
-
-    station_id: list[str]
-    observed_at: list[datetime]
-    fetched_at: list[datetime]
-    bikes: list[int]
-    docks: list[int]
-    flags: list[int]
-    reported_age_s: list[int]
+def _positions(lengths: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
+    """各スナップショットの中での台帳の位置（`0, 1, …, 長さ − 1` を順につなげたもの）。"""
+    total = int(lengths.sum())
+    firsts = np.repeat(np.cumsum(lengths) - lengths, lengths)
+    return np.arange(total, dtype=np.int64) - firsts
 
 
-def _accumulate(station_ids: Sequence[str], snapshots: Sequence[Snapshot]) -> _Columns:
-    columns = _Columns([], [], [], [], [], [], [])
-    for snapshot in sorted(snapshots, key=lambda one: one.observed_at):
-        _check(snapshot, len(station_ids))
-        length = snapshot.length()
-        columns.station_id.extend(station_ids[:length])
-        columns.observed_at.extend([snapshot.observed_at] * length)
-        columns.fetched_at.extend([snapshot.fetched_at] * length)
-        columns.bikes.extend(snapshot.bikes)
-        columns.docks.extend(snapshot.docks)
-        columns.flags.extend(snapshot.flags)
-        columns.reported_age_s.extend(snapshot.reported_age_s)
-    return columns
+def _repeated_times(times: Sequence[datetime], lengths: npt.NDArray[np.int64]) -> pa.Array:
+    """スナップショットの時刻を、その行数ぶん繰り返す。
+
+    **ミリ秒への変換は前と同じく pyarrow に任せる**（マイクロ秒は切り捨て）。変換するのは
+    スナップショットごとに 1 回で、繰り返すのは整数のまま。
+    """
+    milliseconds = pa.array(times, type=TIMESTAMP_MS).cast(pa.int64()).to_numpy()
+    return pa.array(np.repeat(milliseconds, lengths), type=pa.int64()).cast(TIMESTAMP_MS)
+
+
+def _joined(arrays: Sequence[Sequence[int]]) -> pa.Array:
+    """スナップショットの配列をつなげて `int16` にする。**範囲外は前と同じく止める**。
+
+    止まるときの例外も前と同じ `ArrowInvalid` である。
+
+    要素が整数であることは、読み込みの型検査（`json_shape.as_int_list`）が確かめてある。
+    """
+    if not arrays:
+        return pa.array([], type=pa.int16())
+    return pa.array(
+        np.concatenate([np.asarray(one, dtype=np.int64) for one in arrays]), type=pa.int16()
+    )
 
 
 def count_missing(table: pa.Table) -> int:

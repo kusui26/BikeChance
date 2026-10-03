@@ -22,6 +22,7 @@ from typing import Final
 import numpy as np
 import numpy.typing as npt
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from bikechance_ml.features.arrays import Int16, Int32, Int64, ScalarT, Span
 
@@ -69,13 +70,7 @@ def to_observations(table: pa.Table, keys: Sequence[tuple[str, str]]) -> Observa
     **`keys` に無いポートの行は捨てる**（台帳が正）。逆に、行が 1 つも無いポートは
     空の区間になる。
     """
-    position = {key: index for index, key in enumerate(keys)}
-    pairs = zip(
-        table.column("system_id").to_pylist(), table.column("station_id").to_pylist(), strict=True
-    )
-    mapped = np.fromiter(
-        (position.get(pair, NO_ROW) for pair in pairs), dtype=np.int64, count=table.num_rows
-    )
+    mapped = _positions(table, keys)
     keep = mapped >= 0
     order = np.lexsort((_int64(table, "observed_at"), mapped))
     order = order[keep[order]]
@@ -90,6 +85,40 @@ def to_observations(table: pa.Table, keys: Sequence[tuple[str, str]]) -> Observa
         flags=_int16(table, "flags")[order],
         reported_age_s=_int16(table, "reported_age_s")[order],
     )
+
+
+def _positions(table: pa.Table, keys: Sequence[tuple[str, str]]) -> Int64:
+    """各行のポートの、`keys` の中での位置。**無ければ `NO_ROW`。**
+
+    前は行ごとに Python の `dict` を引いていた（W6 の PR G の③、契約 40）。いまは
+    システムごとに `index_in` でまとめて引く。**同じ鍵が 2 度あれば後ろの位置を採る**
+    （前の `dict` の内包表記と同じ）。
+    """
+    mapped = np.full(table.num_rows, NO_ROW, dtype=np.int64)
+    if table.num_rows == 0:
+        return mapped
+    systems = table.column("system_id").combine_chunks()
+    stations = table.column("station_id").combine_chunks()
+    for system_id, (names, places) in _last_positions(keys).items():
+        rows = np.flatnonzero(pc.equal(systems, system_id).to_numpy(zero_copy_only=False))
+        found = pc.fill_null(pc.index_in(stations.take(rows), value_set=names), -1)
+        hit = np.asarray(found.to_numpy(zero_copy_only=False), dtype=np.int64)
+        mapped[rows[hit >= 0]] = places[hit[hit >= 0]]
+    return mapped
+
+
+def _last_positions(keys: Sequence[tuple[str, str]]) -> dict[str, tuple[pa.Array, Int64]]:
+    """システムごとに、`station_id` の並びと、その `keys` の中での位置（同じ鍵は後ろを採る）。"""
+    by_system: dict[str, dict[str, int]] = {}
+    for index, (system_id, station_id) in enumerate(keys):
+        by_system.setdefault(system_id, {})[station_id] = index
+    return {
+        system_id: (
+            pa.array(list(places), type=pa.string()),
+            np.array(list(places.values()), dtype=np.int64),
+        )
+        for system_id, places in by_system.items()
+    }
 
 
 def unreferenced_stations(table: pa.Table, keys: Sequence[tuple[str, str]]) -> int:

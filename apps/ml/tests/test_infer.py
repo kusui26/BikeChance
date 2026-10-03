@@ -10,12 +10,14 @@ PR C から、除外も暦も**学習と同じ経路**（`build_now`）が決め
 「推論だけの除外規則」は無く、仕込んだ観測がそのまま効くかどうかを見る。
 """
 
+import dataclasses
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Final
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -53,9 +55,11 @@ from bikechance_ml.jobs.infer import (
     ProfileRequiredError,
     batches,
     confidence_of,
+    forget_references,
     grid_time,
     predict,
     read_features,
+    reference_for,
     run_inference,
     to_detail,
     to_payload,
@@ -80,14 +84,16 @@ from tests import range_fixture
 
 @pytest.fixture(autouse=True)
 def _clean_cache() -> Iterator[None]:
-    """**成果物のキャッシュはモジュールに残る。** 検査ごとに捨てる。
+    """**成果物と参照のキャッシュはモジュールに残る。** 検査ごとに捨てる。
 
-    本番では版が変われば入れ替わるので問題にならないが、検査は同じ版名で
+    本番では版が変われば入れ替わるので問題にならないが、検査は同じ版名（同じ日付）で
     中身の違う口を使うので、持ち越すと前の検査の答えが出る。
     """
     forget()
+    forget_references()
     yield
     forget()
+    forget_references()
 
 
 OPEN, SUSPENDED, MISSING = 7, 1, -1
@@ -284,6 +290,11 @@ class FakePort:
     model_downloads: list[str] = field(default_factory=list)
     #: 書いた順（`upsert` と `log`）。**shadow は配って記録してから**を見る（契約 34）
     events: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # **新しい口は新しい世界。** 参照のキャッシュは日付で引くので、同じ日付で中身の違う版を
+        # 持つ口を 1 つの検査に並べると、前の口の参照が出る（本番では版の中身は日付で決まる）
+        forget_references()
 
     def read_base_observed_at(self, system_id: str) -> datetime | None:
         return self.base
@@ -566,6 +577,11 @@ def test_the_record_does_not_repeat_the_columns() -> None:
         "profile_reason",
         "model_load_ms",
         "rss_mb",
+        # **PR G で足した**（W6-20。`features_ms` の内訳と、参照を使い回せたか）
+        "reference_ms",
+        "reference_cache",
+        "observations_ms",
+        "build_ms",
     }
     assert to_record(_summary(cpu_ms=42))["cpu_ms"] == 42
 
@@ -949,6 +965,122 @@ def test_it_reads_yesterdays_reference() -> None:
     yesterday = (AT.astimezone(JST).date() - timedelta(days=1)).isoformat()
     assert port.downloads, "参照スナップショットを読んでいない"
     assert all(f"date={yesterday}" in path for path in port.downloads)
+
+
+# ── 参照の使い回し（W6 の PR G の⑤、W6-20）─────────────────────
+@dataclass
+class SomeDaysMissing(FakePort):
+    """参照の版が、日によってまだ置かれていない（05:00 JST の `/ml/reference` の前）。"""
+
+    missing_days: set[date] = field(default_factory=set)
+
+    def download(self, bucket: str, path: str) -> bytes | None:
+        if bucket != MODEL_BUCKET and serving.day_of(path) in self.missing_days:
+            self.downloads.append(path)
+            return None
+        return super().download(bucket, path)
+
+
+def _reads_of(port: FakePort, day: date) -> int:
+    """その日の参照を読みに行った回数（無かった版を確かめた往復も数える）。"""
+    return sum(1 for one in port.downloads if serving.day_of(one) == day)
+
+
+def _ipc(table: pa.Table) -> bytes:
+    """表のバイト列（Arrow IPC）。**NaN も NULL の位置も型も含めて**比べるため。"""
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table.combine_chunks())
+    return bytes(sink.getvalue())
+
+
+def test_a_reused_reference_gives_the_same_features() -> None:
+    """**使い回しても答えは 1 バイトも変わらない**（契約 40）。2 周期目は読みも組み立てもしない。"""
+    port = ready_port()
+    fresh = read_features(port, "hellocycling", AT, frozenset())
+    reused = read_features(port, "hellocycling", AT, frozenset())
+    assert (fresh.stages.reference_cache, reused.stages.reference_cache) == ("miss", "hit")
+    assert _reads_of(port, _yesterday()) == 2, "2 周期目に参照を読み直した（2 本は 1 周期目）"
+    assert _ipc(reused.ready.table) == _ipc(fresh.ready.table)
+    assert reused.ready.stats == fresh.ready.stats
+
+
+def test_before_dawn_it_still_checks_for_yesterdays_reference() -> None:
+    """**朝の穴でも、前日の版が置かれたかを毎周期確かめる**（使い回す前と同じ往復）。
+
+    持っているのが前々日の版でも、前日の版が置かれた次の周期から移る。使い回したせいで
+    「05:00 を過ぎても古い版のまま」にならない。
+    """
+    older = _yesterday() - timedelta(days=1)
+    port = SomeDaysMissing(body=to_bytes(ARTIFACT), missing_days={_yesterday()})
+    first = read_features(port, "hellocycling", AT, frozenset())
+    second = read_features(port, "hellocycling", AT, frozenset())
+    assert (first.reference_day, second.reference_day) == (older, older)
+    assert (first.stages.reference_cache, second.stages.reference_cache) == ("miss", "hit")
+    assert (_reads_of(port, _yesterday()), _reads_of(port, older)) == (2, 2)
+    # 05:00 JST：前日の版が置かれた
+    port.missing_days = set()
+    third = read_features(port, "hellocycling", AT, frozenset())
+    assert (third.reference_day, third.stages.reference_cache) == (_yesterday(), "miss")
+
+
+def test_after_midnight_the_held_reference_serves_as_the_older_one() -> None:
+    """**日付が変わると、持っている版は「1 つ古い版」になる。**
+
+    前日の版が置かれるまでは、持っている版をそのまま使い、読み直さない。
+    """
+    today = AT.astimezone(JST).date()
+    port = SomeDaysMissing(body=to_bytes(ARTIFACT), missing_days={today})
+    before = read_features(port, "hellocycling", AT, frozenset())
+    midnight = datetime.combine(today + timedelta(days=1), time(0, 30), tzinfo=JST)
+    after = read_features(port, "hellocycling", midnight.astimezone(UTC), frozenset())
+    assert (before.reference_day, after.reference_day) == (_yesterday(), _yesterday())
+    assert after.stages.reference_cache == "hit"
+    assert _reads_of(port, _yesterday()) == 2, "持っている版を読み直した"
+
+
+def test_a_failed_read_is_not_taken_as_missing() -> None:
+    """**読めなかった版を「無い」と読み替えない**（黙って古い版に下がらない。使い回す前と同じ）。"""
+
+    @dataclass
+    class Broken(FakePort):
+        def download(self, bucket: str, path: str) -> bytes | None:
+            if bucket != MODEL_BUCKET:
+                raise SupabaseError(SupabaseFailure("storage", 503, "HttpStatus", "unavailable"))
+            return super().download(bucket, path)
+
+    with pytest.raises(SupabaseError):
+        read_features(Broken(body=to_bytes(ARTIFACT)), "hellocycling", AT, frozenset())
+
+
+def test_the_held_reference_cannot_be_written() -> None:
+    """**使い回す配列は書き込めない。** 書き換える道があれば、次の周期の答えが黙って変わる。"""
+    port = ready_port()
+    held, reused = reference_for(port, AT.astimezone(JST).date())
+    assert not reused
+    arrays = [
+        getattr(record, one.name)
+        for record in (held.facts, held.links)
+        for one in dataclasses.fields(record)
+    ]
+    assert all(not one.flags.writeable for one in arrays if isinstance(one, np.ndarray))
+    with pytest.raises(ValueError, match="read-only"):
+        held.facts.lat[0] = 0.0
+
+
+def test_the_stages_of_the_features_are_recorded() -> None:
+    """**段ごとの所要を残す**（W6 の PR G、W6-20）。内訳の和は `features_ms` を超えない。"""
+    port = ready_port()
+    summary = run_inference(port, "hellocycling", NOW)
+    run_inference(port, "docomo-cycle", NOW)
+    first, second = port.details
+    assert first is not None and second is not None
+    stages = [first[name] for name in ("reference_ms", "observations_ms", "build_ms")]
+    numbers = [one for one in stages if isinstance(one, int) and one >= 0]
+    assert len(numbers) == len(stages)
+    assert sum(numbers) <= summary.features_ms
+    # 2 系統目は、1 系統目が組み立てた参照を使い回す
+    assert (first["reference_cache"], second["reference_cache"]) == ("miss", "hit")
 
 
 def test_it_reads_the_two_windows_of_its_own_system_and_one_of_the_other() -> None:

@@ -30,12 +30,19 @@ B3 は `prof_*` を読まないので、配る確率は変わらない。**`prof
 列にも書かない。shadow の例外は `detail.shadow` に詰め替え、**active の結果を変えない**。
 `prof_*` を読む shadow は、プロファイルを読めた周期だけ歩く（契約 33）。shadow を上げ下げする
 のは人である（`promote_model_version()`・`retire_model_version()`。契約 39）。
+
+**前日の参照スナップショットは、組み立てた形で使い回す**（W6 の PR G の⑤、W6-20）。版は
+1 日 1 回（05:00 JST）しか変わらないのに、5 分毎に読んで組み立て直していた。**読む版の
+決め方は変えない**——新しい版から順に確かめるので、05:00 に版が置かれた次の周期から移る。
+**段ごとの所要**（参照・観測・`build_now`）を `detail` に出す。
 """
 
+import dataclasses
 import resource
 import sys
+import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Final, Protocol
@@ -51,14 +58,12 @@ from bikechance_ml.features.constants import (
     MAX_STALENESS_S,
 )
 from bikechance_ml.features.grid import from_epoch_ms, jst_date, profile_path, to_epoch_ms
-from bikechance_ml.features.reference import SystemReference
 from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.io import range_file
 from bikechance_ml.io.supabase import PARQUET_BUCKET
 from bikechance_ml.jobs import forecast_log
 from bikechance_ml.jobs.build_features import (
     SYSTEM_IDS,
-    Estimates,
     MissingReferenceError,
     read_reference_on,
 )
@@ -159,16 +164,34 @@ class ProfileRead:
 
 
 @dataclass(frozen=True)
+class Stages:
+    """特徴量づくりの段ごとの所要（W6 の PR G、W6-20）。**`features_ms` の内訳**である。
+
+    残りはプロファイル（`ProfileRead.load_ms`）と天気の読み。
+    """
+
+    #: 参照の組み立て（読み・`to_facts`・`to_links`）。**使い回せた周期はほぼ 0**
+    reference_ms: int
+    #: 参照を使い回せたか（`hit`）、読んで組み立てたか（`miss`）
+    reference_cache: str
+    #: 観測の読み（PostgREST の往復・整数配列の型検査・長形式化）
+    observations_ms: int
+    #: `build_now`（as-of・流量・格子・列の組み立て）
+    build_ms: int
+
+
+@dataclass(frozen=True)
 class Features:
     """推論 1 回ぶんの特徴量と、**材料の版**（どちらも記録に出す）。
 
     参照スナップショットの日付を持つのは、00:00〜05:00 JST に 1 つ古い版を使うことがあるため
-    （`read_reference_available`）。プロファイルも同じく、朝の穴では 1 つ古い版になる。
+    （`reference_for`）。プロファイルも同じく、朝の穴では 1 つ古い版になる。
     """
 
     reference_day: date
     ready: build.Ready
     profile: ProfileRead
+    stages: Stages
 
 
 #: プロファイルを何日前までさかのぼって探すか（W6-04、契約 32）。**前日の版は 00:40 JST の回が
@@ -188,21 +211,27 @@ def read_features(
       3. **`at` までに入手できた予報**（`weather.serving_window`。W4 プラン §6.4）
       4. **前日のポートプロファイルの、要る行群だけ**（W6 の PR D。`read_profile_edition`）
     """
-    reference_day, systems, estimates = read_reference_available(port, jst_date(at))
-    facts = static.to_facts(systems, estimates)
-    links = neighbors.to_links(systems, facts.station_keys())
+    (reference, reused), reference_ms = _timed(lambda: reference_for(port, jst_date(at)))
     read = read_profile_edition(port, at, holidays)
-    ready = build.build_now(
-        build.NowInputs(
-            at=at,
-            system_id=system_id,
-            reference=build.Reference(facts=facts, links=links, holidays=holidays),
-            table=_observations(port, system_id, at),
-            weather=weather.to_weather(port.list_weather(*weather.serving_window(at))),
-            profile=read.edition,
-        )
+    table, observations_ms = _timed(lambda: _observations(port, system_id, at))
+    inputs = build.NowInputs(
+        at=at,
+        system_id=system_id,
+        reference=build.Reference(facts=reference.facts, links=reference.links, holidays=holidays),
+        table=table,
+        weather=weather.to_weather(port.list_weather(*weather.serving_window(at))),
+        profile=read.edition,
     )
-    return Features(reference_day=reference_day, ready=ready, profile=read)
+    ready, build_ms = _timed(lambda: build.build_now(inputs))
+    stages = Stages(reference_ms, "hit" if reused else "miss", observations_ms, build_ms)
+    return Features(reference_day=reference.day, ready=ready, profile=read, stages=stages)
+
+
+def _timed[T](work: Callable[[], T]) -> tuple[T, int]:
+    """`work` を呼び、**掛かった時間（ミリ秒）**も返す。"""
+    started = time.monotonic_ns()
+    result = work()
+    return result, _ms_since(started)
 
 
 def _observations(port: InferPort, system_id: str, at: datetime) -> pa.Table:
@@ -309,28 +338,86 @@ def _refuse_without_profile(predictor: Predictor, read: ProfileRead) -> None:
 REFERENCE_FALLBACK_DAYS: Final[int] = 2
 
 
-def read_reference_available(
-    port: InferPort, day: date
-) -> tuple[date, tuple[SystemReference, ...], Estimates]:
-    """読める中でいちばん新しい参照スナップショットを返す（**どの日かも返す**）。
+@dataclass(frozen=True)
+class BuiltReference:
+    """組み立てた参照（`static.to_facts`・`neighbors.to_links`）と、その版の日付。"""
+
+    day: date
+    facts: static.StationFacts
+    links: neighbors.NeighborLinks
+
+
+#: 組み立てた参照（版の日付 → 中身）。**持つのは最後に組み立てた 1 版だけ**（W6 の PR G の⑤）。
+#: 版は 1 日 1 回（05:00 JST）しか変わらないのに、5 分毎に読んで組み立て直していた
+#: （W6 プラン §13.4）。**冷えれば消えるだけで、正しさに影響しない。**
+_REFERENCES: dict[date, BuiltReference] = {}
+
+#: `_REFERENCES` の出し入れを守る（`registry._CACHE_LOCK` と同じ理由）。**組み立てる間は握らない**
+#: ——2 系統が同時に組み立てても、同じ版から同じものができるだけである。
+_REFERENCES_LOCK: Final = threading.Lock()
+
+
+def forget_references() -> None:
+    """持っている参照を捨てる。**検査が同じ日付で中身の違う版を使うときに使う。**"""
+    with _REFERENCES_LOCK:
+        _REFERENCES.clear()
+
+
+def reference_for(port: InferPort, day: date) -> tuple[BuiltReference, bool]:
+    """読める中でいちばん新しい参照を、組み立てた形で返す。**2 つ目は使い回せたか。**
 
     規則は学習と同じ「**前日の版**」だが、その版が置かれるのは **05:00 JST**
     （`/ml/reference`）である。つまり **00:00〜05:00 JST の推論は前日の版をまだ読めない**
-    ので、そのあいだは 1 つ古い版を使う（W4 プラン §12 の 118）。
+    ので、そのあいだは 1 つ古い版を使う（W4 プラン §12 の 118）。**黙って古い版を使わない。**
+    使った日付は `inference_log.detail.reference_date` に残る。
 
-    **黙って古い版を使わない。** 使った日付は `inference_log.detail.reference_date` に
-    残るので、あとから「どの版で出した予測か」が分かる。
+    **新しい版から順に確かめる**（使い回す前と同じ順・同じ往復）。持っているのが前々日の
+    版でも、前日の版が置かれていないかを毎周期確かめるので、05:00 に置かれた次の周期から
+    新しい版に移る。**読む版の決め方は、使い回す前と変わらない。**
     """
     for back in range(1, REFERENCE_FALLBACK_DAYS + 1):
         source_day = day - timedelta(days=back)
-        try:
-            systems, estimates = read_reference_on(port, source_day)
-        except MissingReferenceError:
-            continue
-        return source_day, systems, estimates
+        held = _held_reference(source_day)
+        if held is not None:
+            return held, True
+        built = _build_reference(port, source_day)
+        if built is not None:
+            return built, False
     raise MissingReferenceError(
         f"参照スナップショットが {REFERENCE_FALLBACK_DAYS} 日ぶん見つからない（{day} 基準）"
     )
+
+
+def _held_reference(source_day: date) -> BuiltReference | None:
+    with _REFERENCES_LOCK:
+        return _REFERENCES.get(source_day)
+
+
+def _build_reference(port: InferPort, source_day: date) -> BuiltReference | None:
+    """その日の版を読んで組み立て、持つ。**版が無ければ None**（他の失敗はそのまま投げる）。"""
+    try:
+        systems, estimates = read_reference_on(port, source_day)
+    except MissingReferenceError:
+        return None
+    facts = static.to_facts(systems, estimates)
+    built = BuiltReference(source_day, facts, neighbors.to_links(systems, facts.station_keys()))
+    _read_only(built.facts)
+    _read_only(built.links)
+    with _REFERENCES_LOCK:
+        _REFERENCES.clear()
+        _REFERENCES[source_day] = built
+    return built
+
+
+def _read_only(record: static.StationFacts | neighbors.NeighborLinks) -> None:
+    """**使い回す配列を書き込めなくする。** 誰かが書き換えると、次の周期の答えが黙って変わる。
+
+    書き換える道があれば、その場で例外になる（検査はどれも、この配列で `build_now` を通る）。
+    """
+    for one in dataclasses.fields(record):
+        value = getattr(record, one.name)
+        if isinstance(value, np.ndarray):
+            value.flags.writeable = False
 
 
 def _neighbour_window(at: datetime) -> tuple[datetime, datetime]:
@@ -391,6 +478,12 @@ class InferSummary:
     cpu_ms: int
     #: 特徴量を作るのに掛かった時間。**推論の所要の大半はここ**（W4 プラン §6.3）
     features_ms: int = 0
+    #: `features_ms` の内訳（W6 の PR G、W6-20。`Stages`）。参照は**使い回せた周期はほぼ 0**
+    reference_ms: int = 0
+    #: 参照を使い回せたか（`hit`）、読んで組み立てたか（`miss`）
+    reference_cache: str = ""
+    observations_ms: int = 0
+    build_ms: int = 0
     #: 除外の内訳（理由 → ポート数）。**なぜ出せなかったかが分かる**
     excluded: Mapping[str, int] = field(default_factory=dict)
     #: 使った参照スナップショットの日付。**00:00〜05:00 JST は 1 つ古い版になる**
@@ -685,6 +778,10 @@ def _completed(
         duration_ms=_elapsed_ms(done.started),
         cpu_ms=_cpu_ms(done.cpu_started),
         features_ms=done.features_ms,
+        reference_ms=features.stages.reference_ms,
+        reference_cache=features.stages.reference_cache,
+        observations_ms=features.stages.observations_ms,
+        build_ms=features.stages.build_ms,
         excluded=dict(sorted(stats.excluded.items())),
         reference_date=features.reference_day.isoformat(),
         weather_issues=stats.weather_issues,
@@ -991,6 +1088,12 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         # **所要の大半は特徴量づくり**（W4 プラン §6.3 の完了条件）。分けて出さないと、
         # 遅くなったときに読み込みなのか組み立てなのかが分からない
         "features_ms": summary.features_ms,
+        # **その内訳**（W6 の PR G、W6-20）。参照は使い回せた周期（`hit`）はほぼ 0 で、
+        # 05:00 JST に新しい版が置かれた次の周期と、インスタンスが替わった最初の周期が `miss`
+        "reference_ms": summary.reference_ms,
+        "reference_cache": summary.reference_cache,
+        "observations_ms": summary.observations_ms,
+        "build_ms": summary.build_ms,
         "cpu_ms": summary.cpu_ms,
         # **予測ログを置けたか**（D-24、W5 プラン §6.1）。置けなくても推論は落とさない
         # ので、**失敗はここにしか出ない**。試し打ちは何も書かないので欄ごと出ない
