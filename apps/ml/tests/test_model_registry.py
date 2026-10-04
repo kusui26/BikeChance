@@ -23,8 +23,9 @@ from bikechance_ml.baselines.artifact import to_bytes as baseline_to_bytes
 from bikechance_ml.features.constants import FEATURE_SET
 from bikechance_ml.features.schema import PROFILE_COLUMNS
 from bikechance_ml.models import artifact as lightgbm_artifact
-from bikechance_ml.models import registry
+from bikechance_ml.models import composite, registry
 from bikechance_ml.models.predictor import BaselinePredictor, Prediction
+from tests import composite_fixture
 from tests.test_infer import ARTIFACT as BASELINE
 from tests.test_model_artifact import ARTIFACT as LGBM_ARTIFACT
 
@@ -388,10 +389,10 @@ def test_a_forest_without_profile_columns_does_not() -> None:
 
 @dataclass(frozen=True)
 class _Unknown:
-    """**知らない種類**の予測器（合成器より前に作られた道の外）。"""
+    """**知らない種類**の予測器（登録簿の分岐の外にある口）。"""
 
     model_version: str = "someday-v1"
-    kind: str = "composite"
+    kind: str = "someday"
     feature_set: str = FEATURE_SET
 
     def predict(self, system_id: str, at: datetime, table: pa.Table) -> Prediction:
@@ -404,3 +405,87 @@ class _Unknown:
 def test_an_unknown_kind_is_taken_to_read_the_profile() -> None:
     """**分からないときは「読む」**——読めなかった周期に配らない側に倒す。"""
     assert registry.reads_profile(_Unknown()) is True
+
+
+# ── 合成器（W6 の PR H、D-33、契約 33）─────────────────────────────
+def _composite_port(forest_feature_set: str = FEATURE_SET) -> FakePort:
+    """合成器を candidate として載せる。**森の `feature_set` を変えて組める**（照合の検査）。"""
+    forest = replace(LGBM_ARTIFACT, feature_set=forest_feature_set)
+    forest_body = lightgbm_artifact.to_bytes(forest)
+    made = composite.assemble(
+        composite_fixture.parts(
+            lightgbm=forest_body, gates=composite_fixture.gates_body(forest_body=forest_body)
+        ),
+        model_version=composite_fixture.VERSION,
+        created_at=composite_fixture.CREATED_AT,
+    )
+    row = registry.Registered(
+        model_version=made.model_version,
+        kind=registry.COMPOSITE_KIND,
+        feature_set=made.feature_set,
+        artifact_path=composite.artifact_path(made.model_version),
+        status="candidate",
+    )
+    return FakePort(
+        rows={row.model_version: row}, bodies={row.artifact_path: composite.to_bytes(made)}
+    )
+
+
+def test_a_composite_row_loads_the_composite() -> None:
+    port = _composite_port()
+    loaded = registry.load(port, registry.named(port, composite_fixture.VERSION))
+    assert isinstance(loaded, composite.CompositePredictor)
+    assert (loaded.kind, loaded.feature_set) == (registry.COMPOSITE_KIND, FEATURE_SET)
+
+
+def test_a_composite_is_bound_to_the_feature_set() -> None:
+    """**合成器も特徴量の版が違えば配らない**——森が全部の列を読む（B3 の部品があっても同じ）。"""
+    port = _composite_port(forest_feature_set="v3")
+    with pytest.raises(registry.FeatureSetMismatchError):
+        registry.load(port, registry.named(port, composite_fixture.VERSION))
+
+
+def test_a_composite_reads_the_profile_only_while_it_walks_the_forest() -> None:
+    made = composite.to_predictor(composite_fixture.build())
+    assert registry.reads_profile(made) is True
+    assert registry.reads_profile(made.b3_only()) is False
+
+
+def test_without_a_profile_the_composite_serves_b3_only() -> None:
+    """**プロファイルを読めなかった周期、合成器は全セル B3 の形になる**（契約 33）。名前は同じ。"""
+    made = composite.to_predictor(composite_fixture.build())
+    assert registry.for_cycle(made, profile_read=True) is made
+    only = registry.for_cycle(made, profile_read=False)
+    assert isinstance(only, composite.CompositePredictor)
+    assert (only.route, only.model_version) == (composite.ROUTE_B3_ONLY, made.model_version)
+
+
+def test_other_kinds_keep_their_form_without_a_profile() -> None:
+    """**LightGBM 単体はそのまま**（推論が止める）。B3 はそもそも読まない。"""
+    forest = lightgbm_artifact.to_predictor(LGBM_ARTIFACT)
+    baseline = BaselinePredictor(artifact=BASELINE)
+    assert registry.for_cycle(forest, profile_read=False) is forest
+    assert registry.for_cycle(baseline, profile_read=False) is baseline
+
+
+def test_the_cycle_detail_is_written_only_for_a_composite() -> None:
+    """`detail.composite` は**合成器の周期だけ**：行き先と、ターゲットごとの森を歩いた行の数。"""
+    table = pa.table(
+        {
+            "h_min": pa.array([30, 15, 60], type=pa.int16()),
+            "bikes": pa.array([0, 0, 0], type=pa.int16()),
+            "docks": pa.array([9, 2, 9], type=pa.int16()),
+        }
+    )
+    made = composite.to_predictor(composite_fixture.build())
+    assert registry.cycle_detail(made, "hellocycling", table) == {
+        "route": composite.ROUTE_GATED,
+        "forest_rows": {"bike": 1, "dock": 1},
+    }
+    assert registry.cycle_detail(made.b3_only(), "hellocycling", table) == {
+        "route": composite.ROUTE_B3_ONLY,
+        "forest_rows": {"bike": 0, "dock": 0},
+    }
+    assert (
+        registry.cycle_detail(BaselinePredictor(artifact=BASELINE), "hellocycling", table) is None
+    )

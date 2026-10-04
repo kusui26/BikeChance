@@ -17,6 +17,10 @@
 **読んだ成果物は版ごとに持つ**（W6-02、契約 31）。active と shadow を同じ周期に使うので、
 1 つだけ持つと互いを追い出し、毎周期落とし直す（W6 プランの所見 189）。**持つのは、その
 周期に使う版だけ**（`retain`）で、上限は `CACHE_LIMIT`。
+
+**合成器**（`composite`。W6 の PR H、D-33）は B3・森・門の表を 1 つに持つ。**プロファイルを
+読めなかった周期は全セル B3 の形に替える**（`for_cycle`。契約 33）——種類で形を替えるのも
+ここだけである。
 """
 
 import threading
@@ -24,10 +28,13 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Final, Protocol
 
+import pyarrow as pa
+
 from bikechance_ml.baselines.artifact import from_bytes as baseline_from_bytes
 from bikechance_ml.features.constants import FEATURE_SET
 from bikechance_ml.features.schema import PROFILE_COLUMNS
 from bikechance_ml.models import artifact as lightgbm
+from bikechance_ml.models import composite
 from bikechance_ml.models.predictor import BaselinePredictor, Predictor
 
 #: 成果物の置き場所（0027 のバケット）。**`gbfs-parquet` には相乗りさせない**：
@@ -37,6 +44,10 @@ MODEL_BUCKET: Final[str] = "models"
 #: `model_versions.kind` の値。
 BASELINE_KIND: Final[str] = "baseline"
 LIGHTGBM_KIND: Final[str] = "lightgbm"
+COMPOSITE_KIND: Final[str] = composite.KIND
+
+#: **特徴量の版が一致しなければ配らない**種類（森がすべての列を読む）。
+STRICT_FEATURE_KINDS: Final[frozenset[str]] = frozenset({LIGHTGBM_KIND, COMPOSITE_KIND})
 
 #: 配信中の状態。**この名前では成果物を置かない**（W6-19、契約 38）。
 #: `register_model_version`（0038）が行を登録し直させないのと同じ 2 つである。
@@ -221,15 +232,49 @@ def reads_profile(predictor: Predictor) -> bool:
     if isinstance(predictor, BaselinePredictor):
         return False
     if isinstance(predictor, lightgbm.LightGbmPredictor):
-        return any(name in PROFILE_COLUMNS for name in predictor.artifact.columns)
+        return _reads_profile_columns(predictor.artifact)
+    if isinstance(predictor, composite.CompositePredictor):
+        # **全セル B3 の形は読まない**（森を歩かない）。だから止めずに配れる（契約 33）
+        return predictor.walks_forest and _reads_profile_columns(predictor.artifact.lightgbm)
     return True
+
+
+def _reads_profile_columns(artifact: lightgbm.LightGbmArtifact) -> bool:
+    return any(name in PROFILE_COLUMNS for name in artifact.columns)
+
+
+def for_cycle(predictor: Predictor, profile_read: bool) -> Predictor:
+    """その周期に配る形。**プロファイルを読めなかった周期、合成器は全セル B3 にする**（契約 33）。
+
+    LightGBM 単体はそのまま返す——推論が止める（`prof_*` を読む版は、読めなかった周期に
+    配らない）。B3 はそもそも `prof_*` を読まない。**版の名前は変えない**（記録に残るのは
+    合成器の版で、全セル B3 だったことは `detail.composite.route` に出る）。
+    """
+    if profile_read or not isinstance(predictor, composite.CompositePredictor):
+        return predictor
+    return predictor.b3_only()
+
+
+def cycle_detail(predictor: Predictor, system_id: str, table: pa.Table) -> dict[str, object] | None:
+    """合成器を配った周期の `detail.composite`。**合成器でなければ None**（欄ごと出さない）。
+
+    `route` は `gated`（門のとおり）か `b3_only`（全セル B3）、`forest_rows` はターゲットごとの
+    森を歩いた行の数（費用の材料。W6 プラン §6.8 の「設計の補い」の 8）。
+    """
+    if not isinstance(predictor, composite.CompositePredictor):
+        return None
+    walks = predictor.walks(system_id, table)
+    return {
+        "route": predictor.route,
+        "forest_rows": {name: int(rows.sum()) for name, rows in walks.items()},
+    }
 
 
 def _build(registered: Registered, body: bytes) -> Predictor:
     """`kind` で読み方を分ける。**分岐はここだけ。**"""
     predictor = _read(registered, body)
     _refuse_a_lying_row(registered, predictor.feature_set)
-    if registered.kind == LIGHTGBM_KIND:
+    if registered.kind in STRICT_FEATURE_KINDS:
         _refuse_another_feature_set(predictor.feature_set, registered.model_version)
     return predictor
 
@@ -239,6 +284,8 @@ def _read(registered: Registered, body: bytes) -> Predictor:
         return BaselinePredictor(artifact=baseline_from_bytes(body))
     if registered.kind == LIGHTGBM_KIND:
         return lightgbm.to_predictor(lightgbm.from_bytes(body))
+    if registered.kind == COMPOSITE_KIND:
+        return composite.to_predictor(composite.from_bytes(body))
     raise UnknownModelError(f"知らない kind です: {registered.kind}")
 
 

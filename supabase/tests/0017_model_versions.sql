@@ -4,7 +4,7 @@
 -- どの版を配るかを推論がどう読むかは `apps/ml` の側（`tests/test_model_registry.py`）。
 
 begin;
-select plan(53);
+select plan(56);
 
 create function pg_temp.candidate(p_version text, p_kind text default 'lightgbm') returns jsonb
 language sql as $$
@@ -55,6 +55,22 @@ select throws_ok(
       (model_version, kind, status, feature_set, artifact_path, train_days)
     values ('x', 'lightgbm', 'champion', 'v3', 'p', array['2026-09-09'])$$,
   '23514', null, '知らない status は入らない'
+);
+-- **合成器は 3 つ目の読み方**（0055、W6 の PR H）。登録の口からも候補として入る
+select lives_ok(
+  $$insert into public.model_versions
+      (model_version, kind, status, feature_set, artifact_path, train_days)
+    values ('composite-v1-20261005', 'composite', 'candidate', 'v4',
+            'composite/composite-v1-20261005.json.gz', array['2026-09-07', '2026-10-05'])$$,
+  '合成器（composite）は入る（0055）'
+);
+select is(
+  (select kind from public.model_versions where model_version = 'composite-v1-20261005'),
+  'composite', '合成器の行は kind = composite のまま残る'
+);
+select is(
+  pg_temp.candidate('composite-v1-rehearsal-20261005', 'composite')->>'status',
+  'candidate', '合成器も register_model_version で候補として登録できる'
 );
 select throws_ok(
   $$insert into public.model_versions

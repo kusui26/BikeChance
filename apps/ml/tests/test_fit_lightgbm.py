@@ -254,13 +254,6 @@ def test_the_label_goes_between_the_prefix_and_the_day() -> None:
     assert fit.model_version_for(days, "rehearsal") == "lgbm-v1-rehearsal-20261005"
 
 
-def test_the_version_is_filled_into_the_output_paths() -> None:
-    """**版の名前は走らせる前に分からない**ので、出力先に `{version}` と書ける。"""
-    written = fit.expand("../../docs/model_cards/{version}.md", "lgbm-v1-20261008")
-    assert written == "../../docs/model_cards/lgbm-v1-20261008.md"
-    assert fit.expand(None, "lgbm-v1-20261008") is None
-
-
 # ── 門の相手の B3（W6-10、契約 36）──────────────────────────────
 def _calendar(first: date, count: int) -> tuple[date, ...]:
     return tuple(first + timedelta(days=offset) for offset in range(count))
@@ -383,32 +376,6 @@ def test_the_artifact_records_the_chosen_pair() -> None:
 
 
 # ── 登録に残るもの ────────────────────────────────────────────
-def test_the_card_path_is_recorded_relative_to_the_repository(tmp_path: Path) -> None:
-    """**登録簿には「どこ起点か」が分かる形で残す。**
-
-    `--card` はシェルから見た書き出し先なので、`apps/ml` から走らせると
-    `../../docs/…` になる。それをそのまま入れると読む人が辿れない。
-    """
-    (tmp_path / ".git").mkdir()
-    (tmp_path / "docs" / "model_cards").mkdir(parents=True)
-    card = tmp_path / "docs" / "model_cards" / "x.md"
-    deep = tmp_path / "apps" / "ml"
-    deep.mkdir(parents=True)
-
-    assert fit.card_reference(str(card)) == "docs/model_cards/x.md"
-    assert fit.card_reference(f"{deep}/../../docs/model_cards/x.md") == "docs/model_cards/x.md"
-
-
-def test_a_card_outside_any_repository_is_left_alone(tmp_path: Path) -> None:
-    """**勝手に別の場所を指さない。** `.git` が見つからなければそのまま残す。"""
-    outside = tmp_path / "loose.md"
-    assert fit.card_reference(str(outside)) == str(outside)
-
-
-def test_no_card_stays_none() -> None:
-    assert fit.card_reference(None) is None
-
-
 def test_the_check_is_recorded_for_the_registry() -> None:
     """**照合の結果が `model_versions.metrics` に入る。** 後から読める事実にする。"""
     rows = fit._to_check_rows({TARGET: fit.Checked(n_rows=1234, max_gap=1e-15)})

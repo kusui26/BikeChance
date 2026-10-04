@@ -54,6 +54,15 @@
 
     ./.venv/bin/python ../../scripts/inspect-artifact.py --version lgbm-v1-20261008
     ./.venv/bin/python ../../scripts/inspect-artifact.py --file a.json.gz --gates a.gates.json.gz
+
+## 合成器（W6 の PR H、W6 プラン §8.9 の 3）
+
+**読めた＝部品の SHA-256・門の表と森の組・書式 2 の B3・削ったセル（足していない）が合う**
+（`models/composite.py` が照合する）。ここでは**特徴量の版**も照合し、部品の版・学習日（和集合）・
+**LightGBM の最終学習日**・森を歩くセルの数・削ったセルを出す。**合格**：読めて、特徴量の版が
+いまと同じであること。
+
+    ./.venv/bin/python ../../scripts/inspect-artifact.py --version composite-v1-20261012
 """
 
 import argparse
@@ -80,8 +89,8 @@ from bikechance_ml.features.constants import FEATURE_SET
 from bikechance_ml.features.grid import profile_path
 from bikechance_ml.io.supabase import PARQUET_BUCKET, open_storage
 from bikechance_ml.models import artifact as lightgbm_artifact
+from bikechance_ml.models import composite, registry
 from bikechance_ml.models import gates as gate_tables
-from bikechance_ml.models import registry
 
 
 def counts_by_dow(usable: Bools) -> dict[str, int]:
@@ -332,6 +341,42 @@ def inspect_lightgbm(source: registry.ReadsModels, body: bytes, gates: str | Non
     return 0 if table is not None else 1
 
 
+# ── 合成器（W6 の PR H）──────────────────────────────────────────
+def composite_lines(artifact: composite.CompositeArtifact, size_bytes: int) -> list[str]:
+    """合成器の素性。**読めたので、部品の SHA-256・組・辻褄は合っている。**"""
+    days = artifact.train_days
+    return [
+        f"{artifact.model_version}（合成器・書式 {artifact.format_version}、feature_set "
+        f"{artifact.feature_set}、{size_bytes:,} B）",
+        f"  学習（和集合）{days[0]}〜{days[-1]}（{len(days)} 日） / LightGBM の最終学習日 "
+        f"{artifact.lightgbm_last_day} / 作成 {artifact.created_at}",
+        f"  部品：B3 {artifact.b3.model_version}（書式 {artifact.b3.format_version}）・LightGBM "
+        f"{artifact.lightgbm.model_version}・門の表 {artifact.gates.model_version}",
+        f"  森を歩くセル {len(artifact.lightgbm_cells())}（門の表で LightGBM "
+        f"{len(artifact.gates.lightgbm_cells())}、shadow で削った {len(artifact.dropped)}）",
+        *[f"  削ったセル：{' '.join(str(part) for part in one)}" for one in artifact.dropped],
+        *forest_lines(artifact.lightgbm),
+    ]
+
+
+def inspect_composite(body: bytes) -> int:
+    """合成器を開く。**読めなければ（照合に落ちれば）不合格**、特徴量の版が違っても不合格。"""
+    try:
+        artifact = composite.from_bytes(body)
+    except (ValueError, lightgbm_artifact.ArtifactMismatchError) as error:
+        print(f"**不合格**：いまのコードでは読めません（{error}）")
+        return 1
+    passed = artifact.feature_set == FEATURE_SET
+    message = (
+        "**合格**：部品と組が確かめられ、いまの特徴量の版で読めました"
+        if passed
+        else f"**不合格**：特徴量の版が {artifact.feature_set}（いまは {FEATURE_SET}）"
+    )
+    lines = [*composite_lines(artifact, len(body)), *gate_lines(artifact.gates)]
+    print("\n".join([*lines, "", message]))
+    return 0 if passed else 1
+
+
 # ── ベースラインの成果物 ──────────────────────────────────────
 def inspect_baseline(source: registry.ReadsModels, body: bytes) -> int:
     """ベースラインの成果物を開く。**立つはずの曜日種別にセルがあるか**で判定する。"""
@@ -390,6 +435,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         kind, body = fetch(source, options)
         if kind == registry.LIGHTGBM_KIND:
             return inspect_lightgbm(source, body, options.gates)
+        if kind == registry.COMPOSITE_KIND:
+            return inspect_composite(body)
         return inspect_baseline(source, body)
 
 
