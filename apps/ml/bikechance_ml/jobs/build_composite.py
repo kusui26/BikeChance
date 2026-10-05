@@ -413,7 +413,7 @@ def _card_serving(artifact: composite.CompositeArtifact) -> str:
             "- 確度（W6-11）：森の行は目標セルの `prof_n_days` が配る側の下限"
             "（平日 3・土日祝 4）以上なら 3、B3 の行は B3 の気候値が引けたか",
             f"- 確かめ方：`scripts/inspect-artifact.py --version {artifact.model_version}`、"
-            f"試し打ちは `/ml/infer?model={artifact.model_version}`",
+            f"試し打ちは `/ml/infer/{{system}}?model={artifact.model_version}`（何も書かない）",
         ]
     )
 

@@ -295,5 +295,6 @@ def test_the_card_tells_the_parts_cells_border_and_serving() -> None:
         "森を歩いた行",
         "全セル B3",
         "W6-11",
+        f"/ml/infer/{{system}}?model={made.version}",
     ):
         assert needed in card
