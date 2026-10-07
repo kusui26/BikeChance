@@ -13,8 +13,10 @@ from typing import Final
 
 import lightgbm as lgb
 import numpy as np
+import pyarrow as pa
 import pytest
 
+from bikechance_ml.baselines import climatology
 from bikechance_ml.features.arrays import Float32
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.features.schema import SERVING_SCHEMA
@@ -191,3 +193,45 @@ def test_a_global_model_has_no_unknown_ports() -> None:
     """**全ポート共通**なので「成果物が知らないポート」が無い（B2 と違う）。"""
     predictor = lightgbm_artifact.to_predictor(ARTIFACT)
     assert predictor.unknown_ports("hellocycling", SERVING_SCHEMA.empty_table()) == 0
+
+
+# ── 確度（W6-11、W6 プラン §6.8 の「設計の補い」の 7）────────────────
+def _thickness(days: list[int], dow_types: list[str]) -> pa.Table:
+    return pa.table(
+        {
+            "prof_n_days": pa.array(days, type=pa.int16()),
+            "target_dow_type": pa.array(dow_types, type=pa.string()),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("dow_type", "floor"),
+    [
+        ("weekday", climatology.MIN_CELL_DAYS),
+        ("sat", climatology.WEEKEND_SERVE_DAYS),
+        ("sun_holiday", climatology.WEEKEND_SERVE_DAYS),
+    ],
+)
+def test_the_confidence_needs_the_serving_floor_of_the_target_day(
+    dow_type: str, floor: int
+) -> None:
+    """**目標セルの履歴が、目標の曜日種別の配る側の下限に届けば「本来の情報」**（W6-11）。
+
+    下限は B3 の気候値と同じ `SERVE_DAYS`（平日 3・土日祝 4。D-37）。
+    """
+    table = _thickness([floor - 1, floor, floor + 3], [dow_type] * 3)
+    assert lightgbm_artifact.profile_informed(table).tolist() == [False, True, True]
+
+
+def test_a_day_type_that_is_not_served_is_never_informed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**配らない曜日種別（下限が `None`）は、どれだけ厚くても情報なし**（B3 と同じ扱い）。"""
+    monkeypatch.setattr(climatology, "SERVE_DAYS", {**climatology.SERVE_DAYS, "sat": None})
+    table = _thickness([99, 99], ["sat", "weekday"])
+    assert lightgbm_artifact.profile_informed(table).tolist() == [False, True]
+
+
+def test_an_unknown_day_type_is_refused() -> None:
+    """**知らない曜日種別は止める**（黙って「情報なし」にしない）。"""
+    with pytest.raises(lightgbm_artifact.UnknownDowTypeError):
+        lightgbm_artifact.profile_informed(_thickness([5], ["holiday"]))

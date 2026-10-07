@@ -23,8 +23,12 @@ from typing import Final
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 
-from bikechance_ml.features.arrays import Float64
+from bikechance_ml.baselines import climatology
+from bikechance_ml.features.arrays import Bools, Float64, Int64
+from bikechance_ml.features.calendar import DOW_TYPE_ORDER
+from bikechance_ml.features.profile import DAYS_COLUMN
 from bikechance_ml.models import forest as tree
 from bikechance_ml.models.matrix import (
     CATEGORICAL_COLUMNS,
@@ -47,9 +51,19 @@ KIND: Final[str] = "lightgbm"
 #: 成果物の Content-Type（`models` バケットの許可リストと揃える）。
 CONTENT_TYPE: Final[str] = "application/gzip"
 
+#: 目標時刻の曜日種別の列（`build_now`・`build_day` の出力）。確度の下限はこれで引く。
+TARGET_DOW_COLUMN: Final[str] = "target_dow_type"
+
+#: 「配らない曜日種別」（下限が `None`）を日数で表した値。**どのセルも届かない。**
+_NEVER_DAYS: Final[int] = int(np.iinfo(np.int64).max)
+
 
 class ArtifactMismatchError(RuntimeError):
     """成果物と、いまのコードの特徴量の作り方が食い違う。**配らない。**"""
+
+
+class UnknownDowTypeError(ValueError):
+    """目標の曜日種別に、知らない値がある。**確度の下限を引けないので止める。**"""
 
 
 @dataclass(frozen=True)
@@ -204,15 +218,15 @@ class LightGbmPredictor:
     def predict(self, system_id: str, at: datetime, table: pa.Table) -> Prediction:  # noqa: ARG002
         """全ターゲットぶんの確率。**1 回の行列で 10 水平すべてを出す。**
 
-        `informed` は常に真：LightGBM は欠損を木の中で扱うので、「本来の情報が
-        引けなかった」に当たる状態が無い（B3 の気候値とは違う）。確度の意味づけは
-        W5 の校正で見直す。
+        `informed` は**目標セルの履歴の厚さ**で決める（W6-11、`profile_informed`）。
+        以前は常に真で、**全ポートが確度 3 を名乗っていた**——LightGBM は欠損を木の中で
+        扱うので「引けなかった」状態は無いが、履歴の薄いセルを「信じてよい」とは言えない。
         """
         built = build_matrix(table)
-        rows = len(built)
+        informed = profile_informed(table)
         return Prediction(
             probability={name: predict(one, built) for name, one in self.artifact.forests.items()},
-            informed={name: np.ones(rows, dtype=np.bool_) for name in self.artifact.forests},
+            informed=dict.fromkeys(self.artifact.forests, informed),
         )
 
     def unknown_ports(self, system_id: str, table: pa.Table) -> int:  # noqa: ARG002
@@ -223,3 +237,33 @@ class LightGbmPredictor:
 def to_predictor(artifact: LightGbmArtifact) -> LightGbmPredictor:
     """成果物から配信用の口を作る。"""
     return LightGbmPredictor(artifact=artifact)
+
+
+def profile_informed(table: pa.Table) -> Bools:
+    """LightGBM の行の「本来の情報」（W6-11）。**目標セルの `prof_n_days` が、目標の曜日種別の
+    配る側の下限（`climatology.SERVE_DAYS`）以上か。**
+
+    下限は **B3 の気候値と同じもの**（平日 3・土日祝 4。D-37）で読む——確度 3 の意味を、
+    B3 のセルと LightGBM のセルで揃えるため（W6 プラン §6.8 の「設計の補い」の 7）。
+    **配らない曜日種別（下限が `None`）は、どのセルも届かない。**
+    """
+    days = np.asarray(
+        table.column(DAYS_COLUMN).combine_chunks().to_numpy(zero_copy_only=False), dtype=np.int64
+    )
+    floors = np.array([_floor_days(one) for one in DOW_TYPE_ORDER], dtype=np.int64)
+    return np.asarray(days >= floors[_dow_index(table)], dtype=np.bool_)
+
+
+def _floor_days(dow_type: str) -> int:
+    floor = climatology.SERVE_DAYS[dow_type]
+    return _NEVER_DAYS if floor is None else floor
+
+
+def _dow_index(table: pa.Table) -> Int64:
+    """目標の曜日種別を `DOW_TYPE_ORDER` の番号にする。**知らない値があれば止める。**"""
+    order = pa.array(DOW_TYPE_ORDER, type=pa.string())
+    found = pc.index_in(table.column(TARGET_DOW_COLUMN).combine_chunks(), value_set=order)
+    index = np.asarray(pc.fill_null(found, -1).to_numpy(zero_copy_only=False), dtype=np.int64)
+    if bool((index < 0).any()):
+        raise UnknownDowTypeError("目標の曜日種別に、知らない値があります")
+    return index

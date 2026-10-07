@@ -67,7 +67,7 @@ from bikechance_ml.jobs.infer import (
     to_x1000,
 )
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
-from bikechance_ml.models import registry
+from bikechance_ml.models import composite, registry
 from bikechance_ml.models.predictor import BaselinePredictor
 from bikechance_ml.models.registry import (
     MODEL_BUCKET,
@@ -77,9 +77,9 @@ from bikechance_ml.models.registry import (
     UnknownModelError,
     forget,
 )
+from tests import composite_fixture, range_fixture
 from tests import eval_fixture as fixture
 from tests import infer_fixture as serving
-from tests import range_fixture
 
 
 @pytest.fixture(autouse=True)
@@ -1856,3 +1856,89 @@ def test_the_dry_run_does_not_walk_the_shadow() -> None:
     assert (summary.status, summary.shadow) == ("dry_run", None)
     assert port.logs == {}
     assert "shadow" not in to_detail(summary)
+
+
+# ── 合成器（W6 の PR H、D-33、契約 33）─────────────────────────────
+def composite_port(status: str = "active") -> FakePort:
+    """合成器を登録した口。**B3 の部品は推論の検査と同じ版**（全セル B3 の周期と比べるため）。"""
+    made = composite_fixture.build()
+    path = composite.artifact_path(made.model_version)
+    row = Registered(
+        model_version=made.model_version,
+        kind=registry.COMPOSITE_KIND,
+        feature_set=made.feature_set,
+        artifact_path=path,
+        status=status,
+    )
+    port = FakePort(body=to_bytes(ARTIFACT), model_bodies={path: composite.to_bytes(made)})
+    if status == "active":
+        port.registered = row
+    else:
+        port.candidate = row
+    return port
+
+
+def _sent(port: FakePort) -> list[tuple[object, ...]]:
+    """書いた予測（**版の名前を除く**）。配った値どうしを比べるため。"""
+    return [
+        (one["station_id"], one["p_bike_x1000"], one["p_dock_x1000"], one["confidence"])
+        for one in port.written
+    ]
+
+
+def test_a_composite_serves_through_its_gates() -> None:
+    """**合成器を active にすると、門のとおりに配る。** 記録に行き先と森を歩いた行が出る。"""
+    port = put_profile(composite_port(), _yesterday())
+    summary = run_inference(port, "hellocycling", NOW)
+    assert (summary.status, summary.model_kind) == ("ok", registry.COMPOSITE_KIND)
+    assert len(port.written) == len(STATIONS)
+    recorded = port.details[0]
+    assert recorded is not None
+    assert recorded["composite"] == {"route": "gated", "forest_rows": {"bike": 2, "dock": 3}}
+    assert recorded["profile_reason"] is None
+
+
+def test_without_a_profile_a_composite_serves_b3_only() -> None:
+    """**プロファイルを読めなかった周期は全セル B3**（契約 33）。止めず、行き先を記録に残す。
+
+    配った確率は、**同じ B3 を active にしたときと 1 つも違わない**。
+    """
+    port = composite_port()
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "ok"
+    recorded = port.details[0]
+    assert recorded is not None
+    assert recorded["composite"] == {"route": "b3_only", "forest_rows": {"bike": 0, "dock": 0}}
+    assert recorded["profile_reason"] == "missing"
+    b3_port = ready_port()
+    run_inference(b3_port, "hellocycling", NOW)
+    assert _sent(port) == _sent(b3_port)
+
+
+def test_a_b3_record_has_no_composite_field() -> None:
+    """**B3 を配っているあいだは欄ごと出ない**（記録の形は PR H の前と同じ）。"""
+    port = ready_port()
+    run_inference(port, "hellocycling", NOW)
+    recorded = port.details[0]
+    assert recorded is not None and "composite" not in recorded
+
+
+def test_a_composite_can_be_dry_run() -> None:
+    """**試し打ち**（完了条件 2 の道）：candidate の合成器を名指しで回し、何も書かない。"""
+    port = put_profile(composite_port(status="candidate"), _yesterday())
+    summary = run_inference(port, "docomo-cycle", NOW, composite_fixture.VERSION)
+    assert (summary.status, summary.n_predicted, port.written) == ("dry_run", len(STATIONS), [])
+    assert summary.composite == {"route": "gated", "forest_rows": {"bike": 1, "dock": 0}}
+    assert to_detail(summary)["composite"] == summary.composite
+
+
+def test_a_composite_shadow_without_a_profile_walks_as_b3() -> None:
+    """shadow の合成器も、**プロファイルの無い周期は全セル B3 で歩く**（止めない。契約 33）。"""
+    port = ready_port()
+    shadow = composite_port(status="candidate").candidate
+    assert shadow is not None
+    port.shadow = replace(shadow, status="shadow")
+    port.model_bodies.update(composite_port().model_bodies)
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.shadow is not None
+    assert summary.shadow.status == "ok"

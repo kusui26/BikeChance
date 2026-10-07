@@ -524,6 +524,9 @@ class InferSummary:
     sample: Mapping[str, object] = field(default_factory=dict)
     #: shadow を歩いた結果（W6 の PR E）。**shadow が無ければ None で、`detail` に欄を出さない**
     shadow: ShadowRun | None = None
+    #: 合成器を配った周期の行き先と、森を歩いた行の数（W6 の PR H。`registry.cycle_detail`）。
+    #: **合成器でなければ None で、`detail` に欄を出さない**
+    composite: Mapping[str, object] | None = None
     error: str | None = None
 
     @property
@@ -727,6 +730,8 @@ def _dry_run(
     features_started = time.monotonic_ns()
     features = read_features(port, system_id, at, frozenset(port.list_holidays()))
     features_ms = _ms_since(features_started)
+    # **合成器は、プロファイルを読めなかった周期は全セル B3 の形になる**（契約 33）
+    predictor = registry.for_cycle(predictor, features.profile.edition is not None)
     # **試し打ちでも止める。** プロファイル無しの `prof_*` で出した確率は、見ても意味が無い
     _refuse_without_profile(predictor, features.profile)
     base = port.read_base_observed_at(system_id)
@@ -797,6 +802,7 @@ def _completed(
         model_load_ms=done.model_load_ms,
         rss_mb=_rss_mb(),
         forecast_log=forecast_log_status,
+        composite=registry.cycle_detail(predictor, system_id, features.ready.table),
     )
 
 
@@ -832,6 +838,9 @@ def _produce(
     features_started = time.monotonic_ns()
     features = read_features(port, system_id, at, frozenset(port.list_holidays()))
     features_ms = _ms_since(features_started)
+    # **合成器は、プロファイルを読めなかった周期は全セル B3 の形で配る**（契約 33。止めない）。
+    # LightGBM 単体は下で止まる（単体を active にしないのが決まり）
+    predictor = registry.for_cycle(predictor, features.profile.edition is not None)
     _refuse_without_profile(predictor, features.profile)
     cycle = Cycle(system_id, at, base, stale=(at - base).total_seconds() > MAX_STALENESS_S)
     served = _serve(port, predictor, features, cycle)
@@ -950,7 +959,8 @@ def _shadow_once(
     行の名前は主キーなので active と重ならない。**見るのは成果物が名乗る版**である——
     同じ版を名乗る成果物で歩くと、予測ログの置き場所が active と同じになり、上書きする。
     """
-    predictor, model_load_ms = _load(port, row)
+    loaded, model_load_ms = _load(port, row)
+    predictor = registry.for_cycle(loaded, features.profile.edition is not None)
     if predictor.model_version == active.model_version:
         raise ShadowSameAsActiveError(f"shadow の成果物が active と同じ版です: {row.model_version}")
     if features.profile.edition is None and registry.reads_profile(predictor):
@@ -1124,6 +1134,9 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         # **shadow を歩いた結果**（W6 の PR E、契約 34）。**shadow が無ければ欄ごと出さない**——
         # shadow が登録されていない本番では、記録がデプロイの前と同じになる（完了条件 1）
         **({"shadow": summary.shadow.as_detail()} if summary.shadow is not None else {}),
+        # **合成器を配った周期だけ**（W6 の PR H）。`route` が `b3_only` ならプロファイルが無く
+        # 全セル B3 だった（契約 33）。`forest_rows` は森を歩いた行（費用の材料。§8.11）
+        **({"composite": dict(summary.composite)} if summary.composite is not None else {}),
         # **試し打ちのときだけ載せる。** 通常の推論では 0 と空になる
         **(
             {"predicted": summary.n_predicted, "sample": dict(summary.sample)}

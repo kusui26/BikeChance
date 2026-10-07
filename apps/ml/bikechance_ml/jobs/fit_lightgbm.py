@@ -45,7 +45,6 @@ B3 と比べる意味がさらに薄れる（同じ行で選んで測るほど�
 
 import argparse
 import hashlib
-import re
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -76,6 +75,7 @@ from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
 from bikechance_ml.features.fingerprint import Fingerprint
 from bikechance_ml.io.supabase import SupabaseIo, open_storage
 from bikechance_ml.jobs import climate
+from bikechance_ml.jobs.cards import LABEL_PATTERN, card_reference, expand
 from bikechance_ml.jobs.fit_baseline import DEFAULT_TRAIN_DAYS
 from bikechance_ml.jobs.window import (
     Window,
@@ -93,14 +93,6 @@ from bikechance_ml.models.registry import LIGHTGBM_KIND
 
 #: 版の付け方。**最後の学習日**を入れる（いつまでのデータで作ったかが名前で分かる）。
 VERSION_PREFIX: Final[str] = "lgbm-v1"
-
-#: `--label`（版の名前に挟む印。予行演習は `rehearsal`）の書き方。**ハイフンを許さない**
-#: ——許すと、版の名前から印と日付を切り分けられなくなる。
-LABEL_PATTERN: Final[re.Pattern[str]] = re.compile(r"\A[a-z][a-z0-9]{0,19}\Z")
-
-#: 出力先に書けるひな形。**版の名前は学習日と印で決まり、走らせる前には分からない**ので、
-#: `--card ../../docs/model_cards/{version}.md` のように書く。
-VERSION_FIELD: Final[str] = "{version}"
 
 #: 既定の候補（設計どおりの 300 本・0.05。v0 と同じ森）。
 DEFAULT_CANDIDATES: Final[str] = "300:0.05"
@@ -269,11 +261,6 @@ def model_version_for(days: Sequence[date], label: str | None = None) -> str:
     """版の名前。**最後の学習日**を入れ、印があれば間に挟む（`lgbm-v1-rehearsal-20261005`）。"""
     marked = f"-{label}" if label else ""
     return f"{VERSION_PREFIX}{marked}-{days[-1]:%Y%m%d}"
-
-
-def expand(path: str | None, version: str) -> str | None:
-    """出力先の `{version}` を版の名前に置き換える。"""
-    return None if path is None else path.replace(VERSION_FIELD, version)
 
 
 def baseline_days(fit_days: Sequence[date]) -> tuple[date, ...]:
@@ -786,25 +773,6 @@ def to_registration(fitted: Fitted, chosen: Chosen, card_path: str | None) -> di
         "card_path": card_reference(card_path),
         "note": f"W6 の PR F。候補 {chosen.candidate.spec}。単体では配らない（契約 33）",
     }
-
-
-def card_reference(card_path: str | None) -> str | None:
-    """登録簿に残すモデルカードの場所。**リポジトリからの相対に直す。**
-
-    `--card` はシェルから見た**書き出し先**なので、`apps/ml` で走らせると
-    `../../docs/model_cards/…` になる。それをそのまま登録簿に入れると、
-    **読む人が「どこ起点の相対か」を復元できない**（2026-09-10 に 1 度そうなった）。
-
-    `.git` のある場所を上へ辿って、そこからの相対にする。見つからなければ
-    渡された文字列をそのまま残す（**勝手に別の場所を指さない**）。
-    """
-    if card_path is None:
-        return None
-    resolved = Path(card_path).resolve()
-    for parent in resolved.parents:
-        if (parent / ".git").exists():
-            return str(resolved.relative_to(parent))
-    return card_path
 
 
 # ── 実行 ──────────────────────────────────────────────────────
