@@ -52,3 +52,17 @@ jobs:
             -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
             -configuration Debug build \
             CODE_SIGNING_ALLOWED=NO | tail -20
+
+      # 配布に要る 2 つが、ビルドした .app に入っていることを確かめる（W6 の PR K、W6-33）。
+      # マニフェストは置くだけで入る（同期グループ）ぶん、置き場所を動かすと黙って抜ける
+      - name: プライバシーマニフェストと暗号化の申告
+        working-directory: apps/ios
+        run: |
+          app="$(xcodebuild -project BikeChance.xcodeproj -scheme BikeChance \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -configuration Debug \
+            -showBuildSettings 2>/dev/null \
+            | awk -F' = ' '$1 ~ /^ +BUILT_PRODUCTS_DIR$/ {d=$2} $1 ~ /^ +FULL_PRODUCT_NAME$/ {n=$2} END {print d "/" n}')"
+          plutil -lint "$app/PrivacyInfo.xcprivacy"
+          test "$(plutil -extract NSPrivacyTracking raw "$app/PrivacyInfo.xcprivacy")" = "false"
+          test "$(plutil -extract ITSAppUsesNonExemptEncryption raw "$app/Info.plist")" = "false"
+          echo "OK: マニフェストと暗号化の申告が $app に入っている"
