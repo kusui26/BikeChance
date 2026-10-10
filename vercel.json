@@ -4,13 +4,11 @@
   "services": {
     "web": {
       "root": "apps/web",
-      "framework": "nextjs",
-      "ignoreCommand": "bash \"$(git rev-parse --show-toplevel)/scripts/vercel-ignore-build.sh\""
+      "framework": "nextjs"
     },
     "ml": {
       "root": "apps/ml",
       "framework": "fastapi",
-      "ignoreCommand": "bash \"$(git rev-parse --show-toplevel)/scripts/vercel-ignore-build.sh\"",
       "functions": {
         "**/*.py": {
           "maxDuration": 240

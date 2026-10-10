@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 #
-# Vercel の Ignored Build Step（W6 プランの PR M、W6-22）。**両方のサービス**（`web`・`ml`）の
-# `ignoreCommand` から呼ぶ（`vercel.json`）。
+# Vercel の Ignored Build Step（W6 プランの PR M、W6-22）。**プロジェクトの設定**
+# （Settings → Build and Deployment → Ignored Build Step → Custom）から、次の 1 行で呼ぶ：
+#
+#   bash "$(git rev-parse --show-toplevel)/scripts/vercel-ignore-build.sh"
+#
+# **`vercel.json` のサービスごとの `ignoreCommand` には置かない。** この Services の
+# プロジェクトでは走らなかった（2026-10-10 にプレビューで確かめた：文書だけのコミットも、
+# `exit 0` を置いたサービスも、ビルドログに何も出ずに最後までビルドされた）。
 #
 # Vercel の決まり：**終了コード 0 ならこのデプロイを飛ばし**（状態は CANCELED）、
 # **1 以上ならビルドする**。本番（main）にも効く。飛ばした回は、収集器も Cron も
@@ -21,9 +27,8 @@
 #     差分が取れない・**差分が空**（同じコミットの Redeploy。環境変数を変えた後の
 #     再デプロイを飛ばさない）・文書でないファイルが 1 つでもある
 #
-# **2 つのサービスは必ず同じ判定を出す**（片方だけを飛ばした形を作らない）。入力を
-# 環境変数と git だけにし、動く場所（サービスの root）に依存させない——比べるパスは
-# リポジトリの最上位からの相対にそろえる。
+# 入力は環境変数と git だけにし、**動く場所に依存させない**——比べるパスはリポジトリの
+# 最上位からの相対にそろえる（どのディレクトリから呼ばれても同じ判定になる）。
 #
 # **ビルドが読むファイルを、文書の場所に置かない。** 置くと、その変更が配られない。
 #
@@ -68,7 +73,8 @@ decide() {
 }
 
 top="$(git rev-parse --show-toplevel 2>/dev/null)" || build "git のリポジトリの中で動いていない"
-where="${PWD#"$top"}"
-echo "Ignored Build Step（${where:-/} で起動、HEAD $(git rev-parse --short HEAD)）"
+# 起動した場所は最上位からの相対で出す（`$PWD` から最上位を引くと、シンボリックリンクを挟んだときに外れる）
+where="$(git rev-parse --show-prefix)"
+echo "Ignored Build Step（起動した場所 ./${where}、HEAD $(git rev-parse --short HEAD)）"
 cd "$top"
 decide "${VERCEL_GIT_PREVIOUS_SHA:-}"
