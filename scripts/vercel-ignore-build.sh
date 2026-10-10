@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 #
 # Vercel の Ignored Build Step（W6 プランの PR M、W6-22）。**プロジェクトの設定**
-# （Settings → Build and Deployment → Ignored Build Step → Custom）から、次の 1 行で呼ぶ：
+# （Settings → Build and Deployment → Ignored Build Step の Command）に、次の 1 行で置く：
 #
-#   bash "$(git rev-parse --show-toplevel)/scripts/vercel-ignore-build.sh"
+#   bash "$(git rev-parse --show-toplevel)/scripts/vercel-ignore-build.sh" || exit 1
+#
+# （`bash` で始まるので、画面の Behavior の表示は自動で「Run my Bash script」になる。
+# 走るのは Command の文字列そのもの）
+#
+# **Vercel が受ける終了コードは 0 と 1 だけ**：0 ならこのデプロイを取り消し（状態は CANCELED）、
+# 1 ならビルドする。**それ以外はデプロイを失敗にする**（2026-10-10、このスクリプトの無い枝で
+# `bash` が 127 を返し、プレビューが失敗した）。末尾の `|| exit 1` は、このスクリプトが
+# まだ無い枝（マージ前の main も）と想定外の失敗を 1 にそろえる。スクリプトの中でも、
+# 想定外の失敗は ERR の trap で 1 にする（呼び出し側が `|| exit 1` を落としても失敗にしない）。
+#
+# 本番（main）にも効く。取り消した回は、収集器も Cron も前のデプロイのまま動き続ける。
 #
 # **`vercel.json` のサービスごとの `ignoreCommand` には置かない。** この Services の
 # プロジェクトでは走らなかった（2026-10-10 にプレビューで確かめた：文書だけのコミットも、
 # `exit 0` を置いたサービスも、ビルドログに何も出ずに最後までビルドされた）。
-#
-# Vercel の決まり：**終了コード 0 ならこのデプロイを飛ばし**（状態は CANCELED）、
-# **1 以上ならビルドする**。本番（main）にも効く。飛ばした回は、収集器も Cron も
-# 前のデプロイのまま動き続ける。
 #
 # **飛ばすのは、前回うまくいったデプロイからの変更が全部「文書」だと言い切れるときだけ。
 # 迷ったらビルドする。**
@@ -34,7 +41,9 @@
 #
 # 検査：`scripts/vercel-ignore-build.test.sh`（CI の「Ignored Build Step の判定」）。
 
-set -euo pipefail
+set -Eeuo pipefail
+# 想定外の失敗（git の 128 など）も 1（ビルド）で終える。-E で関数とコマンド置換にも効かせる
+trap 'exit 1' ERR
 
 build() {
   echo "ビルドする：$1"

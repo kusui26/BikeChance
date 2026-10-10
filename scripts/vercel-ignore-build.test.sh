@@ -3,7 +3,8 @@
 # `scripts/vercel-ignore-build.sh` の検査（CI の「Ignored Build Step の判定」で走る）。
 #
 # 一時ディレクトリに git のリポジトリを作ってコミットを積み、`VERCEL_GIT_PREVIOUS_SHA` を
-# 渡して**終了コード**を見る：飛ばす ＝ 0、ビルドする ＝ 1（落ちて 2 以上になるのも誤りとして拾う）。
+# 渡して**終了コード**を見る：飛ばす ＝ 0、ビルドする ＝ 1。**2 以上は誤り**——Vercel は 0・1 以外を
+# 返したデプロイを失敗にする（2026-10-10 に確かめた）。
 # **厚く見るのは「飛ばしてはいけないのに飛ばす」側**——コードの変更が本番に出なくなる。
 #
 #   bash scripts/vercel-ignore-build.test.sh
@@ -56,9 +57,11 @@ from_base() {
 }
 
 # expect <skip|build> <場面> <前回の SHA> [起動する場所。既定はリポジトリの最上位]
+# EXPECT_PATH を置くと、その PATH で起動する（偽の git を前に挟む場面）
 expect() {
   local want="$1" name="$2" previous="$3" dir="${4:-$REPO}" code=0 got
-  (cd "$dir" && VERCEL_GIT_PREVIOUS_SHA="$previous" bash "$SCRIPT" >"$WORK/out" 2>&1) || code=$?
+  (cd "$dir" && PATH="${EXPECT_PATH:-$PATH}" VERCEL_GIT_PREVIOUS_SHA="$previous" \
+    bash "$SCRIPT" >"$WORK/out" 2>&1) || code=$?
   case "$code" in 0) got=skip ;; 1) got=build ;; *) got="落ちた（終了コード ${code}）" ;; esac
   if [[ "$got" == "$want" ]]; then
     echo "ok    $name"
@@ -166,6 +169,31 @@ shallow_clone_is_handled() {
   expect skip "前回が深さ 10 の内（文書だけ）" "$middle" "$WORK/shallow"
 }
 
+# git が途中で想定外の終了コードを返す偽物を、PATH の前に挟む
+fake_git() {
+  local dir="$WORK/fakebin" real
+  real="$(command -v git)"
+  mkdir -p "$dir"
+  # 偽物の中身には `$@` と `$a` をそのまま書く（ここで展開しない）
+  # shellcheck disable=SC2016
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" == %s ]] && exit %s; done\nexec "%s" "$@"\n' \
+    "$1" "$2" "$real" >"$dir/git"
+  chmod +x "$dir/git"
+  echo "$dir"
+}
+
+unexpected_failures_build() {
+  echo "── 想定外の失敗も 1（ビルド）で終わる（0・1 以外を返さない）"
+  from_base && touch_files docs/plan.md >/dev/null
+  EXPECT_PATH="$(fake_git --show-prefix 128):$PATH"
+  expect build "git が途中で 128 を返す（文書だけの変更でも）" "$BASE"
+  rm -rf "$WORK/fakebin"
+  EXPECT_PATH="$(fake_git --name-only 3):$PATH"
+  expect build "git diff が 3 を返す" "$BASE"
+  rm -rf "$WORK/fakebin"
+  unset EXPECT_PATH
+}
+
 # ── 実行 ──────────────────────────────────────────────────────
 git init -q -b main "$REPO"
 BASE="$(touch_files apps/web/app/page.tsx apps/web/AGENTS.md apps/ml/main.py docs/plan.md \
@@ -177,6 +205,7 @@ unusable_previous_is_built
 services_decide_alike
 merges_into_main
 shallow_clone_is_handled
+unexpected_failures_build
 
 if ((FAILED > 0)); then
   echo "${FAILED} 件が期待と違った"
