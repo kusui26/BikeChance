@@ -72,8 +72,47 @@ xcrun simctl launch booted app.bikechance.BikeChance
 `Bbox` の丸めがサーバーと一致していることも、この応答の `bbox`（サーバーが返す実効矩形）と
 突き合わせて確かめている。
 
+## TestFlight に上げる（W6 の PR K）
+
+配布に要る 2 つは、リポジトリに入っている。CI（`ios.yml`）が、ビルドした `.app` に
+両方が入っていることを毎回確かめる。
+
+| もの | どこ | 中身 |
+|---|---|---|
+| プライバシーマニフェスト | `BikeChance/PrivacyInfo.xcprivacy` | **追跡しない・収集しない・理由の要る API を使わない**（W6-33）。同期グループなので、置くだけで `.app` の直下に入る。**UserDefaults を使い始めたら、理由 `CA92.1` を足す** |
+| 暗号化の申告 | `project.pbxproj` の `INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO` | 使う暗号は `URLSession` の HTTPS だけで、輸出規制の対象外。**これがあると、アップロードのたびに輸出コンプライアンスの質問票が出ない** |
+
+### 最初に 1 回だけ（利用者の作業。W6 プラン §7.4）
+
+1. **アイコン**：1024 × 1024 の PNG（透過なし）を Xcode の Assets の AppIcon に入れる
+   （`Assets.xcassets/AppIcon.appiconset/` に置き、`Contents.json` の項目に `"filename"` を足すのと同じ）。
+   **無いと、アップロードの検証で止まる**
+2. **署名のチーム**：Xcode でターゲット BikeChance → Signing & Capabilities → Team を選ぶ
+   （Automatically manage signing は入れたまま）。`project.pbxproj` に `DEVELOPMENT_TEAM` が
+   書き込まれる。チーム ID は秘密ではない（配った `.app` の署名に載る）ので、コミットしてよい
+3. **App Store Connect のアプリ**：Apps → ＋ → New App で、iOS・Bundle ID
+   `app.bikechance.BikeChance` のアプリを作る。作っていなければ、最初のアップロードのときに
+   Xcode が必要な情報を聞いて作る
+
+### 毎回
+
+1. **Archive**：実行先を **Any iOS Device (arm64)** にして Product → Archive。
+   終わると Organizer（Window → Organizer → Archives）に並ぶ
+2. **確かめる**（任意）：Archive を右クリック（Control クリック）→ **Generate Privacy Report** で、
+   収集するデータが無いことを見る。**Validate App** で、上げる前の自動の検証だけを先に通せる
+3. **アップロード**：**Distribute App** → **TestFlight & App Store** → Distribute。
+   この選択肢は**ビルド番号を Xcode が付け直す**ので、リポジトリの `CURRENT_PROJECT_VERSION`（1）を
+   毎回上げなくてよい（同じバージョン `MARKETING_VERSION`（0.1）の中で、アップロードごとに違う番号が要る）。
+   チームの中だけで試し、App Store へは出さないと決めた回は **TestFlight Internal Only** を選ぶ
+   （その回のビルドは申請に使えない）
+4. **入れる**：処理が終わると App Store Connect の TestFlight に出る。Internal Testing の
+   グループに自分を足し、iPhone の TestFlight アプリから入れる
+
+手順の元は Apple の「Distributing your app for beta testing and releases」。メニューや
+選択肢の名前は、Xcode の版で変わることがある。
+
 ## まだ無いもの
 
 Widget、**低ズームのセル表示**（いまはセルが返ったら拡大の案内を出すだけ。W6-30）、
-位置情報の常時利用。申請に要るもの（`PrivacyInfo.xcprivacy`・アイコンの画像・署名のチーム）は
-W6 の PR K（W6 プラン §2.7）。
+位置情報の常時利用。申請に要るもののうち、**アイコンの画像・署名のチーム・App Store Connect の
+アプリ**は利用者の作業（上の「TestFlight に上げる」。W6 プラン §7.4）。
