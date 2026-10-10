@@ -45,6 +45,9 @@ jobs:
       - name: アプリのビルド
         working-directory: apps/ios
         run: |
+          # `shell:` を書かない run は `bash -e` で動き、pipefail が無い。無いと、xcodebuild が
+          # 落ちても `| tail` の終了コード 0 で通ってしまう
+          set -o pipefail
           xcodebuild -project BikeChance.xcodeproj -scheme BikeChance \
             -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
             -configuration Debug build \
