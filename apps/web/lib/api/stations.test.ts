@@ -325,6 +325,9 @@ describe("buildStationsResponse", () => {
 
   it("クレジットを応答に含める（表示を応答だけで完結できる）", () => {
     const response = build([station()]);
+    expect(response.attribution_preface).toBe(
+      "このアプリは、以下の著作物を改変して利用しています。",
+    );
     expect(response.attribution).toHaveLength(2);
     expect(response.attribution[0]?.license_url).toContain("creativecommons.org");
   });
@@ -603,6 +606,14 @@ describe("低ズームはセルを返す", () => {
   it("**9 格子ならセル**（本番で `aggregation: cell` を返した矩形。W6 プラン §13.3）", async () => {
     const { response } = await cellsOf("bbox=139.76,35.67,139.85,35.70", { cells: [cell()] });
     expect(response.cell_deg).toBe(0.01);
+  });
+
+  it("**セル応答にもクレジットの前置きを付ける**（`attribution` を返す応答はすべて。W6-31）", async () => {
+    const { response } = await cellsOf(WIDE, { cells: [cell()] });
+    expect(response.attribution_preface).toBe(
+      "このアプリは、以下の著作物を改変して利用しています。",
+    );
+    expect(response.attribution).toHaveLength(2);
   });
 
   it("セルの矩形・台数・stale をそのまま写す", async () => {

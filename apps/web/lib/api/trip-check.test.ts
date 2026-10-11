@@ -513,6 +513,9 @@ describe("応答", () => {
     if (!outcome.ok) return;
     expect(outcome.response.from.observed_at).toBe("2026-09-07T23:58:00.000Z");
     expect(outcome.response.attribution.length).toBeGreaterThan(0);
+    expect(outcome.response.attribution_preface).toBe(
+      "このアプリは、以下の著作物を改変して利用しています。",
+    );
     expect(outcome.response.feeds).toHaveLength(2);
   });
 

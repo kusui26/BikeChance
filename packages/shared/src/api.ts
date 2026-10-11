@@ -12,6 +12,29 @@ export const attributionSchema = z.object({
   license_url: z.url(),
 });
 
+/**
+ * CC BY 4.0「改変して利用する場合」の前置き（開発プラン §3.7）。`attribution` の**前に**出す。
+ * **`attribution` を返す応答はすべてこれも返す**（W6-31。クライアントに焼き付けない）。
+ */
+export const attributionPrefaceSchema = z.string().min(1);
+
+/**
+ * ODPT 以外の出典（天気・祝日・行政区域。W6-31、開発プラン §6.4）。
+ *
+ * **表示する 1 行（`text`）はサーバーが組む。** 提供元ごとに求める書式が違うので、
+ * クライアントは並べて、`url` へのリンクを `link_label` の文言で張るだけにする。
+ */
+export const dataSourceSchema = z.object({
+  /** 変わらない識別子。表示には使わない。 */
+  id: z.string().min(1),
+  /** 表示する 1 行。提供元が求める書式のまま。 */
+  text: z.string().min(1),
+  /** リンクの文言（Open-Meteo は「Weather data by Open-Meteo.com」を求める）。 */
+  link_label: z.string().min(1),
+  /** 出典のページ。 */
+  url: z.url(),
+});
+
 export const feedStatusSchema = z.object({
   system_id: systemIdSchema,
   display_name: z.string(),
@@ -39,7 +62,10 @@ export const metaResponseSchema = z.object({
   stale: z.boolean(),
   model_version: z.string().nullable(),
   feeds: z.array(feedStatusSchema),
+  attribution_preface: attributionPrefaceSchema,
   attribution: z.array(attributionSchema),
+  /** ODPT 以外の出典。**W6 の PR J で足した**（古いクライアントは読み飛ばす）。 */
+  sources: z.array(dataSourceSchema),
   notice: z.string(),
   disclaimer: z.string(),
 });
@@ -171,6 +197,7 @@ export const stationsResponseSchema = z.object({
   forecast_in_min: z.number().int().positive().nullable(),
   feeds: z.array(feedStatusSchema),
   stations: z.array(stationCurrentSchema),
+  attribution_preface: attributionPrefaceSchema,
   /** CC BY 4.0 の表示に要る。応答だけで表示を完結できるようにする（開発プラン §3.7）。 */
   attribution: z.array(attributionSchema),
 });
@@ -233,6 +260,7 @@ export const stationCellsResponseSchema = z.object({
   forecast_in_min: z.number().int().positive().nullable(),
   feeds: z.array(feedStatusSchema),
   cells: z.array(stationCellSchema),
+  attribution_preface: attributionPrefaceSchema,
   attribution: z.array(attributionSchema),
 });
 
@@ -322,6 +350,7 @@ export const tripCheckResponseSchema = z.object({
     to: z.array(tripAlternativeSchema),
   }),
   feeds: z.array(feedStatusSchema),
+  attribution_preface: attributionPrefaceSchema,
   attribution: z.array(attributionSchema),
 });
 
@@ -388,6 +417,7 @@ export const stationDetailResponseSchema = z.object({
   recent: z.array(recentHourSchema).max(24),
   /** **そのポートのシステムだけ**。地図と違い 1 系統しか関係しない。 */
   feeds: z.array(feedStatusSchema),
+  attribution_preface: attributionPrefaceSchema,
   attribution: z.array(attributionSchema),
 });
 
@@ -407,6 +437,7 @@ export const problemSchema = z.object({
 
 export type MetaResponse = z.infer<typeof metaResponseSchema>;
 export type Attribution = z.infer<typeof attributionSchema>;
+export type DataSource = z.infer<typeof dataSourceSchema>;
 export type FeedStatus = z.infer<typeof feedStatusSchema>;
 export type StationForecast = z.infer<typeof stationForecastSchema>;
 export type StationCurrent = z.infer<typeof stationCurrentSchema>;

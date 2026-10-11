@@ -14,6 +14,7 @@
  */
 import {
   ATTRIBUTIONS,
+  CREDIT_PREFACE,
   SYSTEM_IDS,
   isStale,
   staleAfterSeconds,
@@ -83,6 +84,7 @@ export const buildStationDetailResponse = (params: {
     recent: toRecentHours(params.recent),
     // **そのポートのシステムだけ。** 地図と違い 1 系統しか関係しない
     feeds: [feed],
+    attribution_preface: CREDIT_PREFACE,
     attribution: ATTRIBUTIONS.filter((one) => one.system_id === params.row.system_id),
   });
 };

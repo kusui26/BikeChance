@@ -11,6 +11,7 @@
  */
 import {
   ATTRIBUTIONS,
+  CREDIT_PREFACE,
   FORECAST_STALE_AFTER_S,
   HORIZONS_MIN,
   STATIONS_MAX_RESULTS,
@@ -117,6 +118,7 @@ export const buildStationsResponse = (params: {
     forecast_in_min: params.in_min,
     feeds,
     stations,
+    attribution_preface: CREDIT_PREFACE,
     attribution: ATTRIBUTIONS,
   });
 };
@@ -150,6 +152,7 @@ export const buildCellsResponse = (params: {
     forecast_in_min: params.in_min,
     feeds,
     cells,
+    attribution_preface: CREDIT_PREFACE,
     attribution: ATTRIBUTIONS,
   });
 };

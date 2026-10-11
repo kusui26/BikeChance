@@ -7,6 +7,8 @@
  */
 import {
   ATTRIBUTIONS,
+  CREDIT_PREFACE,
+  DATA_SOURCES,
   FORECAST_DISCLAIMER,
   SYSTEMS,
   SYSTEM_IDS,
@@ -86,7 +88,9 @@ export const buildMeta = (params: {
     stale: feeds.some((feed) => feed.stale),
     model_version: params.feeds === null ? null : servingModelVersion(params.feeds),
     feeds,
+    attribution_preface: CREDIT_PREFACE,
     attribution: ATTRIBUTIONS,
+    sources: DATA_SOURCES,
     notice: buildOdptNotice(params.contact_email ?? FALLBACK_CONTACT_EMAIL),
     disclaimer: FORECAST_DISCLAIMER,
   });

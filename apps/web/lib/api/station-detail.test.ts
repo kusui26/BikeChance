@@ -211,6 +211,9 @@ describe("応答", () => {
     expect(outcome.response.attribution.every((one) => one.system_id === "hellocycling")).toBe(
       true,
     );
+    expect(outcome.response.attribution_preface).toBe(
+      "このアプリは、以下の著作物を改変して利用しています。",
+    );
   });
 
   it("**`capacity_est` は `capacity` と別の欄**（W5-14）", async () => {
