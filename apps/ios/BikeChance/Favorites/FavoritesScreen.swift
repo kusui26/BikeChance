@@ -142,21 +142,25 @@ struct FavoriteRowView: View {
     private var forecast: some View {
         switch row.forecast {
         case .available(let display):
-            HStack(spacing: 8) {
-                Text(display.headline)
-                    .font(.system(.title3, design: .rounded).weight(.semibold))
-                    .foregroundStyle(display.band.textColor)
-                Text(display.arrival).font(.caption).foregroundStyle(.secondary)
-                if display.isReference {
-                    Text("参考値")
-                        .font(.caption2.weight(.medium))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(.quaternary, in: Capsule())
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text(display.headline)
+                        .font(.system(.title3, design: .rounded).weight(.semibold))
+                        .foregroundStyle(display.band.textColor)
+                    Text(display.arrival).font(.caption).foregroundStyle(.secondary)
+                    if display.isReference {
+                        Text("参考値")
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.quaternary, in: Capsule())
+                    }
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(display.accessibilityLabel)
+                // **予測値には予測時刻を添える**（W6-32、所見 196）
+                Text(display.basis).font(.caption2).foregroundStyle(.secondary)
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(display.accessibilityLabel)
         case .unavailable(let message):
             Text(message).font(.caption).foregroundStyle(.secondary)
         case .notRequested:

@@ -25,6 +25,8 @@ struct DestinationPicker: View {
     @State private var completer = SearchCompleter()
     @State private var place: MKMapItem?
     @State private var candidates: [StationCurrent] = []
+    /// 候補の応答のフィード。**鮮度の閾値はここにある**（渡さないと古い値も現在値に見える）。
+    @State private var feeds: [FeedStatus] = []
     @State private var status: Status = .idle
 
     private enum Status: Equatable {
@@ -141,16 +143,17 @@ struct DestinationPicker: View {
     private func candidateRow(_ station: StationCurrent) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(station.name ?? "（名称未取得）").font(.body)
-            // **いまの空き。** 確率は行程を調べたあとに出る（ここではまだ時刻が決まっていない）
-            Text("いま 返せる \(station.countText(for: .returnBike, freshness: freshness(station)))")
+            // **いまの空きと観測時刻。** 確率は行程を調べたあとに出る（ここではまだ時刻が
+            // 決まっていない）。実測値には観測時刻を添える（W6-32、所見 196）
+            Text(station.currentLine(for: .returnBike, feed: feed(for: station), now: now))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func freshness(_ station: StationCurrent) -> Freshness {
-        station.freshness(feed: nil, now: now)
+    private func feed(for station: StationCurrent) -> FeedStatus? {
+        feeds.first { $0.systemID == station.systemID }
     }
 
     /// 候補を 1 つ選んだ。**地点を引いてから、その周りのポートを引く。**
@@ -178,6 +181,7 @@ struct DestinationPicker: View {
                 in: center.square(spanDegrees: Self.searchSpanDegrees),
                 system: origin.systemID
             )
+            feeds = response.feeds
             candidates = MarkerSelection.closest(
                 response.stations, to: center, limit: Self.candidateLimit)
             status = .idle

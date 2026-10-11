@@ -129,10 +129,8 @@ extension ForecastState {
                 band: ProbabilityBand.of(percent: percent),
                 headline: "\(intent.verb)可能性 \(percent)%",
                 arrival: "\(Arrival.clockText(arrival, locale: locale, timeZone: timeZone)) 到着",
-                basis: """
-                    \(Arrival.clockText(forecast.baseObservedAt, locale: locale, timeZone: timeZone)) \
-                    時点の観測にもとづく予測
-                    """,
+                basis: ForecastDisplay.basisText(
+                    forecast.baseObservedAt, locale: locale, timeZone: timeZone),
                 isReference: forecast.confidence <= ForecastDisplay.referenceConfidence
             )
         )
@@ -140,6 +138,14 @@ extension ForecastState {
 }
 
 extension ForecastDisplay {
+    /// 「10:33 時点の観測にもとづく予測」（開発プラン §9.2 の表示義務。W6-32）。
+    /// **予測値には予測が基づく観測の時刻を添える**（CLAUDE.md §2 の 7）。文言は 1 か所にする。
+    public static func basisText(
+        _ observedAt: Date, locale: Locale = .current, timeZone: TimeZone = .current
+    ) -> String {
+        "\(Arrival.clockText(observedAt, locale: locale, timeZone: timeZone)) 時点の観測にもとづく予測"
+    }
+
     /// 表示の刻み（5%）。**過度な精度を見せない**（開発プラン §9.3）。
     public static let stepPercent = 5
     /// 表示の上限。**100% とは言い切らない。**

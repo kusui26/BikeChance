@@ -51,6 +51,12 @@ enum AppEnvironment {
             .appendingPathComponent("favorites", isDirectory: true)
     }
 
+    /// 最後に取れた `/v1/meta` の置き場所（W6-31、契約 42）。作り直せるので `Caches` でよい。
+    static var metaCacheDirectory: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("meta", isDirectory: true)
+    }
+
     @MainActor
     static func makeFavorites(client: V1Client) -> FavoritesModel {
         FavoritesModel(

@@ -25,6 +25,8 @@ public struct StationDetail: Equatable, Sendable {
     public let forecast: ForecastState
     /// 容量・設置・座標など、観測ではない情報。
     public let facts: [Fact]
+    /// クレジットの前置き。**サーバーの文言を使う**（W6-31）。PR J より前のサーバーは返さない。
+    public let creditPreface: String?
     /// そのポートのデータ提供元。**表示は義務**（CC BY 4.0）。
     public let credit: String?
 
@@ -36,6 +38,7 @@ public struct StationDetail: Equatable, Sendable {
         station: StationCurrent,
         feed: FeedStatus?,
         attribution: Attribution?,
+        attributionPreface: String? = nil,
         intent: RideIntent = .borrow,
         arrival: Date? = nil,
         now: Date
@@ -54,6 +57,7 @@ public struct StationDetail: Equatable, Sendable {
         self.forecast = ForecastState.make(
             station: station, feed: feed, intent: intent, arrival: arrival)
         self.facts = Self.facts(station: station, feed: feed)
+        self.creditPreface = attributionPreface
         self.credit = attribution?.credit
     }
 

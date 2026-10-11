@@ -15,6 +15,8 @@ struct StationDetailScreen: View {
     let station: StationCurrent
     let feed: FeedStatus?
     let attribution: Attribution?
+    /// クレジットの前置き（W6-31）。**地図の応答の文言**を渡す。
+    let attributionPreface: String?
     let intent: RideIntent
     /// **応答が指している到着時刻**（`StationsResponse.forecastArrival`）。nil なら予測を出さない。
     let arrival: Date?
@@ -26,8 +28,8 @@ struct StationDetailScreen: View {
 
     private var detail: StationDetail {
         StationDetail(
-            station: station, feed: feed, attribution: attribution, intent: intent,
-            arrival: arrival, now: now)
+            station: station, feed: feed, attribution: attribution,
+            attributionPreface: attributionPreface, intent: intent, arrival: arrival, now: now)
     }
 
     var body: some View {
@@ -189,16 +191,19 @@ struct StationDetailScreen: View {
         }
     }
 
-    /// **表示は義務**（CC BY 4.0 と ODPT ガイドライン 3.1）。文言はサーバーから貰う。
+    /// **表示は義務**（CC BY 4.0 と ODPT ガイドライン 3.1）。文言はサーバーから貰い、
+    /// **前置きを一覧の前に置く**（開発プラン §3.7。W6-31）。
     @ViewBuilder
     private var creditSection: some View {
         if let credit = detail.credit {
             Section("データの出典") {
                 VStack(alignment: .leading, spacing: 4) {
+                    if let preface = detail.creditPreface {
+                        Text(preface)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     Text(credit).font(.caption)
-                    Text("上記の著作物を改変して利用しています。")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

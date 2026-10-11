@@ -21,6 +21,12 @@ public struct TripPlan: Equatable, Sendable {
     public let ride: RideSummary
     /// 両方うまくいく見通し。**出せないこともある。**
     public let outcome: TripOutcomeState
+    /// 「10:33 時点の観測にもとづく予測」。**両端のうち古いほうの観測**で言う
+    /// （W6-32、所見 196。予測値には予測時刻を添える）。どちらにも予測が無ければ nil。
+    public let basis: String?
+    /// クレジットの前置き（「このアプリは、以下の著作物を改変して利用しています。」）。
+    /// **サーバーの文言を使う**（W6-31）。PR J より前のサーバーは返さないので nil がある。
+    public let creditPreface: String?
     /// **表示は義務**（CC BY 4.0）。この行程の系統のぶんだけ。
     public let credit: String?
 
@@ -52,6 +58,13 @@ public struct TripPlan: Equatable, Sendable {
             departure: response.departure, arrival: response.arrival,
             locale: locale, timeZone: timeZone
         )
+        let observed = [response.from.forecast, response.to.forecast].compactMap {
+            $0?.baseObservedAt
+        }
+        self.basis = observed.min().map {
+            ForecastDisplay.basisText($0, locale: locale, timeZone: timeZone)
+        }
+        self.creditPreface = response.attributionPreface
         self.credit = response.credit?.credit
     }
 }

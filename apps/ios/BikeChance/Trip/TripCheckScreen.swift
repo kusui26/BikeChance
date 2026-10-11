@@ -153,7 +153,13 @@ struct TripCheckScreen: View {
             } footer: {
                 // **数と離さない。** 別の画面や別の節に送ると、注記を落として数だけ
                 // 読まれる（W4-24）
-                Text(display.notice)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(display.notice)
+                    // **予測値には予測時刻を添える**（W6-32、所見 196）
+                    if let basis = plan.basis {
+                        Label(basis, systemImage: "chart.line.uptrend.xyaxis")
+                    }
+                }
             }
         case .unavailable(let message):
             Section {
@@ -198,14 +204,18 @@ struct TripCheckScreen: View {
     private func forecastRow(_ endpoint: TripEndpoint) -> some View {
         switch endpoint.forecast {
         case .available(let display):
-            HStack(spacing: 8) {
-                Text(display.headline)
-                    .font(.system(.title3, design: .rounded).weight(.semibold))
-                    .foregroundStyle(display.band.textColor)
-                Text(display.band.label).font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text(display.headline)
+                        .font(.system(.title3, design: .rounded).weight(.semibold))
+                        .foregroundStyle(display.band.textColor)
+                    Text(display.band.label).font(.caption).foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(display.accessibilityLabel)
+                // **予測値には予測時刻を添える**（W6-32、所見 196）
+                Text(display.basis).font(.caption2).foregroundStyle(.secondary)
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(display.accessibilityLabel)
         case .unavailable(let message):
             Text(message).font(.subheadline).foregroundStyle(.secondary)
         case .notRequested:
@@ -240,16 +250,18 @@ struct TripCheckScreen: View {
         }
     }
 
-    /// **表示は義務**（CC BY 4.0）。
+    /// **表示は義務**（CC BY 4.0）。**前置きを一覧の前に置く**（開発プラン §3.7。W6-31）。
     @ViewBuilder
     private func creditSection(_ plan: TripPlan) -> some View {
         if let credit = plan.credit {
             Section("データの出典") {
                 VStack(alignment: .leading, spacing: 4) {
+                    if let preface = plan.creditPreface {
+                        Text(preface)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     Text(credit).font(.caption)
-                    Text("上記の著作物を改変して利用しています。")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

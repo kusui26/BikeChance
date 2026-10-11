@@ -149,10 +149,7 @@ extension FavoriteRow {
             band: ProbabilityBand.of(percent: percent),
             headline: "\(intent.verb)可能性 \(percent)%",
             arrival: "\(Arrival.clockText(arrival, locale: locale, timeZone: timeZone)) 到着",
-            basis: """
-                \(Arrival.clockText(basis, locale: locale, timeZone: timeZone)) \
-                時点の観測にもとづく予測
-                """,
+            basis: ForecastDisplay.basisText(basis, locale: locale, timeZone: timeZone),
             isReference: confidence <= ForecastDisplay.referenceConfidence
         )
     }

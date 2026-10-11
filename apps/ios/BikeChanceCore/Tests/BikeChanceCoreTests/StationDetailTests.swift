@@ -276,6 +276,7 @@ struct StationDetailTests {
             forecastInMinutes: nil,
             feeds: [],
             stations: [],
+            attributionPreface: nil,
             attribution: [attribution]
         )
         #expect(response.attributionIndex()["hellocycling"] == attribution)
