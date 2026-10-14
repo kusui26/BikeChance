@@ -139,6 +139,32 @@ struct ContractTests {
         #expect(credit.contains("creativecommons.org"))
     }
 
+    // MARK: - クレジットの前置きと出典（W6 の PR J、W6-31。本番、2026-10-14）
+
+    @Test("**いまの /v1/meta（本番、2026-10-14）は前置きと 3 つの出典を持つ**")
+    func metaCarriesThePrefaceAndSources() throws {
+        let meta = try Self.decode(MetaResponse.self, "meta_sources")
+        #expect(meta.attributionPreface == "このアプリは、以下の著作物を改変して利用しています。")
+        let expectedIDs = ["open-meteo", "cao-holidays", "soumu-local-government-codes"]
+        #expect(meta.sources.map(\.id) == expectedIDs)
+        // Open-Meteo は求める文言でリンクを張る（CC BY 4.0）
+        let openMeteo = try #require(meta.sources.first)
+        #expect(openMeteo.linkLabel == "Weather data by Open-Meteo.com")
+        #expect(openMeteo.url.absoluteString == "https://open-meteo.com/")
+        for source in meta.sources {
+            #expect(source.url.scheme == "https")
+            #expect(!source.text.isEmpty)
+        }
+    }
+
+    @Test("**ポートの応答（本番、2026-10-14）にも前置きが載る**")
+    func stationsCarryThePreface() throws {
+        let response = try Self.decode(StationsResponse.self, "stations_preface")
+        #expect(response.attributionPreface == "このアプリは、以下の著作物を改変して利用しています。")
+        #expect(response.count == response.stations.count)
+        #expect(response.count > 0)
+    }
+
     // ── ポート詳細（W3 プラン §5.11）────────────────────────
     @Test("**実応答からポート詳細を組み立てられる**")
     func buildsTheDetailFromTheRealResponse() throws {
