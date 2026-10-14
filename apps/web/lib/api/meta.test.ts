@@ -5,7 +5,7 @@
  * 鮮度を伝える経路が鮮度を伝えられずに 500 で落ちると、クライアントは何も判断できない。
  */
 import { describe, expect, it } from "vitest";
-import { SYSTEM_IDS, metaResponseSchema } from "@bikechance/shared";
+import { CREDIT_PREFACE, DATA_SOURCES, SYSTEM_IDS, metaResponseSchema } from "@bikechance/shared";
 import { buildMeta, servingModelVersion } from "./meta";
 import type { FeedRow } from "./read-port";
 
@@ -92,7 +92,9 @@ describe("DB から取れなかったとき", () => {
 
   it("クレジットと通知文は常に返す（表示義務は DB に依存しない）", () => {
     const meta = build(null);
+    expect(meta.attribution_preface).toBe(CREDIT_PREFACE);
     expect(meta.attribution).toHaveLength(2);
+    expect(meta.sources).toEqual(DATA_SOURCES);
     expect(meta.notice).toContain("公共交通事業者への直接の問合せは行わないでください");
     expect(meta.disclaimer).toContain("独自に予測");
   });
@@ -150,5 +152,34 @@ describe("配信している予測の版（W4 の PR A）", () => {
 
   it("版が入っても stale はデータの鮮度のまま", () => {
     expect(build([served({})]).stale).toBe(false);
+  });
+});
+
+describe("クレジットの前置きと出典（W6 の PR J、W6-31）", () => {
+  it("**前置きと出典を返す**（クライアントに焼き付けない）", () => {
+    const meta = build([feed()]);
+    expect(meta.attribution_preface).toBe(CREDIT_PREFACE);
+    expect(meta.sources.map((source) => source.id)).toEqual([
+      "open-meteo",
+      "cao-holidays",
+      "soumu-local-government-codes",
+    ]);
+  });
+
+  it("**既存の欄は変えない**（iOS の古い版が読めなくならない）", () => {
+    const meta = build([feed()]);
+    expect(Object.keys(meta)).toEqual(
+      expect.arrayContaining([
+        "api_version",
+        "generated_at",
+        "stale",
+        "model_version",
+        "feeds",
+        "attribution",
+        "notice",
+        "disclaimer",
+      ]),
+    );
+    expect(meta.attribution.map((one) => one.system_id)).toEqual([...SYSTEM_IDS]);
   });
 });

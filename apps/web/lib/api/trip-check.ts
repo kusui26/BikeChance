@@ -15,6 +15,7 @@
  */
 import {
   ATTRIBUTIONS,
+  CREDIT_PREFACE,
   SYSTEM_IDS,
   TRIP_ALTERNATIVES_MAX,
   TRIP_ALTERNATIVE_RADIUS_M,
@@ -367,6 +368,7 @@ export const buildTripResponse = (params: {
     trip: toTripOutcome(from.station, to.station),
     alternatives: { from: from.alternatives, to: to.alternatives },
     feeds,
+    attribution_preface: CREDIT_PREFACE,
     attribution: ATTRIBUTIONS,
   });
 };

@@ -1,4 +1,10 @@
-import { ATTRIBUTIONS, FORECAST_DISCLAIMER, formatCredit } from "@bikechance/shared";
+import {
+  ATTRIBUTIONS,
+  CREDIT_PREFACE,
+  DATA_SOURCES,
+  FORECAST_DISCLAIMER,
+  formatCredit,
+} from "@bikechance/shared";
 
 const Home = () => (
   <main style={{ maxWidth: 720, margin: "0 auto", padding: "3rem 1.25rem" }}>
@@ -12,12 +18,18 @@ const Home = () => (
     </p>
 
     <h2 style={{ fontSize: "1.1rem", marginTop: "2.5rem" }}>データについて</h2>
-    <p style={{ color: "#555", fontSize: "0.9rem" }}>
-      このアプリは、以下の著作物を改変して利用しています。
-    </p>
+    <p style={{ color: "#555", fontSize: "0.9rem" }}>{CREDIT_PREFACE}</p>
     <ul style={{ color: "#555", fontSize: "0.9rem", paddingLeft: "1.2rem" }}>
       {ATTRIBUTIONS.map((attribution) => (
         <li key={attribution.system_id}>{formatCredit(attribution)}</li>
+      ))}
+    </ul>
+    <h3 style={{ fontSize: "0.95rem", marginTop: "1.5rem" }}>そのほかの出典</h3>
+    <ul style={{ color: "#555", fontSize: "0.9rem", paddingLeft: "1.2rem" }}>
+      {DATA_SOURCES.map((source) => (
+        <li key={source.id}>
+          {source.text}（<a href={source.url}>{source.link_label}</a>）
+        </li>
       ))}
     </ul>
     <p style={{ color: "#555", fontSize: "0.9rem" }}>{FORECAST_DISCLAIMER}</p>

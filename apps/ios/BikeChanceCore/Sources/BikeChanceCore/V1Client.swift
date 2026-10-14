@@ -119,7 +119,13 @@ public struct V1Client: Sendable {
 
     /// データの鮮度・クレジット・通知文。
     public func meta() async throws -> MetaResponse {
-        try await get(path: "/v1/meta", query: [])
+        try V1Client.decoded(MetaResponse.self, from: await metaBody())
+    }
+
+    /// `/v1/meta` の**生のバイト**。最後に取れた内容をオフライン用に取っておくのに使う
+    /// （契約 42。お気に入りと同じく、型に写してから書き戻さない）。
+    public func metaBody() async throws -> Data {
+        try await getData(path: "/v1/meta", query: [])
     }
 
     // MARK: - 実装

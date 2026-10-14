@@ -142,6 +142,24 @@ public struct Attribution: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// ODPT 以外の出典（天気・祝日・行政区域。W6-31）。**表示する 1 行はサーバーが組む。**
+///
+/// 提供元ごとに求める書式が違うので、端末は `text` を並べ、`url` へのリンクを
+/// `linkLabel` の文言で張るだけにする（Open-Meteo は「Weather data by Open-Meteo.com」を求める）。
+public struct DataSource: Decodable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let text: String
+    public let linkLabel: String
+    public let url: URL
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case text
+        case linkLabel = "link_label"
+        case url
+    }
+}
+
 public struct BboxEnvelope: Decodable, Equatable, Sendable {
     public let west: Double
     public let south: Double
@@ -165,6 +183,9 @@ public struct StationsResponse: Decodable, Equatable, Sendable {
     public let forecastInMinutes: Int?
     public let feeds: [FeedStatus]
     public let stations: [StationCurrent]
+    /// CC BY 4.0「改変して利用する場合」の前置き（開発プラン §3.7）。**クレジットの前に出す。**
+    /// **W6 の PR J より前のサーバーは返さない**ので省略可にする（返らなければ出さない）。
+    public let attributionPreface: String?
     public let attribution: [Attribution]
 
     private enum CodingKeys: String, CodingKey {
@@ -176,6 +197,7 @@ public struct StationsResponse: Decodable, Equatable, Sendable {
         case forecastInMinutes = "forecast_in_min"
         case feeds
         case stations
+        case attributionPreface = "attribution_preface"
         case attribution
     }
 
@@ -306,6 +328,9 @@ public struct StationDetailResponse: Decodable, Equatable, Sendable {
     public let recent: [RecentHour]
     /// **そのポートのシステムだけ。** 地図と違い 1 系統しか関係しない。
     public let feeds: [FeedStatus]
+    /// CC BY 4.0「改変して利用する場合」の前置き（開発プラン §3.7）。**クレジットの前に出す。**
+    /// **W6 の PR J より前のサーバーは返さない**ので省略可にする（返らなければ出さない）。
+    public let attributionPreface: String?
     public let attribution: [Attribution]
 
     private enum CodingKeys: String, CodingKey {
@@ -316,17 +341,26 @@ public struct StationDetailResponse: Decodable, Equatable, Sendable {
         case forecastCurve = "forecast_curve"
         case recent
         case feeds
+        case attributionPreface = "attribution_preface"
         case attribution
     }
 }
 
 public struct MetaResponse: Decodable, Equatable, Sendable {
     public let apiVersion: String
+    /// **この内容をサーバーが作った時刻。** オフラインで最後の内容を出すとき、
+    /// 「いつの内容か」はこれで言う（ファイルの日時を読まない。契約 42）。
     public let generatedAt: Date
     public let isStale: Bool
+    /// いま配っている予測の版。**まだ配っていなければ nil。**
     public let modelVersion: String?
     public let feeds: [FeedStatus]
+    /// CC BY 4.0「改変して利用する場合」の前置き（開発プラン §3.7）。**クレジットの前に出す。**
+    /// **W6 の PR J より前のサーバーは返さない**ので省略可にする（返らなければ出さない）。
+    public let attributionPreface: String?
     public let attribution: [Attribution]
+    /// ODPT 以外の出典（天気・祝日・行政区域。W6-31）。PR J より前のサーバーの応答では空。
+    public let sources: [DataSource]
     /// ODPT 開発者ガイドライン 3.1 の通知文。**表示義務がある。**
     public let notice: String
     /// 予測に関する免責。
@@ -338,9 +372,27 @@ public struct MetaResponse: Decodable, Equatable, Sendable {
         case isStale = "stale"
         case modelVersion = "model_version"
         case feeds
+        case attributionPreface = "attribution_preface"
         case attribution
+        case sources
         case notice
         case disclaimer
+    }
+
+    /// **足した欄が無くても読む**（PR J より前のサーバーの応答、契約テストの古いフィクスチャ）。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        apiVersion = try container.decode(String.self, forKey: .apiVersion)
+        generatedAt = try container.decode(Date.self, forKey: .generatedAt)
+        isStale = try container.decode(Bool.self, forKey: .isStale)
+        modelVersion = try container.decodeIfPresent(String.self, forKey: .modelVersion)
+        feeds = try container.decode([FeedStatus].self, forKey: .feeds)
+        attributionPreface = try container.decodeIfPresent(
+            String.self, forKey: .attributionPreface)
+        attribution = try container.decode([Attribution].self, forKey: .attribution)
+        sources = try container.decodeIfPresent([DataSource].self, forKey: .sources) ?? []
+        notice = try container.decode(String.self, forKey: .notice)
+        disclaimer = try container.decode(String.self, forKey: .disclaimer)
     }
 }
 
@@ -433,6 +485,9 @@ public struct TripCheckResponse: Decodable, Equatable, Sendable {
     public let trip: TripOutcome?
     public let alternatives: TripAlternatives
     public let feeds: [FeedStatus]
+    /// CC BY 4.0「改変して利用する場合」の前置き（開発プラン §3.7）。**クレジットの前に出す。**
+    /// **W6 の PR J より前のサーバーは返さない**ので省略可にする（返らなければ出さない）。
+    public let attributionPreface: String?
     public let attribution: [Attribution]
 
     private enum CodingKeys: String, CodingKey {
@@ -449,6 +504,7 @@ public struct TripCheckResponse: Decodable, Equatable, Sendable {
         case trip
         case alternatives
         case feeds
+        case attributionPreface = "attribution_preface"
         case attribution
     }
 

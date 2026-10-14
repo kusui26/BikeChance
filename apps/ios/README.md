@@ -55,6 +55,8 @@ xcrun simctl launch booted app.bikechance.BikeChance
 | **未観測は `—`。0 と区別する** | `-1`（未観測）は 0 台とは違う（データ辞書 §2 の (3)） | `StationDetail.unknownValue`（`StationDetailScreen`） |
 | **鮮度が切れた値は「現在値」として出さない** | ODPT ガイドライン 2.1、CLAUDE.md §2 の 8。灰色にして観測時刻を添える | `Freshness` |
 | **クレジットを常時出す** | CC BY 4.0 と ODPT ガイドライン 3.1。文言は `/v1/meta` から取り、アプリに焼き込まない | `CreditFooter` / `CreditsScreen` |
+| **取れなくてもクレジットを出す** | 表示義務は通信に依存しない。最後に取れた `/v1/meta` をバイトのまま取っておき、**サーバーが作った時刻つきで**出す（W6 の契約 42）。「いつの内容か」はファイルの日時から作らない（読むとプライバシーマニフェストに理由の申告が要る） | `CreditsModel`・`FileMetaCache` |
+| **予測値には予測時刻、実測値には観測時刻を添える** | CLAUDE.md §2 の 7（W6 の契約 43）。文言は 1 か所で作る | `ForecastDisplay.basisText`・`StationCurrent.currentLine` |
 
 ## 契約テスト
 

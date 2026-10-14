@@ -23,6 +23,8 @@ struct MapScreen: View {
     @State private var visible: [StationCurrent] = []
     @State private var feeds: [String: FeedStatus] = [:]
     @State private var attributions: [String: Attribution] = [:]
+    /// クレジットの前置き（W6-31）。**応答の文言を使う**（焼き付けない）。
+    @State private var attributionPreface: String?
     @State private var selected: StationCurrent?
     @State private var showsCredits = false
     @State private var showsFavorites = false
@@ -56,6 +58,7 @@ struct MapScreen: View {
                         station: latest,
                         feed: feeds[latest.systemID],
                         attribution: attributions[latest.systemID],
+                        attributionPreface: attributionPreface,
                         intent: model.intent,
                         arrival: forecastArrival,
                         now: now,
@@ -150,6 +153,7 @@ struct MapScreen: View {
         }
         feeds = response.feedIndex()
         attributions = response.attributionIndex()
+        attributionPreface = response.attributionPreface
         // **応答が指している到着時刻を持つ。** 選択中の到着ではない（取り直しの最中は
         // まだ前の応答が出ており、ピンの色はそちらの時刻の話をしている）
         forecastArrival = response.forecastArrival

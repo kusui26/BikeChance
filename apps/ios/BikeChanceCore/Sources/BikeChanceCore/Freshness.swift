@@ -47,6 +47,17 @@ extension StationCurrent {
         return .stale(age: max(0, age))
     }
 
+    /// 「いま 返せる 5・3 分前の観測」（目的地の候補など。W6-32、所見 196）。
+    ///
+    /// **実測値には観測時刻を必ず添える**（CLAUDE.md §2 の 7）。**フィードを渡す**——
+    /// 渡さないと鮮度の閾値が分からず、古い値も「現在値」に見える。古ければ数は「—」
+    /// （`countText` と同じ規則）。
+    public func currentLine(for intent: RideIntent, feed: FeedStatus?, now: Date) -> String {
+        let freshness = freshness(feed: feed, now: now)
+        let count = countText(for: intent, freshness: freshness)
+        return "いま \(intent.verb) \(count)・\(freshness.label)"
+    }
+
     /// 「借りられるか」の見た目。**予測ではなく実測**であることを崩さない。
     ///
     /// `bikes` が未観測（null）なら判断できない。`isRenting` が false なら台数があっても借りられない。

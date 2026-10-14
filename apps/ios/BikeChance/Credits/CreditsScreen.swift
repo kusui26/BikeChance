@@ -1,67 +1,126 @@
 import BikeChanceCore
 import SwiftUI
 
-/// クレジットと通知文。**表示は義務**（CC BY 4.0 と ODPT ガイドライン 3.1）。
+/// 「データについて」（W6-31・32、契約 42）。**表示は義務**（CC BY 4.0、ODPT ガイドライン 3.1、
+/// Open-Meteo・公共データ利用規約の出典）。
 ///
-/// 文言はアプリに焼き込まず、`/v1/meta` から取る。事業者やライセンス表記が変わっても
-/// アプリを出し直さずに追随できる。**取れなかったときは何も出さないのではなく、
-/// 取れなかったことを出す**（黙って表示義務を落とさない）。
+/// **文言はサーバーが持つ**（`/v1/meta`）。ここは並べ方だけを決める：開発プラン §3.7 の
+/// 前置きを**クレジットの前**に置き、ODPT 以外の出典、通知文、予測についての免責と
+/// モデル版、鮮度の順に出す。
+///
+/// **取れなくても表示義務を落とさない。** 最後に取れた内容を、それをサーバーが作った
+/// 時刻つきで出す（`CreditsModel`）。1 度も取れていない端末では、取れなかったと言う。
 struct CreditsScreen: View {
-    @State private var meta: MetaResponse?
-    @State private var message: String?
+    @Environment(\.v1Client) private var client
+    @Environment(\.dismiss) private var dismiss
+    @State private var model: CreditsModel?
 
     var body: some View {
         NavigationStack {
-            List {
-                if let meta {
-                    Section("このアプリが利用している著作物") {
-                        ForEach(meta.attribution) { attribution in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(attribution.provider).font(.subheadline)
-                                Text(attribution.credit)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.vertical, 2)
-                        }
-                        Text("上記の著作物を改変して利用しています。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            content
+                .navigationTitle("データについて")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("閉じる") { dismiss() }
                     }
-                    Section("提供元からのお知らせ") {
-                        Text(meta.notice).font(.caption)
-                    }
-                    Section("予測について") {
-                        Text(meta.disclaimer).font(.caption)
-                    }
-                    Section("データの鮮度") {
-                        ForEach(meta.feeds) { feed in
-                            LabeledContent(feed.displayName) {
-                                Text(feed.isStale ? "更新が滞っています" : "更新中")
-                                    .foregroundStyle(feed.isStale ? .orange : .secondary)
-                            }
-                            .font(.caption)
-                        }
-                    }
-                } else if let message {
-                    ContentUnavailableView(
-                        "クレジットを取得できませんでした", systemImage: "wifi.exclamationmark",
-                        description: Text(message))
-                } else {
-                    ProgressView()
                 }
-            }
-            .navigationTitle("データについて")
-            .navigationBarTitleDisplayMode(.inline)
         }
         .task {
-            do {
-                meta = try await AppEnvironment.makeClient().meta()
-            } catch let error as V1Error {
-                message = error.message
-            } catch {
-                message = "通信に失敗しました。"
+            let model = CreditsModel(
+                client: client, cache: FileMetaCache(directory: AppEnvironment.metaCacheDirectory))
+            self.model = model
+            await model.load()
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let state = model?.state, let display = CreditsDisplay(state: state) {
+            list(display)
+        } else if case .failed(let message) = model?.state {
+            ContentUnavailableView(
+                "クレジットを取得できませんでした", systemImage: "wifi.exclamationmark",
+                description: Text(message))
+        } else {
+            ProgressView()
+        }
+    }
+
+    private func list(_ display: CreditsDisplay) -> some View {
+        List {
+            if display.isOffline {
+                // **古い内容であることを先に言う**（取っておいた内容を「いま」のものに見せない）
+                Section {
+                    Label(display.asOf, systemImage: "wifi.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
+            creditSection(display.meta)
+            sourcesSection(display.meta)
+            Section("提供元からのお知らせ") {
+                Text(display.meta.notice).font(.caption)
+            }
+            Section("予測について") {
+                Text(display.meta.disclaimer).font(.caption)
+                Text(display.modelVersion).font(.caption).foregroundStyle(.secondary)
+            }
+            if !display.isOffline {
+                feedsSection(display)
+            }
+        }
+    }
+
+    /// **前置きを一覧の前に置く**（開発プラン §3.7。ODPT の FAQ の「改変して利用する場合」）。
+    private func creditSection(_ meta: MetaResponse) -> some View {
+        Section("クレジット") {
+            if let preface = meta.attributionPreface {
+                Text(preface).font(.subheadline)
+            }
+            ForEach(meta.attribution) { attribution in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(attribution.provider).font(.subheadline)
+                    Text(attribution.credit)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
+    /// 天気・祝日・行政区域の出典（W6-31）。**リンクの文言もサーバーのまま**
+    /// （Open-Meteo は「Weather data by Open-Meteo.com」を求める）。
+    @ViewBuilder
+    private func sourcesSection(_ meta: MetaResponse) -> some View {
+        if !meta.sources.isEmpty {
+            Section("そのほかの出典") {
+                ForEach(meta.sources) { source in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(source.text).font(.caption)
+                        Link(source.linkLabel, destination: source.url).font(.caption)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+    }
+
+    /// いまの鮮度。**取っておいた内容のときは出さない**（何日も前の「更新中」を見せない）。
+    private func feedsSection(_ display: CreditsDisplay) -> some View {
+        Section {
+            ForEach(display.meta.feeds) { feed in
+                LabeledContent(feed.displayName) {
+                    Text(feed.isStale ? "更新が滞っています" : "更新中")
+                        .foregroundStyle(feed.isStale ? .orange : .secondary)
+                }
+                .font(.caption)
+            }
+        } header: {
+            Text("データの鮮度")
+        } footer: {
+            Text(display.asOf)
         }
     }
 }
