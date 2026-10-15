@@ -15,6 +15,7 @@ from functools import reduce
 import pyarrow as pa
 import pytest
 
+from bikechance_ml.features.constants import SMALLINT_MAX
 from bikechance_ml.features.reference import (
     NeighborRow,
     StationAttributeRow,
@@ -27,6 +28,7 @@ from bikechance_ml.features.reference_snapshot import (
     STATIONS_SCHEMA,
     SnapshotShapeError,
     capacity_estimates,
+    capacity_overflows,
     capacity_rows,
     daily_capacity_max,
     merge_daily_max,
@@ -328,6 +330,70 @@ def test_a_written_version_can_be_folded_into_the_next_one() -> None:
 
 def test_folding_skips_ports_without_a_daily_max() -> None:
     assert to_daily_max(_stations_with(None, [])) == {}
+
+
+# ── 型の上限ちょうどの観測（W6-36、W6 プランの所見 221）──────────────
+def test_a_total_at_the_smallint_ceiling_is_not_an_observation() -> None:
+    """ドコモの 4161 の形：空き枠 32767 は上流の合図で、**大きさに入れない**。
+
+    同じ日のほかの観測は残す。
+    """
+    table = snapshot_rows(
+        [("docomo-cycle", "4161", 1, SMALLINT_MAX), ("docomo-cycle", "4161", 0, 0)]
+    )
+    assert daily_capacity_max(table) == {("docomo-cycle", "4161"): 0}
+
+
+def test_a_port_seen_only_at_the_ceiling_has_no_entry() -> None:
+    """合図しか無い日は「観測が無い」と同じ（鍵ごと出さない）。"""
+    table = snapshot_rows([("docomo-cycle", "4161", 0, SMALLINT_MAX)])
+    assert daily_capacity_max(table) == {}
+
+
+def test_a_total_just_below_the_ceiling_is_kept() -> None:
+    """境目：**上限より 1 小さい合計は大きさとして残す**（上限そのもの以上だけを落とす）。"""
+    table = snapshot_rows([("hellocycling", "a", 1, SMALLINT_MAX - 2)])
+    assert daily_capacity_max(table) == {("hellocycling", "a"): SMALLINT_MAX - 1}
+
+
+def test_folding_skips_a_stored_daily_max_at_the_ceiling() -> None:
+    """**直す前に書いた版の 32768 を、7 日の窓に残さない。** 上限より小さい値は読む。"""
+    assert to_daily_max(_stations_with(SMALLINT_MAX + 1, [])) == {}
+    assert to_daily_max(_stations_with(SMALLINT_MAX, [])) == {}
+    below = to_daily_max(_stations_with(SMALLINT_MAX - 1, []))
+    assert below == {("hellocycling", "a"): SMALLINT_MAX - 1}
+
+
+def test_the_4161_week_fits_the_column_again() -> None:
+    """10-13 からの形：前の 5 日は 0、**前日の版に 32768 が書かれている**、当日も 1 + 32767。
+
+    直したあとは、前の版を読み直しても当日を作っても上限が入らず、DB の列（smallint）に収まる。
+    """
+    key = ("hellocycling", "a")
+    written_before_the_fix = to_daily_max(_stations_with(SMALLINT_MAX + 1, []))
+    previous = [written_before_the_fix, *[{key: 0} for _ in range(5)]]
+    today = daily_capacity_max(snapshot_rows([("hellocycling", "a", 1, SMALLINT_MAX)]))
+    stations = to_stations_table([hello(geos=(geo("a"),))], today, previous, built_at=BUILT_AT)
+    assert capacity_estimates(stations) == {key: 0}
+    assert stations.column("capacity_days").to_pylist() == [5]
+    rows = capacity_rows(stations, date(2026, 10, 15))
+    assert [row["capacity_est"] for row in rows] == [0]
+    assert capacity_overflows(stations) == 0
+
+
+def test_capacity_rows_skip_a_value_over_smallint_and_count_it() -> None:
+    """**守り**：上限を超えた値が残っていても、その行だけを書かずに数える。
+
+    書き込みは 1 回の RPC なので、1 つの値で全ポートの大きさが止まる（所見 221）。
+    """
+    over = _stations_with(SMALLINT_MAX + 1, [])
+    assert capacity_rows(over, date(2026, 10, 14)) == ()
+    assert capacity_overflows(over) == 1
+    at_ceiling = _stations_with(SMALLINT_MAX, [])
+    assert [row["capacity_est"] for row in capacity_rows(at_ceiling, date(2026, 10, 14))] == [
+        SMALLINT_MAX
+    ]
+    assert capacity_overflows(at_ceiling) == 0
 
 
 def test_folding_refuses_a_table_with_the_wrong_columns() -> None:

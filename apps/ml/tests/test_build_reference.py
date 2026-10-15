@@ -15,12 +15,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from bikechance_ml.features.constants import SMALLINT_MAX
 from bikechance_ml.features.grid import day_hours, jst_yesterday
 from bikechance_ml.features.reference import NeighborRow, StationAttributeRow, StationGeoRow
 from bikechance_ml.features.reference_snapshot import (
     NEIGHBORS_NAME,
     STATIONS_NAME,
     daily_capacity_max,
+    to_neighbors_table,
+    to_stations_table,
 )
 from bikechance_ml.jobs.build_features import SYSTEM_IDS
 from bikechance_ml.jobs.build_reference import (
@@ -29,6 +32,8 @@ from bikechance_ml.jobs.build_reference import (
     build_and_upload,
     load_daily_max,
     read_hour,
+    read_reference,
+    to_summary,
 )
 from bikechance_ml.jobs.snapshot_table import SCHEMA as SNAPSHOT_SCHEMA
 from bikechance_ml.jobs.snapshot_table import parquet_path
@@ -170,6 +175,7 @@ def test_a_day_without_snapshots_is_reported_not_invented() -> None:
     assert summary["with_capacity_est"] == 0
     # **観測が無ければ DB にも 1 行も写さない**（0 を「大きさ 0」として入れない。0045）
     assert summary["capacity_est_rows"] == 0
+    assert summary["capacity_est_skipped"] == 0
     assert port.capacity_rows == []
 
 
@@ -296,3 +302,33 @@ def test_the_whole_job_writes_the_folded_capacity() -> None:
     by_port = {(row["system_id"], row["station_id"]): row for row in port.capacity_rows}
     assert by_port[("hellocycling", "a")]["capacity_est"] == 11
     assert by_port[("docomo-cycle", "a")]["capacity_est"] == 12
+
+
+def test_a_sentinel_observation_does_not_stop_the_write() -> None:
+    """**ドコモの 4161 の形**（W6-36、W6 プランの所見 221）：空き枠 32767 の観測が混じっても、
+    **その観測を大きさに入れずに書ききる**。前は 7 日の最大が 32768 になり、smallint の列に
+    入らずに DB への書き込みごと落ちていた（全ポートの `capacity_est` が止まる）。
+    """
+    port = SnapshotPort()
+    sentinel = hour_table("docomo-cycle", 21, (("a", 1, SMALLINT_MAX),))
+    port.bodies[parquet_path("docomo-cycle", HOURS[21])] = snapshot_bytes(sentinel)
+    summary = run(port)
+    assert summary["ok"] is True
+    assert summary["capacity_est_skipped"] == 0
+    by_port = {(row["system_id"], row["station_id"]): row for row in port.capacity_rows}
+    assert by_port[("docomo-cycle", "a")]["capacity_est"] == 12, (
+        "**合図の 32768 ではなく観測の最大**"
+    )
+
+
+def test_the_summary_counts_a_size_it_did_not_write() -> None:
+    """**守りが働いたら黙らない**（W6-36）：smallint に収まらない大きさは、DB に書かない数
+    として `capacity_est_skipped` に出る。いまの組み立てでは上限以上の観測を入れないので、
+    本番では 0 のまま。
+    """
+    systems = tuple(read_reference(FakePort(), system_id) for system_id in SYSTEM_IDS)
+    previous = ({("docomo-cycle", "a"): SMALLINT_MAX + 1},)
+    stations = to_stations_table(systems, {}, previous, built_at=NOW)
+    summary = to_summary(stations, to_neighbors_table(systems, built_at=NOW), (), {})
+    assert summary["with_capacity_est"] == 1
+    assert summary["capacity_est_skipped"] == 1

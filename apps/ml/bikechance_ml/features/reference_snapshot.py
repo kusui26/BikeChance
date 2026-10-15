@@ -23,7 +23,7 @@ from typing import Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from bikechance_ml.features.constants import MISSING
+from bikechance_ml.features.constants import MISSING, SMALLINT_MAX
 from bikechance_ml.features.reference import (
     NeighborRow,
     StationAttributeRow,
@@ -177,26 +177,13 @@ def daily_capacity_max(snapshots: pa.Table) -> dict[tuple[str, str], int]:
     """`bikes + docks` の、その日の最大を `(system_id, station_id)` ごとに出す。
 
     **観測されていない行（`-1`）は数えない。** 1 度も観測が無いポートは鍵ごと出さない
-    （`0` を入れると「容量 0 のポート」に見える）。
+    （`0` を入れると「容量 0 のポート」に見える）。**合計が型の上限（`SMALLINT_MAX`）以上の
+    行も数えない**——上流の合図であって大きさではない（W6-36、所見 221）。
     """
-    if snapshots.num_rows == 0:
+    totals = _plausible_totals(snapshots)
+    if totals.num_rows == 0:
         return {}
-    observed = snapshots.filter(
-        pc.and_(
-            pc.not_equal(snapshots.column("bikes"), MISSING),
-            pc.not_equal(snapshots.column("docks"), MISSING),
-        )
-    )
-    if observed.num_rows == 0:
-        return {}
-    totals = pc.add(
-        observed.column("bikes").cast(pa.int32()), observed.column("docks").cast(pa.int32())
-    )
-    grouped = (
-        observed.append_column("total", totals)
-        .group_by(["system_id", "station_id"])
-        .aggregate([("total", "max")])
-    )
+    grouped = totals.group_by(["system_id", "station_id"]).aggregate([("total", "max")])
     return {
         (str(system), str(station)): int(value)
         for system, station, value in zip(
@@ -206,6 +193,29 @@ def daily_capacity_max(snapshots: pa.Table) -> dict[tuple[str, str], int]:
             strict=True,
         )
     }
+
+
+def _plausible_totals(snapshots: pa.Table) -> pa.Table:
+    """観測された行の `(system_id, station_id, total)`。`total` は `bikes + docks`。
+
+    **`-1` の行と、合計が型の上限以上の行を落とす**（W6-36）。
+    """
+    observed = snapshots.filter(
+        pc.and_(
+            pc.not_equal(snapshots.column("bikes"), MISSING),
+            pc.not_equal(snapshots.column("docks"), MISSING),
+        )
+    )
+    totals = pa.table(
+        {
+            "system_id": observed.column("system_id"),
+            "station_id": observed.column("station_id"),
+            "total": pc.add(
+                observed.column("bikes").cast(pa.int32()), observed.column("docks").cast(pa.int32())
+            ),
+        }
+    )
+    return totals.filter(pc.less(totals.column("total"), SMALLINT_MAX))
 
 
 def merge_daily_max(
@@ -222,7 +232,11 @@ def merge_daily_max(
 
 
 def to_daily_max(stations: pa.Table) -> dict[tuple[str, str], int]:
-    """既に書いた版から `capacity_daily_max` を読み直す（前の版を畳むときに使う）。"""
+    """既に書いた版から `capacity_daily_max` を読み直す（前の版を畳むときに使う）。
+
+    **型の上限以上の値は読み飛ばす**（W6-36）。直す前に書いた版（10-13 からの 4161 の 32768）が
+    7 日の窓に残ると、その日の観測だけ直しても窓を抜けるまで DB に書けない。
+    """
     _require(stations, STATIONS_SCHEMA)
     return {
         (str(system), str(station)): int(value)
@@ -232,7 +246,7 @@ def to_daily_max(stations: pa.Table) -> dict[tuple[str, str], int]:
             stations.column("capacity_daily_max").to_pylist(),
             strict=True,
         )
-        if value is not None
+        if value is not None and value < SMALLINT_MAX
     }
 
 
@@ -291,16 +305,33 @@ def capacity_rows(stations: pa.Table, day: date) -> tuple[Row, ...]:
     **`capacity_est` の無い（None の）ポートは行を作らない。** 7 日のあいだ 1 度も
     観測できなかったポートである。**0 は行を作る**——「7 日とも 1 台も 1 枠も並ばなかった」
     という観測であって「分からない」ではない（実測 37 件。W5 プラン §12 の 152）。
+
+    **smallint に収まらない値も行にしない**（W6-36、所見 221）。書き込みは 1 回の RPC なので、
+    1 つの値で全ポートの大きさが止まる。書かなかった数は `capacity_overflows`（0 が正常）。
     """
-    _require(stations, STATIONS_SCHEMA)
     return tuple(
         {
-            "system_id": str(system),
-            "station_id": str(station),
-            "capacity_est": int(est),
-            "capacity_days": int(days),
+            "system_id": system,
+            "station_id": station,
+            "capacity_est": est,
+            "capacity_days": days,
             "as_of_date": day.isoformat(),
         }
+        for system, station, est, days in _known_capacities(stations)
+        if est <= SMALLINT_MAX
+    )
+
+
+def capacity_overflows(stations: pa.Table) -> int:
+    """smallint に収まらず、`capacity_rows` が行にしなかったポートの数（W6-36。0 が正常）。"""
+    return sum(1 for _, _, est, _ in _known_capacities(stations) if est > SMALLINT_MAX)
+
+
+def _known_capacities(stations: pa.Table) -> list[tuple[str, str, int, int]]:
+    """`capacity_est` のあるポートの `(system_id, station_id, capacity_est, capacity_days)`。"""
+    _require(stations, STATIONS_SCHEMA)
+    return [
+        (str(system), str(station), int(est), int(days))
         for system, station, est, days in zip(
             stations.column("system_id").to_pylist(),
             stations.column("station_id").to_pylist(),
@@ -309,7 +340,7 @@ def capacity_rows(stations: pa.Table, day: date) -> tuple[Row, ...]:
             strict=True,
         )
         if est is not None
-    )
+    ]
 
 
 def _by_system[T](
