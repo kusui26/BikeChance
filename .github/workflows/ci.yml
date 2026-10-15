@@ -194,3 +194,19 @@ jobs:
             done
           done
           echo "OK: 2 つの名前 × 3 つの場所とも生きている"
+
+  ignore-build:
+    name: Ignored Build Step の判定
+    # `scripts/vercel-ignore-build.sh` は**デプロイを飛ばすかを決める**（W6 プランの PR M、W6-22）。
+    # 本番（main）にも効き、誤って「飛ばす」と判定すると**コードの変更が本番に出ない**
+    # （収集器も前のデプロイのまま動き続けるので、出ていないことに気づきにくい）。
+    # 判定を変えたら、ここが落ちて気づける。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: shellcheck
+        run: shellcheck scripts/vercel-ignore-build.sh scripts/vercel-ignore-build.test.sh
+
+      - name: 判定の検査（一時リポジトリにコミットを積んで終了コードを見る）
+        run: bash scripts/vercel-ignore-build.test.sh
