@@ -64,11 +64,13 @@ xcrun simctl launch booted app.bikechance.BikeChance
 （書き換えない）。サーバー側のスキーマを変えたらここが落ちて気づける。
 
 - `stations*.json`（5 つ。2026-09-09〜13）… `/v1/stations` のポート応答。**`aggregation` を足す前**の形
-- `stations_aggregation.json`（2026-09-27）… いまのポート応答（`aggregation: station`）
+- `stations_aggregation.json`（2026-09-27）… ポート応答（`aggregation: station`）。**前置きを足す前**の形
+- `stations_preface.json`（2026-10-14）… いまのポート応答（`139.76,35.68,139.77,35.69`、9 ポート）。**クレジットの前置き `attribution_preface` つき**（W6 の PR J）
 - `stations_cells.json`（2026-09-27）… **セル応答**（`139.76,35.67,139.85,35.70`、9 格子。`stations` が無い）
 - `station_detail*.json`（2026-09-13）… ポート詳細（予測の曲線あり・なし）
 - `trip_check*.json`（2026-09-13）… 行程チェック
-- `meta.json`（2026-09-09）… `/v1/meta`
+- `meta.json`（2026-09-09）… `/v1/meta`。**前置きと出典を足す前**の形（いまの iOS も読めることを確かめる）
+- `meta_sources.json`（2026-10-14）… いまの `/v1/meta`（前置き `attribution_preface` と、ODPT 以外の出典 `sources` つき。W6 の PR J）
 - `problem_*.json` … RFC 9457 のエラー
 
 `Bbox` の丸めがサーバーと一致していることも、この応答の `bbox`（サーバーが返す実効矩形）と
