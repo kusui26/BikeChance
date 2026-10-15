@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  プライバシーマニフェスト（W6 プランの PR K、W6-33）。最小の形：追跡しない・収集しない・理由の要る API を使わない。
+
+  * 収集しない：位置情報は端末の中で地図に使うだけ。サーバーへ送るのは 0.01 度の格子に丸めた
+    表示範囲だけで、保持しない（CLAUDE.md §5。App Store Connect のプライバシーの回答も「収集しない」）
+  * 理由の要る API：お気に入りは JSON のファイルに置いていて、UserDefaults もファイルの日時も読まない。
+    **UserDefaults を使い始めたら、NSPrivacyAccessedAPITypes に CA92.1 を足す**
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array/>
+</dict>
+</plist>
