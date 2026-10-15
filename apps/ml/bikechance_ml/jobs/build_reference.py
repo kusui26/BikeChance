@@ -43,6 +43,7 @@ from bikechance_ml.features.reference_snapshot import (
     NEIGHBORS_NAME,
     STATIONS_NAME,
     STATIONS_SCHEMA,
+    capacity_overflows,
     capacity_rows,
     daily_capacity_max,
     merge_daily_max,
@@ -163,6 +164,8 @@ def to_summary(
         "with_capacity_est": sum(1 for one in estimates if one is not None),
         "capacity_days_max": max(days) if days else 0,
         "capacity_days_full": sum(1 for one in days if one >= CAPACITY_DAYS),
+        # **DB に書かなかった大きさ**（smallint に収まらない。W6-36）。0 が正常
+        "capacity_est_skipped": capacity_overflows(stations),
         "missing_hours": len(missing),
         "bytes": sizes,
     }

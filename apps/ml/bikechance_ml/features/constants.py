@@ -127,6 +127,14 @@ SAME_TIME_MINUTES: Final[int] = 24 * 60
 #: 「観測されなかった」を表す値。`jobs/snapshot_table.py` の `MISSING` と同じ意味。
 MISSING: Final[int] = -1
 
+#: 台数・空き枠の型（smallint）の上限。収集（`packages/gbfs-core` の `SMALLINT_MAX`）が
+#: 受け付ける上限と同じ値で、`station_capacity_est.capacity_est` もこの型である。
+#:
+#: **上限ちょうどの値は、数ではなく合図として疑う**（W6-36、W6 プランの所見 221）。ドコモの
+#: 4161 は 10/13 から空き枠を 32767 と報告し続け、7 日の `max(bikes + docks)` が 32768 に
+#: なって DB に入らなかった。**合計がこれ以上の観測は、大きさの推定に入れない**。
+SMALLINT_MAX: Final[int] = 32767
+
 #: `flags` のビット（データ辞書 §4.4）。実際に現れるのは 7 / 1 / -1 だけ。
 FLAG_INSTALLED: Final[int] = 1
 FLAG_RENTING: Final[int] = 2
