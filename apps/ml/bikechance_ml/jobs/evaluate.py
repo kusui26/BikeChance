@@ -146,6 +146,27 @@ class LogFile:
 
 
 @dataclass(frozen=True)
+class EmptyLog:
+    """行の無い予測ログ。**何も配らなかった周期の、正しい記録**（W6-37、W6 プランの所見 222）。
+
+    上流が止まって全ポートが「その時点で古い」で除外された周期は、行 0 のまま active と
+    shadow のログを書く。**測る対象からは外し、数だけ残す。** 日の内外は、行のあるログと
+    同じく覚え書きの `generated_at` で決める。
+    """
+
+    path: str
+    generated_at: datetime
+
+
+@dataclass(frozen=True)
+class ReadLogs:
+    """その日の予測ログ。**測るもの**と、読み飛ばした行 0 のログの数。"""
+
+    logs: tuple[LogFile, ...]
+    n_empty: int
+
+
+@dataclass(frozen=True)
 class SystemOutcome:
     """1 システムぶんの結果。**1 つ落ちても他は続ける。**"""
 
@@ -159,6 +180,8 @@ class SystemOutcome:
     model_versions: tuple[str, ...] = ()
     dropped: Mapping[str, int] = field(default_factory=dict)
     error: str | None = None
+    #: 読み飛ばした行 0 のログ（W6-37）。**上流が止まった日に 0 でなくなる**
+    n_empty_logs: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -171,6 +194,7 @@ class SystemOutcome:
             "n_rows": self.n_rows,
             "model_versions": list(self.model_versions),
             "dropped": dict(sorted(self.dropped.items())),
+            "empty_logs": self.n_empty_logs,
             **({"error": self.error} if self.error else {}),
         }
 
@@ -240,28 +264,28 @@ def list_logs(port: EvaluatePort, system_id: str, day: date) -> tuple[str, ...]:
     return tuple(sorted(name for names in found for name in names))
 
 
-def read_log(body: bytes, path: str) -> LogFile:
+def read_log(body: bytes, path: str) -> LogFile | EmptyLog:
     """1 サイクルぶんを読む。**覚え書きから `generated_at` を拾う。**
 
     `concat_tables` すると覚え書きは消えるので、**1 ファイルずつ読むここでしか
     拾えない**（W4 プラン §6.8 は「結合に使わないものだけを覚え書きに」と決めたが、
     **水平の起点は結合に使う**）。
+
+    **行 0 は例外にしない**（W6-37）。前は例外にしていて、上流が止まった 10-14 の 1 日ぶんを
+    両系統とも落とした（所見 222）。覚え書きの無いファイルは、行 0 でも壊れたものとして止める。
     """
     table = pq.read_table(io.BytesIO(body))
-    if table.num_rows == 0:
-        raise ValueError(f"{path} に行がありません")
     metadata = {
         key.decode(): value.decode() for key, value in (table.schema.metadata or {}).items()
     }
     if "generated_at" not in metadata:
         raise KeyError(f"{path} の覚え書きに generated_at がありません")
+    generated_at = datetime.fromisoformat(metadata["generated_at"]).astimezone(UTC)
+    if table.num_rows == 0:
+        return EmptyLog(path=path, generated_at=generated_at)
     served.check_horizons(table.column("horizons_min")[0].as_py(), path)
-    return LogFile(
-        path=path,
-        model_version=str(table.column("model_version")[0].as_py()),
-        generated_at=datetime.fromisoformat(metadata["generated_at"]).astimezone(UTC),
-        table=table,
-    )
+    model_version = str(table.column("model_version")[0].as_py())
+    return LogFile(path=path, model_version=model_version, generated_at=generated_at, table=table)
 
 
 def within(day: date, at: datetime) -> bool:
@@ -270,22 +294,24 @@ def within(day: date, at: datetime) -> bool:
     return start <= at < start + timedelta(hours=24)
 
 
-def fetch_log(port: EvaluatePort, path: str) -> LogFile | None:
+def fetch_log(port: EvaluatePort, path: str) -> LogFile | EmptyLog | None:
     """1 サイクルぶんを取って読む。**無ければ None**（消えていても止めない）。"""
     body = port.download_forecast_log(path)
     return None if body is None else read_log(body, path)
 
 
-def read_logs(port: EvaluatePort, system_id: str, day: date) -> tuple[LogFile, ...]:
+def read_logs(port: EvaluatePort, system_id: str, day: date) -> ReadLogs:
     """その日の予測ログ。**`generated_at` で絞り直す**（パスは基準観測の時刻）。
 
     **取得と Parquet の展開をまとめて並行にする。** 展開は `pyarrow` の中で GIL を
     放すので、往復の待ちと重なる。**絞り込みは戻ってから**——`within` を並行の中に
-    入れると、読んだ数と残った数の差が追えなくなる。
+    入れると、読んだ数と残った数の差が追えなくなる。行 0 のログも同じく日で絞ってから数える。
     """
     paths = list_logs(port, system_id, day)
     found = fanout.gather(lambda path: fetch_log(port, path), paths, workers=IO_WORKERS)
-    return tuple(one for one in found if one is not None and within(day, one.generated_at))
+    inside = [one for one in found if one is not None and within(day, one.generated_at)]
+    logs = tuple(one for one in inside if isinstance(one, LogFile))
+    return ReadLogs(logs=logs, n_empty=len(inside) - len(logs))
 
 
 # ── 「配った確率」を格子に載せる ──────────────────────────────
@@ -378,9 +404,12 @@ def read_observations(port: EvaluatePort, system_id: str, day: date) -> pa.Table
 # ── 1 システムぶん ────────────────────────────────────────────
 def evaluate_system(port: EvaluatePort, system_id: str, day: date, grid: Grid) -> SystemResult:
     """1 システムを測る。**版ごとに分けて測る**（`active` と `shadow` が同じ日に並ぶ）。"""
-    logs = read_logs(port, system_id, day)
+    read = read_logs(port, system_id, day)
+    logs = read.logs
     if not logs:
-        return SystemResult(SystemOutcome(system_id, True, 0, 0, 0, 0, 0))
+        return SystemResult(
+            SystemOutcome(system_id, True, 0, 0, 0, 0, 0, n_empty_logs=read.n_empty)
+        )
     observations = read_observations(port, system_id, day)
     stations = station_keys(logs)
     truth = served.to_truth(observations, [(system_id, name) for name in stations], grid)
@@ -406,6 +435,7 @@ def evaluate_system(port: EvaluatePort, system_id: str, day: date, grid: Grid) -
             n_rows=len(rows),
             model_versions=tuple(sorted({one.model_version for one in logs})),
             dropped=dropped,
+            n_empty_logs=read.n_empty,
         ),
         tuple(rows),
     )
