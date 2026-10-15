@@ -8,6 +8,7 @@
   * **ログの無い日は `skipped`**（失敗にしない。完了条件 5）
   * **足りない一覧の上で測らない**（Storage の上限に達したら止める）
   * **1 システムの失敗が他を巻き込まない**
+  * **行 0 のログ（何も配らなかった周期）で 1 日ぶんを落とさない**（W6-37、所見 222）
 """
 
 import json
@@ -29,7 +30,9 @@ from bikechance_ml.jobs import forecast_log
 from bikechance_ml.jobs.evaluate import (
     JOB_NAME,
     LIST_LIMIT,
+    EmptyLog,
     EvaluatePort,
+    LogFile,
     TruncatedListingError,
     cycle_of,
     list_logs,
@@ -138,8 +141,11 @@ def test_the_day_is_cut_by_generated_at_not_by_the_path() -> None:
     outside = log_file(["p1"], at(23, 55) - timedelta(days=1), base_observed_at=at(0, 1))
     assert within(DAY, at(0, 0))
     assert not within(DAY, at(23, 55) - timedelta(days=1))
-    assert read_log(inside.body, inside.path).generated_at == at(0, 0).astimezone(UTC)
-    assert read_log(outside.body, outside.path).model_version == MODEL
+    read_inside = read_log(inside.body, inside.path)
+    read_outside = read_log(outside.body, outside.path)
+    assert isinstance(read_inside, LogFile) and isinstance(read_outside, LogFile)
+    assert read_inside.generated_at == at(0, 0).astimezone(UTC)
+    assert read_outside.model_version == MODEL
 
 
 def test_the_listing_covers_the_day_with_a_margin() -> None:
@@ -187,7 +193,7 @@ def test_a_cycle_outside_the_day_is_dropped_after_reading() -> None:
     after = log_file(["p1"], at(0, 0) + timedelta(days=1))
     port = FakePort([inside, before, after])
     read = read_logs(port, "hellocycling", DAY)
-    assert [one.generated_at for one in read] == [at(0, 0).astimezone(UTC)]
+    assert [one.generated_at for one in read.logs] == [at(0, 0).astimezone(UTC)]
 
 
 def test_a_listed_file_that_has_vanished_is_skipped() -> None:
@@ -204,7 +210,7 @@ def test_a_listed_file_that_has_vanished_is_skipped() -> None:
             return None if path == lost.path else self.objects.get(path)
 
     port = Vanishing([kept, lost])
-    assert [one.path for one in read_logs(port, "hellocycling", DAY)] == [kept.path]
+    assert [one.path for one in read_logs(port, "hellocycling", DAY).logs] == [kept.path]
 
 
 def test_names_that_are_not_logs_are_ignored() -> None:
@@ -333,11 +339,100 @@ def test_the_run_is_recorded_with_the_breakdown() -> None:
     assert "dropped" in systems[0] and "n_kept" in systems[0]
 
 
+# ── 行 0 のログ（W6-37、W6 プランの所見 222）──────────────────────
+def empty_log(generated_at: datetime, model_version: str = MODEL) -> forecast_log.LogFile:
+    """**全ポートが除外された周期**のログ。行 0 で、覚え書きはそろっている。
+
+    本番の 10-14（上流が止まった直後の周期）と同じ形。
+    """
+    return forecast_log.build(
+        [],
+        system_id="hellocycling",
+        base_observed_at=generated_at + timedelta(seconds=96),
+        generated_at=generated_at,
+        model_version=model_version,
+        feature_set="v3",
+    )
+
+
+def row_values(rows: Sequence[Mapping[str, object]]) -> set[tuple[object, ...]]:
+    """書く行の中身（鍵と成績）。**行のあるログの成績が変わらない**ことを見るのに使う。"""
+    keys = ("model_version", "system_id", "target", "h_min", "bucket", "n", "brier")
+    return {tuple(one.get(key) for key in keys) for one in rows}
+
+
+def test_an_empty_log_is_read_as_a_cycle_that_served_nothing() -> None:
+    """**行 0 は例外にしない**（前はここで投げ、10-14 の 1 日ぶんを両系統とも落とした）。
+
+    覚え書きの `generated_at` は読む——日の内外を、行のあるログと同じ規則で決めるため。
+    """
+    one = empty_log(at(12, 0))
+    assert one.rows == 0
+    read = read_log(one.body, one.path)
+    assert isinstance(read, EmptyLog)
+    assert read.generated_at == at(12, 0).astimezone(UTC)
+
+
+def test_a_log_without_its_note_is_still_refused_even_when_empty() -> None:
+    """**覚え書きの無いファイルは、行 0 でも壊れたものとして止める**。
+
+    読み飛ばしてよいのは、覚え書きのそろった正しい行 0 だけ。
+    """
+    body = forecast_log.to_bytes(
+        forecast_log.to_table([], base_observed_at=at(12, 0), model_version=MODEL), {}
+    )
+    with pytest.raises(KeyError, match="generated_at"):
+        read_log(body, "hellocycling/date=2026-09-07/hour=03/1788000000_x.parquet")
+
+
+def test_empty_logs_are_counted_inside_the_day_only() -> None:
+    port = FakePort(
+        [
+            log_file(["p1"], at(9, 0)),
+            empty_log(at(12, 0)),
+            empty_log(at(12, 0), model_version="shadow-v1"),
+            empty_log(at(0, 0) - timedelta(minutes=5)),
+        ]
+    )
+    read = read_logs(port, "hellocycling", DAY)
+    assert [one.generated_at for one in read.logs] == [at(9, 0).astimezone(UTC)]
+    assert read.n_empty == 2, "日の外の行 0 のログは数えない"
+
+
+def test_a_day_with_an_empty_cycle_is_measured_the_same() -> None:
+    """**10-14 の形**：上流が止まった周期の行 0 のログ（active と shadow）が混じっても測れ、
+    **行のあるログの成績は 1 つも変わらない**。読み飛ばした数は記録に残る。
+    """
+    plain = full_day_port()
+    with_empty = full_day_port()
+    for one in (empty_log(at(9, 10)), empty_log(at(9, 10), model_version="shadow-v1")):
+        with_empty.objects[one.path] = one.body
+    first = run_evaluation(plain, DAY)
+    second = run_evaluation(with_empty, DAY)
+    assert second.status == "ok" and second.ok
+    assert row_values(with_empty.written) == row_values(plain.written)
+    assert (first.systems[0].n_empty_logs, second.systems[0].n_empty_logs) == (0, 2)
+    _, _, detail = with_empty.finished[-1]
+    systems = detail["systems"]
+    assert isinstance(systems, list) and systems[0]["empty_logs"] == 2
+
+
+def test_a_day_with_only_empty_logs_is_skipped() -> None:
+    """**行 0 のログしか無い日は、ログの無い日と同じ `skipped`**（埋めない。失敗にもしない）。"""
+    port = FakePort([empty_log(at(12, 0)), empty_log(at(12, 0), model_version="shadow-v1")])
+    summary = run_evaluation(port, DAY)
+    assert summary.status == "skipped" and summary.ok
+    assert summary.n_written == 0
+    assert summary.systems[0].n_empty_logs == 2
+    assert [status for _, status, _ in port.finished] == ["skipped"]
+
+
 # ── 確率の読み ────────────────────────────────────────────────
 def test_the_probabilities_are_read_as_a_matrix() -> None:
     one = log_file(["p1", "p2"], at(9, 0))
-    table = read_log(one.body, one.path).table
-    values = probabilities(table, "bike")
+    read = read_log(one.body, one.path)
+    assert isinstance(read, LogFile)
+    values = probabilities(read.table, "bike")
     assert values.shape == (2, len(HORIZONS_MIN))
     assert set(values.flatten().tolist()) == {800}
 
