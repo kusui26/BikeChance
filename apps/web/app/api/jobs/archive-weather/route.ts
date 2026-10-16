@@ -27,10 +27,12 @@ import { createSupabaseWeatherPort } from "@/lib/jobs/weather-port";
  * 静的解析できず "Invalid segment configuration export" でビルドが落ちる）。
  * `ARCHIVE_WEATHER_MAX_DURATION_S` と一致していることは route.test.ts で検証する。
  *
- * 実測では 100 地点 48 時間の 1 要求が 2.0 秒で、595 格子なら 6 要求で約 12 秒。
- * 1 要求 15 秒のタイムアウトを 6 回踏んでも収まる値にしてある。
+ * **最悪の所要に合わせてある**（W6-38）：レート制限の待ち 65 秒 ＋ 7 分割がどれも
+ * 15 秒で時間切れ ＝ 170 秒に、保存と記録の余裕を足す。内訳と、収まることの検査は
+ * `ARCHIVE_WEATHER_MAX_DURATION_S` の側にある。120 秒では 09 時台・21 時台の遅い回が
+ * 止められ、予報の発行が丸ごと欠けた（W6 プランの所見 220・223）。
  */
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 const NO_STORE = { "Cache-Control": "no-store" } as const;
 

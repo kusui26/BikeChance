@@ -261,14 +261,25 @@ export const WEATHER_LOCATIONS_PER_MINUTE = 500;
  */
 export const WEATHER_RATE_WINDOW_MS = 65_000;
 
-/** 1 要求のタイムアウト。6 要求を順に投げても maxDuration に収まる値。 */
+/**
+ * 1 要求のタイムアウト。**分割の数だけ時間切れを踏んでも、上の待ちと合わせて
+ * `ARCHIVE_WEATHER_MAX_DURATION_S` に収まる**ことを検査で確かめている。
+ */
 export const WEATHER_FETCH_TIMEOUT_MS = 15_000;
 
 /** 生の予報を置く Storage バケット。非公開で、サービスロールからのみ読み書きする。 */
 export const WEATHER_BUCKET = "weather-raw";
 
-/** 天気アーカイブジョブの最大実行時間（秒）。Vercel の maxDuration に渡す。 */
-export const ARCHIVE_WEATHER_MAX_DURATION_S = 120;
+/**
+ * 天気アーカイブジョブの最大実行時間（秒）。Vercel の maxDuration に渡す。
+ *
+ * **最悪の所要に合わせる**（W6-38）：待ち `WEATHER_RATE_WINDOW_MS`（65 秒）＋ 分割の数
+ * （617 格子で 7）× `WEATHER_FETCH_TIMEOUT_MS`（15 秒）＝ 170 秒に、保存と記録の余裕を
+ * 足して 300。120 秒は待ちを足す前の計算のままで、Open-Meteo の応答が遅くなる 09 時台・
+ * 21 時台（UTC の 00 時・12 時）に止められ、予報の発行が丸ごと欠けた（W6 プランの
+ * 所見 220・223）。**ふだんの回（中央 71 秒）の所要と費用は変わらない。**
+ */
+export const ARCHIVE_WEATHER_MAX_DURATION_S = 300;
 
 /**
  * 天気アーカイブの Cron（UTC）。毎時 17 分。
