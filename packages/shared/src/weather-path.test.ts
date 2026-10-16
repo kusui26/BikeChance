@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ARCHIVE_WEATHER_MAX_DURATION_S,
   WEATHER_BATCH_SIZE,
+  WEATHER_FETCH_TIMEOUT_MS,
   WEATHER_LOCATIONS_PER_MINUTE,
   WEATHER_RATE_WINDOW_MS,
 } from "./constants";
@@ -132,6 +133,37 @@ describe("pacingDelaysMs", () => {
     // **1,000 格子でもまだ収まる**（窓 1 つ）。1,100 を超えると窓が 2 つになり危うい
     const thousand = Array.from({ length: 10 }, () => 100);
     expect(totalPacingMs(thousand, BUDGET, WINDOW) + 5_000).toBeLessThan(
+      ARCHIVE_WEATHER_MAX_DURATION_S * 1000,
+    );
+  });
+});
+
+describe("時間の上限は最悪の所要に合わせる（W6-38、W6 プランの所見 220・223）", () => {
+  /** 2026-10-16 の発行のセル数（7 分割）。 */
+  const CURRENT_GRID_CELLS = 617;
+
+  /** 保存と記録の余裕。ふだんは数秒だが、DB と Storage の呼び出しにはまだ時間切れが無い。 */
+  const SAVE_AND_RECORD_MARGIN_MS = 60_000;
+
+  /** **分割のどれもが時間切れになった**ときの所要：レート制限の待ち ＋ 分割の数 × 時間切れ。 */
+  const worstCaseMs = (cells: number): number => {
+    const sizes = batchCells(
+      Array.from({ length: cells }, (_, index) => index),
+      WEATHER_BATCH_SIZE,
+    ).map((batch) => batch.length);
+    const waited = totalPacingMs(sizes, WEATHER_LOCATIONS_PER_MINUTE, WEATHER_RATE_WINDOW_MS);
+    return waited + sizes.length * WEATHER_FETCH_TIMEOUT_MS;
+  };
+
+  it("**いまの格子数で全分割が時間切れでも、上限に収まる**（120 秒では収まらなかった）", () => {
+    expect(worstCaseMs(CURRENT_GRID_CELLS)).toBe(170_000);
+    expect(worstCaseMs(CURRENT_GRID_CELLS) + SAVE_AND_RECORD_MARGIN_MS).toBeLessThanOrEqual(
+      ARCHIVE_WEATHER_MAX_DURATION_S * 1000,
+    );
+  });
+
+  it("1,000 格子（10 分割・窓 1 つ）でも収まる", () => {
+    expect(worstCaseMs(1_000) + SAVE_AND_RECORD_MARGIN_MS).toBeLessThanOrEqual(
       ARCHIVE_WEATHER_MAX_DURATION_S * 1000,
     );
   });
