@@ -47,7 +47,9 @@ xcrun simctl launch booted app.bikechance.BikeChance
 | 約束 | なぜ | どこ |
 |---|---|---|
 | **`Authorization` を付けない** | 付けると CDN のキャッシュが効かない（開発プラン §8.3） | `V1Client` |
-| **矩形を 0.01 度の格子に丸めてから送る** | 細かい位置を送らない（CLAUDE.md §5）。近い要求が同じ URL になりキャッシュが効く | `Bbox.quantized()` |
+| **矩形を 0.01 度の格子に丸めてから送る** | 細かい位置を送らない（CLAUDE.md §5）。近い要求が同じ URL になりキャッシュが効く。**丸めた範囲は「おおよその位置」としてプライバシーラベルに申告する**（Vercel のログに最長 30 日残るため。開発プランの D-43） | `Bbox.quantized()` |
+| **位置の許可は、現在地のボタンを押したときにだけ求める** | 起動時には求めない（許可が無くても使える。開発プラン §9.2）。システムの `MapUserLocationButton` は自分では許可を求めず、未決定のまま回り続けた（W6 プランの所見 224）。断られていたら設定への案内を出し、許可の印（`UserAnnotation`）は許されているときだけ出す | `LocationButtonAction`（Core）・`LocationAuthorizer`・`MapScreen.locationButton` |
+| **現在地へは、現在地が届いてから動かす** | 押したら（許したら）`requestLocation()` で 1 度だけ取り、届いた座標へいつもの縮尺で動かす。**`.userLocation(fallback:)` は使わない**——地図が現在地をまだ知らないうちに置くと代わりの位置に留まり、あとで分かっても動かない（許可した直後・起動直後。W7 プランの所見 226） | `LocationCentering`（Core）・`LocationAuthorizer`・`MapScreen.center(on:)` |
 | **丸めた後の長辺が 0.08 度を超えたら問い合わせない** | サーバーはそれより広い矩形に、ポートではなく格子のセル（`aggregation: cell`）を返す。**同じ値をサーバーと iOS の両方の検査が書く**（W6 の契約 41）。**比べるのは格子の数**——度の引き算は端数でずれる（139.84 − 139.76 ＝ 0.0800000000000125。W6 プランの所見 205） | `Bbox.requestMaxSpanDegrees`・`isRequestable` |
 | **応答の粒度を先に読む** | セル応答には `stations` が無い。そのまま読むと失敗の帯になっていた（W6 プランの所見 194）。**`aggregation` が無い（古い）応答はポート、知らない値はポートとして読まない** | `StationsAggregation`・`V1Error.aggregated` |
 | **「多すぎる」「セルが返った」は失敗ではなく案内** | 地図を拡大すれば解決する。エラーとして出さない | `StationsModel.State.needsZoom` |
@@ -83,7 +85,7 @@ xcrun simctl launch booted app.bikechance.BikeChance
 
 | もの | どこ | 中身 |
 |---|---|---|
-| プライバシーマニフェスト | `BikeChance/PrivacyInfo.xcprivacy` | **追跡しない・収集しない・理由の要る API を使わない**（W6-33）。同期グループなので、置くだけで `.app` の直下に入る。**UserDefaults を使い始めたら、理由 `CA92.1` を足す** |
+| プライバシーマニフェスト | `BikeChance/PrivacyInfo.xcprivacy` | **追跡しない・集めるのは「おおよその位置」だけ（ユーザーに連結しない・目的はアプリの機能）・理由の要る API を使わない**（W6-33、W7-07、開発プランの D-43）。CI（`ios.yml`）が `.app` の中身を確かめる。同期グループなので、置くだけで `.app` の直下に入る。**UserDefaults を使い始めたら、理由 `CA92.1` を足す** |
 | 暗号化の申告 | `project.pbxproj` の `INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO` | 使う暗号は `URLSession` の HTTPS だけで、輸出規制の対象外。**これがあると、アップロードのたびに輸出コンプライアンスの質問票が出ない** |
 
 ### 最初に 1 回だけ（利用者の作業。W6 プラン §7.4）
