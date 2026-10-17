@@ -14,7 +14,13 @@
  * `NN` は分割の連番。どの格子が入っているかは応答の `latitude` / `longitude` に
  * 書いてあるので、パスには持たせない（要求した座標と応答の座標はずれる）。
  */
-import { OPEN_METEO_MODEL } from "./constants";
+import {
+  ARCHIVE_WEATHER_MAX_DURATION_S,
+  OPEN_METEO_MODEL,
+  WEATHER_DB_TIMEOUT_MS,
+  WEATHER_FETCH_TIMEOUT_MS,
+  WEATHER_RECORD_MARGIN_MS,
+} from "./constants";
 import type { EpochSeconds } from "./storage-path";
 
 const SECONDS_PER_HOUR = 3600;
@@ -105,3 +111,17 @@ export const pacingDelaysMs = (
 /** 上の待ち時間の合計。**要約に載せて、枠に近づいたら気づけるようにする。** */
 export const totalPacingMs = (sizes: readonly number[], budget: number, windowMs: number): number =>
   pacingDelaysMs(sizes, budget, windowMs).reduce((total, one) => total + one, 0);
+
+/** 1 分割の最悪の所要：取得の時間切れ ＋ 保存の時間切れ（W7-01・03）。 */
+export const WEATHER_BATCH_WORST_MS = WEATHER_FETCH_TIMEOUT_MS + WEATHER_DB_TIMEOUT_MS;
+
+/**
+ * **その分割を投げ始めてよいか**（W7-01）：待ってから投げ、保存し、なお記録の余裕が残るか。
+ *
+ * 最初の回にも取り直しにも同じ物差しを当てる。こうすると、格子が増えても・取り直しが
+ * 続いても、**時間の上限（`ARCHIVE_WEATHER_MAX_DURATION_S`）では止められない**——
+ * 投げなかった分割は `failed` として記録に残る（止められると記録ごと失う。所見 220・223）。
+ */
+export const fitsArchiveBudget = (elapsed_ms: number, delay_ms: number): boolean =>
+  elapsed_ms + delay_ms + WEATHER_BATCH_WORST_MS + WEATHER_RECORD_MARGIN_MS <=
+  ARCHIVE_WEATHER_MAX_DURATION_S * MS_PER_S;

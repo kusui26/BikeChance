@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   ARCHIVE_WEATHER_MAX_DURATION_S,
   WEATHER_BATCH_SIZE,
+  WEATHER_DB_TIMEOUT_MS,
   WEATHER_FETCH_TIMEOUT_MS,
   WEATHER_LOCATIONS_PER_MINUTE,
   WEATHER_RATE_WINDOW_MS,
+  WEATHER_RECORD_MARGIN_MS,
 } from "./constants";
 import {
+  WEATHER_BATCH_WORST_MS,
   batchCells,
+  fitsArchiveBudget,
   pacingDelaysMs,
   totalPacingMs,
   truncateToHour,
@@ -138,33 +142,69 @@ describe("pacingDelaysMs", () => {
   });
 });
 
-describe("時間の上限は最悪の所要に合わせる（W6-38、W6 プランの所見 220・223）", () => {
+describe("時間の上限と、投げ始めてよいかの判断（W6-38・W7-01、W6 プランの所見 220・223）", () => {
   /** 2026-10-16 の発行のセル数（7 分割）。 */
   const CURRENT_GRID_CELLS = 617;
+  const MAX_MS = ARCHIVE_WEATHER_MAX_DURATION_S * 1000;
+  /** 分割を投げる前に経っている時間の最悪：格子の取得と `job_started`（どちらも DB の時間切れまで）。 */
+  const BEFORE_FIRST_BATCH_MS = 2 * WEATHER_DB_TIMEOUT_MS;
 
-  /** 保存と記録の余裕。ふだんは数秒だが、DB と Storage の呼び出しにはまだ時間切れが無い。 */
-  const SAVE_AND_RECORD_MARGIN_MS = 60_000;
-
-  /** **分割のどれもが時間切れになった**ときの所要：レート制限の待ち ＋ 分割の数 × 時間切れ。 */
-  const worstCaseMs = (cells: number): number => {
-    const sizes = batchCells(
+  const sizesOf = (cells: number): number[] =>
+    batchCells(
       Array.from({ length: cells }, (_, index) => index),
       WEATHER_BATCH_SIZE,
     ).map((batch) => batch.length);
+
+  /** **分割のどれもが時間切れになった**ときの取得の所要（保存なし）：待ち ＋ 分割の数 × 時間切れ。 */
+  const fetchOnlyWorstMs = (cells: number): number => {
+    const sizes = sizesOf(cells);
     const waited = totalPacingMs(sizes, WEATHER_LOCATIONS_PER_MINUTE, WEATHER_RATE_WINDOW_MS);
     return waited + sizes.length * WEATHER_FETCH_TIMEOUT_MS;
   };
 
-  it("**いまの格子数で全分割が時間切れでも、上限に収まる**（120 秒では収まらなかった）", () => {
-    expect(worstCaseMs(CURRENT_GRID_CELLS)).toBe(170_000);
-    expect(worstCaseMs(CURRENT_GRID_CELLS) + SAVE_AND_RECORD_MARGIN_MS).toBeLessThanOrEqual(
-      ARCHIVE_WEATHER_MAX_DURATION_S * 1000,
+  /** **どの分割も最悪の所要**（取得も保存も時間切れまで）のときに、判断に従って投げていく。 */
+  const simulateWorst = (cells: number): { sent: number; skipped: number; elapsed_ms: number } => {
+    const sizes = sizesOf(cells);
+    const delays = pacingDelaysMs(sizes, WEATHER_LOCATIONS_PER_MINUTE, WEATHER_RATE_WINDOW_MS);
+    return delays.reduce(
+      (state, delay) =>
+        fitsArchiveBudget(state.elapsed_ms, delay)
+          ? {
+              ...state,
+              sent: state.sent + 1,
+              elapsed_ms: state.elapsed_ms + delay + WEATHER_BATCH_WORST_MS,
+            }
+          : { ...state, skipped: state.skipped + 1 },
+      { sent: 0, skipped: 0, elapsed_ms: BEFORE_FIRST_BATCH_MS },
     );
+  };
+
+  it("**120 秒では、いまの格子数の最悪を越えていた**（PR P の前。所見 223）", () => {
+    expect(fetchOnlyWorstMs(CURRENT_GRID_CELLS)).toBe(170_000);
+    expect(fetchOnlyWorstMs(CURRENT_GRID_CELLS)).toBeGreaterThan(120_000);
   });
 
-  it("1,000 格子（10 分割・窓 1 つ）でも収まる", () => {
-    expect(worstCaseMs(1_000) + SAVE_AND_RECORD_MARGIN_MS).toBeLessThanOrEqual(
-      ARCHIVE_WEATHER_MAX_DURATION_S * 1000,
-    );
+  it("**いまの格子数なら、取得も保存も最悪でも 7 分割とも投げられる**", () => {
+    const run = simulateWorst(CURRENT_GRID_CELLS);
+    expect(run.sent).toBe(7);
+    expect(run.skipped).toBe(0);
+    expect(run.elapsed_ms + WEATHER_RECORD_MARGIN_MS).toBeLessThanOrEqual(MAX_MS);
+  });
+
+  it.each([1_000, 2_000])(
+    "**格子が増えても上限は越えない**——投げられない分割は投げずに残す（%i 格子）",
+    (cells) => {
+      const run = simulateWorst(cells);
+      expect(run.skipped).toBeGreaterThan(0);
+      expect(run.sent + run.skipped).toBe(sizesOf(cells).length);
+      expect(run.elapsed_ms + WEATHER_RECORD_MARGIN_MS).toBeLessThanOrEqual(MAX_MS);
+    },
+  );
+
+  it("境目：記録の余裕までちょうど使い切る分割は投げ、1 ミリ秒でも越える分割は投げない", () => {
+    const edge = MAX_MS - WEATHER_RECORD_MARGIN_MS - WEATHER_BATCH_WORST_MS;
+    expect(fitsArchiveBudget(edge, 0)).toBe(true);
+    expect(fitsArchiveBudget(edge + 1, 0)).toBe(false);
+    expect(fitsArchiveBudget(edge - WEATHER_RATE_WINDOW_MS, WEATHER_RATE_WINDOW_MS)).toBe(true);
   });
 });

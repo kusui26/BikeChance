@@ -79,7 +79,20 @@ export const countLocations = (document: unknown): number => {
   });
 };
 
-/** 1 分割ぶんの予報を取得する。失敗は `fetch` フェーズの JobError にする。 */
+/**
+ * 本文を読み切る。**時間切れは本文の途中でも来る**——`fetch` はヘッダが届いた時点で返り、
+ * 時間切れの合図は本文を読むあいだも効く。ここで捕まえないと、取得の失敗が `unknown` に
+ * 分類され、取り直しの対象から漏れる（9/26〜10/17 に 3 回。W7 プランの所見 227）。
+ */
+const readBody = async (response: Response): Promise<Uint8Array> => {
+  try {
+    return new Uint8Array(await response.arrayBuffer());
+  } catch (cause) {
+    throw new JobError(toJobFailure({ phase: "fetch", cause }));
+  }
+};
+
+/** 1 分割ぶんの予報を取得する。失敗は（本文を読む途中のものも）`fetch` フェーズの JobError にする。 */
 export const fetchWeatherBatch = async (params: {
   readonly cells: readonly WeatherCell[];
   readonly contact_email: string;
@@ -106,7 +119,7 @@ export const fetchWeatherBatch = async (params: {
     throw new JobError(toJobFailure({ phase: "fetch", cause }));
   });
 
-  const body = new Uint8Array(await received.arrayBuffer());
+  const body = await readBody(received);
   if (received.status !== HTTP_OK) {
     throw new JobError(
       httpJobFailure({
