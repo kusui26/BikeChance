@@ -12,13 +12,19 @@ import SwiftUI
 /// 2 つの意味の色が同時に出ることはない。
 ///
 /// 位置情報の許可が無くても使える。初回は東京駅を中心に置き、あとは地図の操作で完結する
-/// （App Store 審査ガイドライン 5.1.2、開発プラン §9.2）。
+/// （App Store 審査ガイドライン 5.1.2、開発プラン §9.2）。**許可は現在地のボタンを押したときに
+/// だけ求める**（W7-06。システムの `MapUserLocationButton` は自分では許可を求めず、
+/// 未決定のまま回り続けた。W6 プランの所見 224）。
 struct MapScreen: View {
     @State var model: StationsModel
     /// **アプリに 1 つだけ**（`BikeChanceApp` が持つ）。詳細画面の ☆ と一覧が同じものを見る。
     var favorites: FavoritesModel
     /// 背面に回っているあいだは取りに行かない。
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
+    @State private var location = LocationAuthorizer()
+    @State private var showsLocationSettings = false
+    @State private var showsLocationRestricted = false
     @State private var camera: MapCameraPosition = .region(MapScreen.initialRegion)
     @State private var visible: [StationCurrent] = []
     @State private var feeds: [String: FeedStatus] = [:]
@@ -70,7 +76,10 @@ struct MapScreen: View {
 
     private var map: some View {
         Map(position: $camera, selection: $selected) {
-            UserAnnotation()
+            // **許されているときだけ出す**（出せないときに印だけを出さない）
+            if location.authorization.showsUserLocation {
+                UserAnnotation()
+            }
             ForEach(visible) { station in
                 Marker(
                     station.name ?? station.stationID,
@@ -82,8 +91,8 @@ struct MapScreen: View {
                 .tag(station)
             }
         }
+        // 現在地のボタンは自前（`locationButton`）。システムのものは許可を求めない（所見 224）
         .mapControls {
-            MapUserLocationButton()
             MapCompass()
         }
         // 動かしている最中ではなく、止まったときだけ問い合わせる（開発プラン §9.1）
@@ -98,6 +107,7 @@ struct MapScreen: View {
                         arrival: model.arrival, intent: $model.intent, now: now,
                         select: { model.select(arrival: $0) })
                     Spacer(minLength: 0)
+                    locationButton
                     favoritesButton
                 }
             }
@@ -106,6 +116,24 @@ struct MapScreen: View {
         .sheet(isPresented: $showsCredits) { CreditsScreen() }
         .sheet(isPresented: $showsFavorites) { FavoritesScreen(model: favorites) }
         .onChange(of: model.state) { _, state in apply(state) }
+        // **現在地が届いてから動かす**（押して許したあとも、もう 1 度押させない）
+        .onChange(of: location.target) { _, target in
+            if let target { center(on: target) }
+        }
+        .alert("位置情報がオフになっています", isPresented: $showsLocationSettings) {
+            Button("設定を開く") { openSettings() }
+            Button("閉じる", role: .cancel) {}
+        } message: {
+            // 選ぶ項目の名前は iOS 26 の設定の表記（「このアプリの使用中のみ許可」）に合わせる
+            Text(
+                "現在地へ動かすには、「設定を開く」から「位置情報」を「このアプリの使用中のみ許可」にしてください。位置情報が無くても、地図を動かしたり目的地を探したりして使えます。"
+            )
+        }
+        .alert("この端末では位置情報を使えません", isPresented: $showsLocationRestricted) {
+            Button("閉じる", role: .cancel) {}
+        } message: {
+            Text("位置情報の利用が制限されています。地図を動かしたり目的地を探したりして使えます。")
+        }
         // 最初の 1 回。カメラの位置は以降 `onMapCameraChange` が持つ
         .task { model.viewportChanged(to: Bbox(region: MapScreen.initialRegion)) }
         // **`id:` を付けて、場面が変わるたびに作り直す。**
@@ -123,6 +151,51 @@ struct MapScreen: View {
                 try? await Task.sleep(for: .seconds(Self.tickSeconds))
             }
         }
+    }
+
+    /// 現在地のボタン（W7-06）。**押したときにだけ許可を求める**。何をするかは
+    /// `LocationButtonAction.onTap` が許可の状態から 1 つに決める——どの状態で押しても、
+    /// 何かが起きる（回り続けない。所見 224）。現在地を待つあいだは矢印が脈打ち、
+    /// 届くか取れなければ止まる。
+    private var locationButton: some View {
+        Button(action: locationTapped) {
+            Image(
+                systemName: location.authorization.showsUserLocation ? "location.fill" : "location"
+            )
+            .symbolEffect(.pulse, isActive: location.isLocating)
+            .font(.footnote.weight(.medium))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.regularMaterial, in: Capsule())
+        }
+        .accessibilityLabel("現在地へ移動")
+    }
+
+    /// 許可を求めること・現在地を取りに行くことは `LocationAuthorizer` が行う。ここは案内だけ。
+    private func locationTapped() {
+        switch location.tap() {
+        case .requestPermission, .centerOnUser: break
+        case .explainSettings: showsLocationSettings = true
+        case .explainRestricted: showsLocationRestricted = true
+        }
+    }
+
+    /// 届いた現在地へ地図を動かす（いつもの縮尺で）。止まったら `onMapCameraChange` が
+    /// その範囲のポートを取りに行く。
+    ///
+    /// **`.userLocation(fallback:)` は使わない。** 地図が現在地をまだ知らないうちに置くと
+    /// 代わりの位置に留まり、あとで分かっても動かない（10/17 のシミュレータ）。
+    private func center(on target: CenterTarget) {
+        let coordinate = CLLocationCoordinate2D(
+            latitude: target.latitude, longitude: target.longitude)
+        withAnimation {
+            camera = .region(MKCoordinateRegion(center: coordinate, span: Self.initialRegion.span))
+        }
+    }
+
+    private func openSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        openURL(url)
     }
 
     /// お気に入りへの導線（開発プラン §9.2）。**件数を出す**——0 件でも開けるようにして、
