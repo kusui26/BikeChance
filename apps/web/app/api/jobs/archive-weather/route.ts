@@ -13,7 +13,7 @@
  */
 import { gzip } from "node:zlib";
 import { promisify } from "node:util";
-import { WEATHER_BUCKET } from "@bikechance/shared";
+import { WEATHER_BUCKET, WEATHER_DB_TIMEOUT_MS } from "@bikechance/shared";
 import { archiveWeather, type ArchiveWeatherSummary } from "@/lib/jobs/archive-weather";
 import { isAuthorizedCronRequest } from "@/lib/jobs/auth";
 import { readCollectorEnv } from "@/lib/jobs/env";
@@ -53,9 +53,12 @@ export const GET = async (request: Request): Promise<Response> => {
   // 2. 環境変数 → 格子の取得 → 予報の取得 → 保存 → 記録
   try {
     const env = readCollectorEnv(process.env);
+    // **DB と Storage の 1 要求にも時間切れ**（W7-03）。時間の予算（`fitsArchiveBudget`）は、
+    // 1 分割の最悪を「取得の時間切れ ＋ この時間切れ」として数えている
     const client = createServiceClient({
       url: env.SUPABASE_URL,
       secret_key: env.SUPABASE_SECRET_KEY,
+      request_timeout_ms: WEATHER_DB_TIMEOUT_MS,
     });
     const summary = await archiveWeather({
       db: createSupabaseWeatherPort(client),

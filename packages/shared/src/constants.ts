@@ -282,6 +282,24 @@ export const WEATHER_BUCKET = "weather-raw";
 export const ARCHIVE_WEATHER_MAX_DURATION_S = 300;
 
 /**
+ * 天気アーカイブが DB と Storage に投げる 1 要求の時間切れ（W7-03、W6 プランの所見 220 の ②）。
+ * ふだんは 1 秒もかからない。**取得の時間切れと足した 1 分割の最悪**を、時間の予算が数える。
+ */
+export const WEATHER_DB_TIMEOUT_MS = 10_000;
+
+/**
+ * 最後の記録（`job_finished`）と応答に残しておく時間（W7-01）。分割を投げる前に、
+ * 「投げて保存して、なおこれだけ残るか」を確かめる。
+ */
+export const WEATHER_RECORD_MARGIN_MS = 30_000;
+
+/**
+ * 取り直しの前に 1 度だけ待つ時間（W7-01）。**一時的な遅れをやり過ごす**ためで、
+ * 速さの予算（`WEATHER_RATE_WINDOW_MS`）の待ちとは別に数える。
+ */
+export const WEATHER_RETRY_BACKOFF_MS = 10_000;
+
+/**
  * 天気アーカイブの Cron（UTC）。毎時 17 分。
  * Parquet 化（毎時 7 分）と時刻の先頭を避け、重い処理が同時に走らないようにする。
  */

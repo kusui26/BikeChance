@@ -1,4 +1,11 @@
-import { WEATHER_LOCATIONS_PER_MINUTE, WEATHER_RATE_WINDOW_MS } from "@bikechance/shared";
+import {
+  ARCHIVE_WEATHER_MAX_DURATION_S,
+  WEATHER_FETCH_TIMEOUT_MS,
+  WEATHER_LOCATIONS_PER_MINUTE,
+  WEATHER_RATE_WINDOW_MS,
+  WEATHER_RECORD_MARGIN_MS,
+  WEATHER_RETRY_BACKOFF_MS,
+} from "@bikechance/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { archiveWeather, type ArchiveWeatherParams } from "./archive-weather";
 import type { RawUploader } from "./storage";
@@ -328,5 +335,231 @@ describe("投げる速さ（Open-Meteo の 1 分 600 地点）", () => {
     const detail = finished.at(-1)?.detail;
     expect(detail?.waited_ms).toBe(WEATHER_RATE_WINDOW_MS);
     expect(detail?.n_cells).toBe(602);
+  });
+});
+
+describe("取り直し（W7-01、W6 プランの所見 223）", () => {
+  /** 本物の時計の代わり。**待ちと取得の所要だけで進む**ので、時間の予算を決まった値で試せる。 */
+  const fakeClock = (): { clock: () => number; advance: (ms: number) => void } => {
+    const time = { ms: 0 };
+    return { clock: () => time.ms, advance: (ms) => (time.ms += ms) };
+  };
+
+  const timeoutError = (): DOMException =>
+    new DOMException("The operation was aborted due to timeout", "TimeoutError");
+
+  const countOf = (url: string | URL): number =>
+    (new URL(String(url)).searchParams.get("latitude") ?? "").split(",").length;
+
+  /** 何回目の要求を落とすかを決めて、落とさない要求は応答する。投げた地点の数も残す。 */
+  const fetchFailingOn = (
+    failingCalls: ReadonlySet<number>,
+    failure: () => Response | Promise<Response>,
+  ): { sent: number[] } => {
+    const sent: number[] = [];
+    stubFetch(async (url) => {
+      const call = sent.length;
+      sent.push(countOf(url));
+      if (failingCalls.has(call)) {
+        return failure();
+      }
+      return okResponse(forecastBody(countOf(url)));
+    });
+    return { sent };
+  };
+
+  it("**1 分割の時間切れは、同じ回の取り直しで埋まる**（10/17 00:17・07:17 の形）", async () => {
+    const { sent } = fetchFailingOn(new Set([0]), () => {
+      throw timeoutError();
+    });
+    const { db, finished } = recordingDb();
+    const { upload, paths } = uploaderThat();
+    const { sleep, waits } = recordingSleep();
+
+    const summary = await archiveWeather(paramsWith(db, upload, sleep));
+
+    expect(sent).toEqual([3, 3]);
+    expect(waits).toEqual([WEATHER_RETRY_BACKOFF_MS]); // 取り直しの前に 1 度だけ待つ
+    expect(summary.ok).toBe(true);
+    expect(summary.n_retried).toBe(1);
+    expect(summary.n_recovered).toBe(1);
+    expect(summary.batches[0]?.attempts).toBe(2);
+    expect(paths).toEqual([`2026/09/08/jma_msm_${HOUR_EPOCH}_00.json.gz`]);
+    expect(finished[0]?.status).toBe("ok");
+    expect(finished[0]?.detail).toMatchObject({ n_retried: 1, n_recovered: 1, n_skipped: 0 });
+  });
+
+  /** ヘッダは返り、**本文の途中で時間切れ**になる応答（9/26・10/17 12:17 の形）。 */
+  const stalledBody = (): Response =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start: (controller) => {
+          controller.error(timeoutError());
+        },
+      }),
+      { status: 200 },
+    );
+
+  it("**本文の途中の時間切れも、取得の失敗として取り直す**（所見 227：`unknown` に分類されて漏れていた）", async () => {
+    const { sent } = fetchFailingOn(new Set([0]), stalledBody);
+    const { db, finished } = recordingDb();
+    const { upload } = uploaderThat();
+
+    const summary = await archiveWeather(paramsWith(db, upload));
+
+    expect(sent).toEqual([3, 3]);
+    expect(summary.ok).toBe(true);
+    expect(summary.n_recovered).toBe(1);
+    expect(finished[0]?.status).toBe("ok");
+  });
+
+  it("本文の途中の時間切れが続けば、`fetch/TimeoutError` として記録に残す（`unknown` にしない）", async () => {
+    fetchFailingOn(new Set([0, 1]), stalledBody);
+    const { db } = recordingDb();
+    const { upload } = uploaderThat();
+
+    const summary = await archiveWeather(paramsWith(db, upload));
+
+    expect(summary.n_retried).toBe(1);
+    expect(summary.batches[0]?.error).toMatch(/^fetch\/TimeoutError: /);
+  });
+
+  it("5xx は取り直す。**取り直しても落ちれば failed のまま**", async () => {
+    fetchFailingOn(new Set([0, 1]), () => new Response("boom", { status: 503 }));
+    const { db, finished } = recordingDb();
+    const { upload } = uploaderThat();
+
+    const summary = await archiveWeather(paramsWith(db, upload));
+
+    expect(summary.ok).toBe(false);
+    expect(summary.n_retried).toBe(1);
+    expect(summary.n_recovered).toBe(0);
+    expect(finished[0]?.status).toBe("failed");
+  });
+
+  it("**4xx（429 を含む）は取り直さない**——速さの枠を越えた印で、すぐ投げ直すと悪くなる", async () => {
+    const { sent } = fetchFailingOn(new Set([0]), () => new Response("slow down", { status: 429 }));
+    const { db } = recordingDb();
+    const { upload } = uploaderThat();
+
+    const summary = await archiveWeather(paramsWith(db, upload));
+
+    expect(sent).toHaveLength(1);
+    expect(summary.n_retried).toBe(0);
+    expect(summary.ok).toBe(false);
+  });
+
+  it("保存の失敗は取り直さない（取得は通っているので、投げ直すと速さの予算を無駄に使う）", async () => {
+    const { sent } = fetchFailingOn(new Set(), () => okResponse("[]"));
+    const { db } = recordingDb();
+    const { upload } = uploaderThat({ throwsOnBatch: 0 });
+
+    const summary = await archiveWeather(paramsWith(db, upload));
+
+    expect(sent).toHaveLength(1);
+    expect(summary.n_retried).toBe(0);
+    expect(summary.ok).toBe(false);
+  });
+
+  it("**取り直しも速さの予算を守る**——最初の回と同じ 1 分の枠で数える", async () => {
+    // 602 格子：最初の 5 分割が時間切れ。取り直しは 2 つ目の窓の残り（500 − 102）に 3 つ入り、
+    // 4 つ目の前でもう 1 度窓をまたぐ
+    const { sent } = fetchFailingOn(new Set([0, 1, 2, 3, 4]), () => {
+      throw timeoutError();
+    });
+    const { db } = recordingDb({ cells: cellsOf(602) });
+    const { upload } = uploaderThat();
+    const { sleep, waits } = recordingSleep();
+
+    const summary = await archiveWeather(paramsWith(db, upload, sleep));
+
+    expect(sent).toEqual([100, 100, 100, 100, 100, 100, 2, 100, 100, 100, 100, 100]);
+    expect(waits).toEqual([
+      WEATHER_RATE_WINDOW_MS,
+      WEATHER_RETRY_BACKOFF_MS,
+      WEATHER_RATE_WINDOW_MS,
+    ]);
+    expect(summary.ok).toBe(true);
+    expect(summary.n_recovered).toBe(5);
+  });
+
+  it("**全分割が時間切れでも上限を越えない**：取り直しは、始めても上限に収まるものだけ（10/17 09:17 の形）", async () => {
+    const { clock, advance } = fakeClock();
+    stubFetch(async () => {
+      advance(WEATHER_FETCH_TIMEOUT_MS);
+      throw timeoutError();
+    });
+    const { db, finished } = recordingDb({ cells: cellsOf(617) });
+    const { upload } = uploaderThat();
+
+    const summary = await archiveWeather({
+      ...paramsWith(db, upload, async (ms) => advance(ms)),
+      clock,
+    });
+
+    // 最初の回：待ち 65 秒 ＋ 7 × 15 秒 ＝ 170 秒。取り直しは 2 つ目の窓の残りに 3 つ（待ち 10 秒）、
+    // 4 つ目は窓をまたぐ 65 秒を待つと上限に収まらないので投げない
+    expect(summary.n_retried).toBe(3);
+    expect(summary.n_recovered).toBe(0);
+    expect(summary.duration_ms).toBe(
+      170_000 + WEATHER_RETRY_BACKOFF_MS + 3 * WEATHER_FETCH_TIMEOUT_MS,
+    );
+    expect(summary.duration_ms + WEATHER_RECORD_MARGIN_MS).toBeLessThanOrEqual(
+      ARCHIVE_WEATHER_MAX_DURATION_S * 1000,
+    );
+    expect(finished[0]?.status).toBe("failed");
+  });
+
+  it("最初の回でも、時間の予算が足りなければ投げずに failed として残す（黙って欠けさせない）", async () => {
+    const { clock, advance } = fakeClock();
+    const { sent } = fetchFailingOn(new Set(), () => okResponse("[]"));
+    const slowDb: WeatherPort = {
+      ...recordingDb().db,
+      listGridCells: async () => {
+        advance(ARCHIVE_WEATHER_MAX_DURATION_S * 1000 - WEATHER_RECORD_MARGIN_MS); // DB が遅く、もう余裕が無い
+        return cellsOf(3);
+      },
+    };
+    const { upload } = uploaderThat();
+
+    const summary = await archiveWeather({ ...paramsWith(slowDb, upload), clock });
+
+    expect(sent).toHaveLength(0);
+    expect(summary.n_skipped).toBe(1);
+    expect(summary.ok).toBe(false);
+    expect(summary.batches[0]?.error).toContain("TimeBudget");
+  });
+
+  it("**飛ばしたら後ろは投げない**——飛ばした分割の待ちを前提に後ろの待ちが決まっている", async () => {
+    // 602 格子：5 分割を投げると 1 つ 40 秒かかって 200 秒。6 つ目は 65 秒の待ちで収まらず、
+    // 7 つ目は待ち 0 なら収まって見えるが、投げると 1 分の枠を越える
+    const { clock, advance } = fakeClock();
+    const sent: number[] = [];
+    stubFetch(async (url) => {
+      sent.push(countOf(url));
+      advance(40_000);
+      return okResponse(forecastBody(countOf(url)));
+    });
+    const { db } = recordingDb({ cells: cellsOf(602) });
+    const { upload } = uploaderThat();
+
+    const summary = await archiveWeather({
+      ...paramsWith(db, upload, async (ms) => advance(ms)),
+      clock,
+    });
+
+    expect(sent).toEqual([100, 100, 100, 100, 100]);
+    expect(summary.n_skipped).toBe(2);
+    expect(summary.waited_ms).toBe(0); // 投げなかった分割の前の待ちは数えない
+  });
+
+  it("取り直しが無い回も、数（0）を記録に残す（見張りが数えられるように）", async () => {
+    fetchFailingOn(new Set(), () => okResponse("[]"));
+    const { db, finished } = recordingDb();
+    const { upload } = uploaderThat();
+
+    await archiveWeather(paramsWith(db, upload));
+
+    expect(finished[0]?.detail).toMatchObject({ n_retried: 0, n_recovered: 0, n_skipped: 0 });
   });
 });

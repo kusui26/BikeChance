@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ARCHIVE_WEATHER_MAX_DURATION_S } from "@bikechance/shared";
+import {
+  ARCHIVE_WEATHER_MAX_DURATION_S,
+  WEATHER_BATCH_WORST_MS,
+  WEATHER_RECORD_MARGIN_MS,
+} from "@bikechance/shared";
 import { GET, maxDuration } from "./route";
 
 const CRON_SECRET = "test-cron-secret-value";
+const MS_PER_S = 1000;
 
 const request = (authorization?: string): Request =>
   new Request("https://bike-chance.vercel.app/api/jobs/archive-weather", {
@@ -19,8 +24,11 @@ describe("route segment config", () => {
     expect(maxDuration).toBe(ARCHIVE_WEATHER_MAX_DURATION_S);
   });
 
-  it("6 分割 × 1 要求 15 秒のタイムアウトを踏んでも収まる", () => {
-    expect(maxDuration).toBeGreaterThanOrEqual(90);
+  it("この上限なら、時間の予算は少なくとも最初の分割を投げられる（W7-01）", () => {
+    // 1 分割の最悪 ＋ 記録の余裕より短くすると、1 つも投げずに終わる
+    expect(maxDuration * MS_PER_S).toBeGreaterThanOrEqual(
+      WEATHER_BATCH_WORST_MS + WEATHER_RECORD_MARGIN_MS,
+    );
   });
 });
 
