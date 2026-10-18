@@ -180,9 +180,14 @@ select is(
 -- ────────────────────────────────────────────────────────────────
 -- 保守 — 30 日で消す
 -- ────────────────────────────────────────────────────────────────
+-- **この節は自分で作った行だけで数える。** 前の節の行は固定の日付（2026-09-10）で、
+-- 日がたつと 30 日より古くなり、保守に巻き込まれて数が合わなくなる（2026-10-10 から
+-- 落ちていた。W7 プランの所見 225）。時刻はすべて `now()` から作る
+delete from public.weather_hourly;
 select public.upsert_weather_hourly(pg_temp.forecast_rows(now() - interval '31 days', 2));
 select public.upsert_weather_hourly(pg_temp.forecast_rows(now() - interval '29 days', 2));
-select is((select count(*)::integer from public.weather_hourly), 10, '古い行も含めて 10 行');
+select public.upsert_weather_hourly(pg_temp.forecast_rows(date_trunc('hour', now()), 5));
+select is((select count(*)::integer from public.weather_hourly), 9, '古い行も含めて 9 行');
 
 select is(
   (public.run_maintenance(60) ->> 'weather_rows_deleted')::integer,
@@ -194,7 +199,7 @@ select is(
   0, '古い行は残っていない'
 );
 select cmp_ok(
-  (select count(*)::integer from public.weather_hourly), '=', 8,
+  (select count(*)::integer from public.weather_hourly), '=', 7,
   '残るのは 29 日前の 2 行と今日の 5 行'
 );
 
