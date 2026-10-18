@@ -62,7 +62,17 @@ jobs:
             -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -configuration Debug \
             -showBuildSettings 2>/dev/null \
             | awk -F' = ' '$1 ~ /^ +BUILT_PRODUCTS_DIR$/ {d=$2} $1 ~ /^ +FULL_PRODUCT_NAME$/ {n=$2} END {print d "/" n}')"
-          plutil -lint "$app/PrivacyInfo.xcprivacy"
-          test "$(plutil -extract NSPrivacyTracking raw "$app/PrivacyInfo.xcprivacy")" = "false"
+          manifest="$app/PrivacyInfo.xcprivacy"
+          plutil -lint "$manifest"
+          test "$(plutil -extract NSPrivacyTracking raw "$manifest")" = "false"
+          # 集めるのは「おおよその位置」1 種類だけ・連結なし・トラッキングなし・目的はアプリの機能
+          # （W7 の W7-07、開発プランの D-43。App Store Connect のプライバシーの回答と揃える）
+          test "$(plutil -extract NSPrivacyCollectedDataTypes raw "$manifest")" = "1"
+          test "$(plutil -extract NSPrivacyCollectedDataTypes.0.NSPrivacyCollectedDataType raw "$manifest")" = "NSPrivacyCollectedDataTypeCoarseLocation"
+          test "$(plutil -extract NSPrivacyCollectedDataTypes.0.NSPrivacyCollectedDataTypeLinked raw "$manifest")" = "false"
+          test "$(plutil -extract NSPrivacyCollectedDataTypes.0.NSPrivacyCollectedDataTypeTracking raw "$manifest")" = "false"
+          test "$(plutil -extract NSPrivacyCollectedDataTypes.0.NSPrivacyCollectedDataTypePurposes.0 raw "$manifest")" = "NSPrivacyCollectedDataTypePurposeAppFunctionality"
           test "$(plutil -extract ITSAppUsesNonExemptEncryption raw "$app/Info.plist")" = "false"
-          echo "OK: マニフェストと暗号化の申告が $app に入っている"
+          # 位置の利用目的の文がある（許可を求める画面に出る。無いと許可を求められない）
+          plutil -extract NSLocationWhenInUseUsageDescription raw "$app/Info.plist" | grep -q "約 1 km"
+          echo "OK: マニフェスト（おおよその位置）・利用目的の文・暗号化の申告が $app に入っている"

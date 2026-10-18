@@ -217,7 +217,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "近くのシェアサイクルのポートを地図に表示するために使います。位置情報を送信・保存することはありません。";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "現在地の周りのシェアサイクルのポートを地図に表示するために使います。現在地の座標そのものは送らず、地図に表示している範囲を約 1 km 単位に丸めてサーバーに送ります（あなたを特定する情報とは結び付けません）。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
@@ -249,7 +249,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "近くのシェアサイクルのポートを地図に表示するために使います。位置情報を送信・保存することはありません。";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "現在地の周りのシェアサイクルのポートを地図に表示するために使います。現在地の座標そのものは送らず、地図に表示している範囲を約 1 km 単位に丸めてサーバーに送ります（あなたを特定する情報とは結び付けません）。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
