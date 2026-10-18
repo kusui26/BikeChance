@@ -9,6 +9,9 @@ import SwiftUI
 ///
 /// **0 件のときも画面がある**（完了条件 4）。空白を出すと、壊れているのか
 /// まだ登録していないのかが分からない。
+///
+/// **データを出しているあいだはクレジットも出す**（W7-08、W6 プランの所見 219）。この画面は
+/// シートで開くので、地図の下の 1 行のクレジットが隠れる。
 struct FavoritesScreen: View {
     @State var model: FavoritesModel
     /// 「N 分前の観測」を進める刻み（`MapScreen` と同じ考え方）。
@@ -16,6 +19,7 @@ struct FavoritesScreen: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var now = Date()
+    @State private var showsCredits = false
 
     var body: some View {
         NavigationStack {
@@ -37,6 +41,8 @@ struct FavoritesScreen: View {
                 }
             }
         }
+        // 中身はアプリに 1 つ（地図の「データについて」と同じもの）
+        .sheet(isPresented: $showsCredits) { CreditsScreen() }
         .task {
             model.reload()
             while !Task.isCancelled {
@@ -83,9 +89,37 @@ struct FavoritesScreen: View {
             } footer: {
                 Text("\(model.favorites.count) / \(Favorites.limit) 件")
             }
+
+            if let credits = model.credits {
+                creditSection(credits)
+            }
         }
         .listStyle(.insetGrouped)
         .refreshable { model.reload() }
+    }
+
+    /// **表示は義務**（CC BY 4.0 と ODPT ガイドライン 3.1）。文言は応答のまま、**前置きを
+    /// クレジットの前に置く**（開発プラン §3.7）。ポート詳細・行程チェックと同じ形で、
+    /// 系統が 2 つなら 2 行。「データについて」へも行ける。
+    private func creditSection(_ credits: FavoritesCredits) -> some View {
+        Section("データの出典") {
+            VStack(alignment: .leading, spacing: 4) {
+                if let preface = credits.preface {
+                    Text(preface)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(credits.credits, id: \.self) { credit in
+                    Text(credit).font(.caption)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                showsCredits = true
+            } label: {
+                Label("データについて", systemImage: "info.circle").font(.caption)
+            }
+        }
     }
 }
 

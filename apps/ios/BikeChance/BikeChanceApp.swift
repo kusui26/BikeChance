@@ -15,17 +15,24 @@ struct BikeChanceApp: App {
     /// **お気に入りも 1 つだけ。** 地図のピンと一覧が同じ登録簿を見る——
     /// 2 つ作ると、☆ を押したのに一覧に出ない、が起きる。
     @State private var favorites: FavoritesModel
+    /// **「データについて」も 1 つだけ**（W7-08）。地図とお気に入りのシートが同じものを開く。
+    @State private var credits: CreditsModel
 
     init() {
         let client = AppEnvironment.makeClient()
         self.client = client
         _favorites = State(initialValue: AppEnvironment.makeFavorites(client: client))
+        _credits = State(initialValue: AppEnvironment.makeCredits(client: client))
     }
 
     var body: some Scene {
         WindowGroup {
             MapScreen(model: StationsModel(client: client), favorites: favorites)
                 .environment(\.v1Client, client)
+                .environment(credits)
+                // **起動時に 1 度取って取っておく**（W7-08）。1 度も開かずに通信できなくなった端末でも、
+                // 「データについて」が空にならない（W6 プランの所見 219）
+                .task { await credits.load() }
         }
     }
 }

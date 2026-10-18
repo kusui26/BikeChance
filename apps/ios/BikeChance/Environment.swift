@@ -65,6 +65,12 @@ enum AppEnvironment {
             cache: FileFavoritesCache(directory: favoritesCacheDirectory)
         )
     }
+
+    /// 「データについて」の中身（W7-08）。**アプリに 1 つだけ**作り、起動時に 1 度取る。
+    @MainActor
+    static func makeCredits(client: V1Client) -> CreditsModel {
+        CreditsModel(client: client, cache: FileMetaCache(directory: metaCacheDirectory))
+    }
 }
 
 /// `/v1` の口を画面に配る。
