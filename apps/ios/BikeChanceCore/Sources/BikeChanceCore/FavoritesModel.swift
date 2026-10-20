@@ -16,6 +16,8 @@ public final class FavoritesModel {
     public private(set) var rows: [FavoriteRow] = []
     /// 取りに行っている最中か。**行は消さない**（前の値を出したまま）。
     public private(set) var isLoading = false
+    /// シートに出すクレジット（W7-08）。**行に出している応答から作る**ので、行と一緒に新しくなる。
+    public private(set) var credits: FavoritesCredits?
 
     /// 借りたいのか返したいのか。**切り替えても取りに行かない**（曲線に両方入っている）。
     public var intent: RideIntent = .borrow {
@@ -193,10 +195,14 @@ public final class FavoritesModel {
     private func rebuild() {
         let now = clock()
         let decoder = V1Client.makeDecoder()
-        rows = favorites.map { favorite in
-            guard let body = bodies[favorite.id],
-                let detail = try? decoder.decode(StationDetailResponse.self, from: body)
-            else { return FavoriteRow(favorite: favorite) }
+        // 最後に取れた応答を読む。無い・読めなければ nil（行は「まだ取れていない」になる）
+        let details = favorites.map { favorite in
+            bodies[favorite.id].flatMap {
+                try? decoder.decode(StationDetailResponse.self, from: $0)
+            }
+        }
+        rows = zip(favorites, details).map { favorite, detail in
+            guard let detail else { return FavoriteRow(favorite: favorite) }
             return FavoriteRow(
                 favorite: favorite,
                 detail: detail,
@@ -205,6 +211,8 @@ public final class FavoritesModel {
                 now: now
             )
         }
+        // **行に出している応答だけから作る**（外したポートの系統は残さない）
+        credits = FavoritesCredits.collect(from: details.compactMap { $0 })
     }
 
     /// 「○分前の観測」を進めるために、時計だけを動かす（通信しない）。

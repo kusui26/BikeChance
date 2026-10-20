@@ -78,13 +78,28 @@ struct CreditsTests {
         case offline
     }
 
+    /// 途中で通信の具合を変えられる口（起動時は取れて、あとで切れる、を作る。W7-08）。
+    final class Line: @unchecked Sendable {
+        private let lock = NSLock()
+        private var current: Reply
+        init(_ reply: Reply) { current = reply }
+        var reply: Reply {
+            get { lock.withLock { current } }
+            set { lock.withLock { current = newValue } }
+        }
+    }
+
     static func model(_ reply: Reply, cache: MetaCaching) -> CreditsModel {
+        model(Line(reply), cache: cache)
+    }
+
+    static func model(_ line: Line, cache: MetaCaching) -> CreditsModel {
         let client = V1Client(baseURL: URL(string: "https://example.test")!) { request in
             let url = try #require(request.url)
             func response(_ code: Int) -> HTTPURLResponse {
                 HTTPURLResponse(url: url, statusCode: code, httpVersion: nil, headerFields: nil)!
             }
-            switch reply {
+            switch line.reply {
             case .body(let data):
                 return (data, response(200))
             case .status(let code):
@@ -133,6 +148,20 @@ struct CreditsTests {
             return
         }
         #expect(cache.stored == saved)
+    }
+
+    @Test("**起動時に 1 度取れていれば、あとで通信できなくても内容を出す**（W7-08。地図とシートで同じモデル）")
+    func launchLoadKeepsTheCreditsForLater() async throws {
+        let line = Line(.body(try Self.newMeta()))
+        let model = Self.model(line, cache: MemoryCache())
+        await model.load()  // 起動時
+        line.reply = .offline
+        await model.load()  // 「データについて」を開いたとき
+        guard case .cached(let meta) = model.state else {
+            Issue.record("cached を期待した：\(model.state)")
+            return
+        }
+        #expect(meta.sources.count == 2)
     }
 
     @Test("**取れず、取っておいた内容も無ければ、取れなかったと言う**", arguments: [nil, Data("壊れた".utf8)])

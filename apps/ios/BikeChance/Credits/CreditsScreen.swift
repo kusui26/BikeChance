@@ -10,10 +10,12 @@ import SwiftUI
 ///
 /// **取れなくても表示義務を落とさない。** 最後に取れた内容を、それをサーバーが作った
 /// 時刻つきで出す（`CreditsModel`）。1 度も取れていない端末では、取れなかったと言う。
+///
+/// **中身はアプリに 1 つ**（`BikeChanceApp` が持ち、起動時に 1 度取る。W7-08）。地図からも
+/// お気に入りのシートからも、同じものを開く。
 struct CreditsScreen: View {
-    @Environment(\.v1Client) private var client
+    @Environment(CreditsModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var model: CreditsModel?
 
     var body: some View {
         NavigationStack {
@@ -26,19 +28,15 @@ struct CreditsScreen: View {
                     }
                 }
         }
-        .task {
-            let model = CreditsModel(
-                client: client, cache: FileMetaCache(directory: AppEnvironment.metaCacheDirectory))
-            self.model = model
-            await model.load()
-        }
+        // **開くたびに取り直す**（鮮度の欄を「いま」にする）。取れなければ、取っておいた内容を出す
+        .task { await model.load() }
     }
 
     @ViewBuilder
     private var content: some View {
-        if let state = model?.state, let display = CreditsDisplay(state: state) {
+        if let display = CreditsDisplay(state: model.state) {
             list(display)
-        } else if case .failed(let message) = model?.state {
+        } else if case .failed(let message) = model.state {
             ContentUnavailableView(
                 "クレジットを取得できませんでした", systemImage: "wifi.exclamationmark",
                 description: Text(message))

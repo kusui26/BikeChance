@@ -244,4 +244,41 @@ struct FavoritesModelTests {
         try? await Task.sleep(for: .milliseconds(30))
         #expect(recorder.paths.count == before)
     }
+
+    // MARK: - クレジット（W7-08、W6 プランの所見 219）
+
+    @Test("**取れた行の応答から、シートのクレジットを作る**（前置きを先に）")
+    func creditsFromTheRows() async throws {
+        let body = try FavoritesCreditsTests.detailBody()
+        let (model, _, _) = try Self.model(favorites: Self.many(2), body: body)
+        model.reload()
+        await Self.settle(model)
+        #expect(model.credits?.preface == FavoritesCreditsTests.preface)
+        #expect(model.credits?.credits == [try FavoritesCreditsTests.credit("docomo-cycle")])
+    }
+
+    @Test("**通信の前でも、取っておいた応答からクレジットを出す**（行と同じく）")
+    func creditsFromTheCache() throws {
+        let cache = MemoryCache()
+        cache.items["docomo-cycle/0"] = try FavoritesCreditsTests.detailBody()
+        let (model, recorder, _) = try Self.model(favorites: Self.many(1), cache: cache)
+        #expect(recorder.paths.isEmpty)
+        #expect(model.credits?.credits.count == 1)
+    }
+
+    @Test("お気に入りが無ければ、クレジットも無い（出しているデータが無い）")
+    func noCreditsWithoutFavorites() throws {
+        let (model, _, _) = try Self.model()
+        #expect(model.credits == nil)
+    }
+
+    @Test("**全部外すと、クレジットも消える**（外したポートの出典を残さない）")
+    func creditsFollowTheRows() async throws {
+        let (model, _, _) = try Self.model(
+            favorites: Self.many(2), body: try FavoritesCreditsTests.detailBody())
+        model.reload()
+        await Self.settle(model)
+        model.remove(atOffsets: IndexSet([0, 1]))
+        #expect(model.credits == nil)
+    }
 }
