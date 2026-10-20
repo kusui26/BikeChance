@@ -40,6 +40,7 @@ struct FreshnessTests {
             capacity: 10,
             capacityEstimate: 12,
             capacityDays: 7,
+            capacityUnbounded: false,
             bikes: bikes,
             docks: docks,
             isInstalled: true,

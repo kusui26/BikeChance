@@ -259,11 +259,14 @@ struct FreshnessLabelTests {
             capacityIsDynamic: false)
     }
 
-    func station(observedAgo: TimeInterval, isPresent: Bool = true) -> StationCurrent {
+    func station(observedAgo: TimeInterval, isPresent: Bool = true, unbounded: Bool = false)
+        -> StationCurrent
+    {
         StationCurrent(
             systemID: "hellocycling", stationID: "a", name: "テスト", latitude: 35.68,
-            longitude: 139.77, capacity: 10, capacityEstimate: 12, capacityDays: 7, bikes: 3,
-            docks: 4, isInstalled: true, isRenting: true, isReturning: true, isPresent: isPresent,
+            longitude: 139.77, capacity: 10, capacityEstimate: 12, capacityDays: 7,
+            capacityUnbounded: unbounded, bikes: 3, docks: 4, isInstalled: true, isRenting: true,
+            isReturning: true, isPresent: isPresent,
             observedAt: now.addingTimeInterval(-observedAgo), lastChangedAt: now, forecast: nil)
     }
 
@@ -272,6 +275,22 @@ struct FreshnessLabelTests {
         #expect(
             station(observedAgo: 120).currentLine(for: .returnBike, feed: feed(), now: now)
                 == "いま 返せる 4・2 分前の観測")
+    }
+
+    @Test("**上限なしのポートは「いま 返せる 上限なし」**（番兵の数を空き枠として読ませない。W7-05）")
+    func currentLineForAnUnboundedStation() {
+        let unbounded = station(observedAgo: 120, unbounded: true)
+        #expect(
+            unbounded.currentLine(for: .returnBike, feed: feed(), now: now)
+                == "いま 返せる 上限なし・2 分前の観測")
+        #expect(
+            unbounded.currentLine(for: .borrow, feed: feed(), now: now) == "いま 借りられる 3・2 分前の観測",
+            "台数は番兵ではないので、そのまま出す")
+        #expect(
+            station(observedAgo: 1_200, unbounded: true).currentLine(
+                for: .returnBike, feed: feed(), now: now)
+                == "いま 返せる —・20 分前の観測（更新が滞っています）",
+            "古ければ「上限なし」も現在値として出さない")
     }
 
     @Test("**フィードを渡すと、古い値を現在値として出さない**（渡さないと閾値が分からなかった）")

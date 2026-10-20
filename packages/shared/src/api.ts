@@ -143,6 +143,13 @@ export const stationCurrentSchema = z.object({
    * こちらも NULL。
    */
   capacity_days: z.number().int().min(1).max(7).nullable(),
+  /**
+   * **上限なし**（W7 プランの W7-05）：宣言の容量・空き枠・推定容量のどれかが番兵の大きさ
+   * （`UNBOUNDED_CAPACITY_MIN` 以上。`isCapacityUnbounded`）。**判定はサーバーの 1 か所**で、
+   * 数（`capacity`・`docks`・`capacity_est`）は消さずに返す。画面は真のとき、空き枠と容量の数の
+   * 代わりに「上限なし」と出す。2026-10 の W7 の PR C より前の応答には無い（読み手は偽として読む）。
+   */
+  capacity_unbounded: z.boolean(),
   bikes: z.number().int().nonnegative().nullable(),
   docks: z.number().int().nonnegative().nullable(),
   is_installed: z.boolean().nullable(),

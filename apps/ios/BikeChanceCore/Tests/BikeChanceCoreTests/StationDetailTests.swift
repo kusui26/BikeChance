@@ -29,6 +29,7 @@ struct StationDetailTests {
         observedAgo: TimeInterval? = 120,
         isPresent: Bool = true,
         capacity: Int? = 10,
+        capacityUnbounded: Bool? = false,
         bikes: Int? = 3,
         docks: Int? = 7,
         isInstalled: Bool? = true,
@@ -45,6 +46,7 @@ struct StationDetailTests {
             capacity: capacity,
             capacityEstimate: 12,
             capacityDays: 7,
+            capacityUnbounded: capacityUnbounded,
             bikes: bikes,
             docks: docks,
             isInstalled: isInstalled,
@@ -225,6 +227,70 @@ struct StationDetailTests {
         // 動的なシステムは「公開していない」と言える
         let dynamic = detail(station(capacity: nil), feed: feed(dynamicCapacity: true))
         #expect(fact(dynamic, "容量")?.note == StationDetail.dynamicCapacityNote)
+    }
+
+    // ── 上限なし（W7-05）──────────────────────────────────────
+    /// HELLO の 20038 の形（宣言の容量 1000・空き枠 991。2026-10-20 の本番）。
+    func unbounded(
+        observedAgo: TimeInterval? = 120, docks: Int? = 991, isReturning: Bool? = true
+    ) -> StationCurrent {
+        station(
+            observedAgo: observedAgo, capacity: 1000, capacityUnbounded: true, bikes: 9,
+            docks: docks, isReturning: isReturning)
+    }
+
+    @Test("**上限なしのポートは、空き枠の代わりに「上限なし」**（「返せる 991」と読ませない）")
+    func unboundedDocksAreNotShownAsANumber() {
+        let result = detail(unbounded())
+        #expect(result.availability[1].value == StationDetail.unboundedValue)
+        #expect(result.availability[1].caution == nil)
+        #expect(result.availability[0].value == "9", "台数は番兵ではないので、そのまま出す")
+    }
+
+    @Test("容量も「上限なし」で、なぜ数を出さないかを添える")
+    func unboundedCapacityIsExplained() {
+        let result = detail(unbounded())
+        #expect(fact(result, "容量")?.value == StationDetail.unboundedValue)
+        #expect(fact(result, "容量")?.note == StationDetail.unboundedCapacityNote)
+    }
+
+    @Test("**動的な系統でも「上限なし」**（ドコモの 4161：空き枠 32767、容量は送られない）")
+    func unboundedWinsOverTheDynamicCapacityNote() {
+        // 「いまの受け入れ枠は上の 2 つの数の合計」は、空き枠が「上限なし」のときには成り立たない
+        let docomo = station(capacity: nil, capacityUnbounded: true, bikes: 0, docks: 32767)
+        let result = detail(docomo, feed: feed(dynamicCapacity: true))
+        #expect(result.availability[1].value == StationDetail.unboundedValue)
+        #expect(fact(result, "容量")?.value == StationDetail.unboundedValue)
+        #expect(fact(result, "容量")?.note == StationDetail.unboundedCapacityNote)
+    }
+
+    @Test("**現在値の規則が先**：鮮度切れ・返却停止・未観測なら「上限なし」も出さない")
+    func unboundedDoesNotOverrideTheCurrentValueRules() {
+        // 「上限なし」も「いま返せる」という現在値の主張になる
+        let stale = detail(unbounded(observedAgo: 1200))
+        #expect(stale.availability[1].value == StationDetail.unknownValue)
+        let stopped = detail(unbounded(isReturning: false))
+        #expect(stopped.availability[1].value == StationDetail.unknownValue)
+        #expect(stopped.availability[1].caution == "返却停止中")
+        // ドコモの 5753 の形：推定容量 9999 だけで上限なし。空き枠は観測されていない
+        let unobserved = detail(unbounded(docks: nil))
+        #expect(unobserved.availability[1].value == StationDetail.unknownValue)
+    }
+
+    @Test("容量の欄は観測ではないので、鮮度が切れても「上限なし」のまま")
+    func unboundedCapacityIsNotAnObservation() {
+        let stale = detail(unbounded(observedAgo: 1200))
+        #expect(fact(stale, "容量")?.value == StationDetail.unboundedValue)
+    }
+
+    @Test("**印が無い（古い応答）・偽なら、数をそのまま出す**（端末は数から判定し直さない）")
+    func withoutTheFlagTheNumbersAreShown() {
+        for flag in [nil, false] as [Bool?] {
+            let result = detail(station(capacity: 1000, capacityUnbounded: flag, docks: 991))
+            #expect(result.availability[1].value == "991")
+            #expect(fact(result, "容量")?.value == "1000")
+            #expect(fact(result, "容量")?.note == nil)
+        }
     }
 
     // ── その他の情報 ──────────────────────────────────────────

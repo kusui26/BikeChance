@@ -12,6 +12,7 @@
 import {
   forecastHorizon,
   interpolateForecast,
+  isCapacityUnbounded,
   isForecastFresh,
   toProbabilityList,
   type ForecastCurve,
@@ -130,6 +131,8 @@ export const toStation = (
   // **`capacity` とは別の数**（0045）。混ぜない——片方は宣言、片方は実測である
   capacity_est: row.capacity_est,
   capacity_days: row.capacity_days,
+  // **判定はここ 1 か所**（W7-05）。数は消さずに返す
+  capacity_unbounded: isCapacityUnbounded(row),
   bikes: row.bikes,
   docks: row.docks,
   is_installed: row.is_installed,
