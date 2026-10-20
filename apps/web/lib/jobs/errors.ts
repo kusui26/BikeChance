@@ -32,9 +32,42 @@ export type JobFailure = {
 const nameOf = (cause: unknown): string =>
   cause instanceof Error ? cause.name : `Non-Error(${typeof cause})`;
 
-/** `cause` には触れない。触れると URL が混ざり得る。 */
-const messageOf = (cause: unknown): string =>
-  cause instanceof Error ? cause.message : String(cause);
+/**
+ * `Error` ではないが、`message`（文字列）を持つ失敗。supabase-js の `{ data, error }` の
+ * `error` がこれにあたる——PostgREST の本文（`{ code, message, details, hint }`）を
+ * ふつうのオブジェクトのまま返すので、`String()` にすると `[object Object]` になっていた
+ * （W7 プランの W7-04。収集の `begin_fetch`・属性の同期・天気の RPC）。
+ */
+type MessageBearing = { readonly message: string; readonly code?: unknown };
+
+const isMessageBearing = (value: unknown): value is MessageBearing =>
+  typeof value === "object" &&
+  value !== null &&
+  "message" in value &&
+  typeof value.message === "string";
+
+/** ふつうのオブジェクトから拾う言葉の上限。本文が HTML の失敗のページのまま入ることがある。 */
+const PLAIN_MESSAGE_MAX_CHARS = 300;
+
+/** `code: message`（`code` が空なら `message` だけ）。 */
+const plainMessageOf = (cause: MessageBearing): string => {
+  const message = cause.message.slice(0, PLAIN_MESSAGE_MAX_CHARS);
+  return typeof cause.code === "string" && cause.code !== ""
+    ? `${cause.code}: ${message}`
+    : message;
+};
+
+/**
+ * `cause` には触れない。触れると URL が混ざり得る。**ふつうのオブジェクトは `message` と
+ * `code` だけを拾う**——`details` には通信の失敗の原因と `stack`（接続先が出る）が入り、
+ * `hint` は要求の URL の長さに触れるので読まない。
+ */
+const messageOf = (cause: unknown): string => {
+  if (cause instanceof Error) {
+    return cause.message;
+  }
+  return isMessageBearing(cause) ? plainMessageOf(cause) : String(cause);
+};
 
 /** 例外を `JobFailure` に詰め替える。記録・応答にはこの結果だけを使う。 */
 export const toJobFailure = (params: {
