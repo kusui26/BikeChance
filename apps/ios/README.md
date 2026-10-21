@@ -105,7 +105,9 @@ xcrun simctl launch booted app.bikechance.BikeChance
 1. **Archive**：実行先を **Any iOS Device (arm64)** にして Product → Archive。
    終わると Organizer（Window → Organizer → Archives）に並ぶ
 2. **確かめる**（任意）：Archive を右クリック（Control クリック）→ **Generate Privacy Report** で、
-   収集するデータが無いことを見る。**Validate App** で、上げる前の自動の検証だけを先に通せる
+   集めるデータが**おおよその位置（Coarse Location）だけ**（ユーザーに連結しない・トラッキングに使わない・
+   目的はアプリの機能）であることを見る。App Store Connect のプライバシーの回答と同じ中身になる
+   （W7-07、開発プランの D-43）。**Validate App** で、上げる前の自動の検証だけを先に通せる
 3. **アップロード**：**Distribute App** → **TestFlight & App Store** → Distribute。
    この選択肢は**ビルド番号を Xcode が付け直す**ので、リポジトリの `CURRENT_PROJECT_VERSION`（1）を
    毎回上げなくてよい（同じバージョン `MARKETING_VERSION`（0.1）の中で、アップロードごとに違う番号が要る）。
