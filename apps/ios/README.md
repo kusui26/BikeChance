@@ -65,12 +65,15 @@ xcrun simctl launch booted app.bikechance.BikeChance
 `BikeChanceCore/Tests/BikeChanceCoreTests/Fixtures/` は **本番の `/v1` が実際に返した応答**
 （書き換えない）。サーバー側のスキーマを変えたらここが落ちて気づける。
 
-- `stations*.json`（5 つ。2026-09-09〜13）… `/v1/stations` のポート応答。**`aggregation` を足す前**の形
+- `stations*.json`（5 つ。2026-09-09〜13。下の名前の付いたものを除く）… `/v1/stations` のポート応答。**`aggregation` を足す前**の形
 - `stations_aggregation.json`（2026-09-27）… ポート応答（`aggregation: station`）。**前置きを足す前**の形
 - `stations_preface.json`（2026-10-14）… いまのポート応答（`139.76,35.68,139.77,35.69`、9 ポート）。**クレジットの前置き `attribution_preface` つき**（W6 の PR J）
+- `stations_unbounded.json`（2026-10-22）… ポート応答（`139.62,35.47,139.64,35.49`、42 ポート）。**上限なしの印 `capacity_unbounded` つき**——横浜の HELLO の 20110・20111（宣言の容量 1000）だけが true（W7 の PR C、W7-05）
 - `stations_cells.json`（2026-09-27）… **セル応答**（`139.76,35.67,139.85,35.70`、9 格子。`stations` が無い）
-- `station_detail*.json`（2026-09-13）… ポート詳細（予測の曲線あり・なし）
-- `trip_check*.json`（2026-09-13）… 行程チェック
+- `station_detail*.json`（2026-09-13。`_unbounded` を除く）… ポート詳細（予測の曲線あり・なし）
+- `station_detail_unbounded.json`（2026-10-22）… ポート詳細（ドコモの 4161。空き枠 32767・容量なし・`capacity_unbounded` true）
+- `trip_check*.json`（2026-09-13。`_unbounded` を除く）… 行程チェック
+- `trip_check_unbounded.json`（2026-10-22）… 行程チェック（HELLO の 13499 → 20110。到着と、代わりの候補の 20111 が `capacity_unbounded` true）
 - `meta.json`（2026-09-09）… `/v1/meta`。**前置きと出典を足す前**の形（いまの iOS も読めることを確かめる）
 - `meta_sources.json`（2026-10-14）… いまの `/v1/meta`（前置き `attribution_preface` と、ODPT 以外の出典 `sources` つき。W6 の PR J）
 - `problem_*.json` … RFC 9457 のエラー
