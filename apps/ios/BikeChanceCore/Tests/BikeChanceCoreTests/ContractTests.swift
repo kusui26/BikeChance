@@ -610,4 +610,66 @@ struct ContractTests {
         // **地図を拡大しても直らない。** 「拡大してください」の側に流さない
         #expect(!problem.needsNarrowerBbox)
     }
+
+    // ────────────────────────────────────────────────────────────
+    // 上限なし（W7-05、PR C。2026-10-22 のデプロイの後に本番から取った）
+    // ────────────────────────────────────────────────────────────
+    @Test("**一覧の実応答**：欄は全ポートに付き、印の立つポートだけが「上限なし」になる（ほかは数のまま）")
+    func unboundedStationsInTheRealList() throws {
+        let response = try Self.decode(StationsResponse.self, "stations_unbounded")
+        let feeds = response.feedIndex()
+        #expect(response.stations.allSatisfy { $0.capacityUnbounded != nil })
+        // 横浜の HELLO の 20110・20111（宣言の容量 1000）。**判定はサーバーの 1 か所**なので、
+        // ここでは数から計算し直さず、印の立ったポートを名指しで確かめる
+        let unbounded = response.stations.filter(\.isCapacityUnbounded)
+        #expect(unbounded.map(\.stationID).sorted() == ["20110", "20111"])
+        for station in response.stations {
+            let detail = StationDetail(
+                station: station, feed: feeds[station.systemID], attribution: nil,
+                now: response.generatedAt)
+            let capacity = try #require(detail.facts.first { $0.label == "容量" })
+            let returnable = detail.availability[1].value
+            if station.isCapacityUnbounded {
+                #expect(returnable == StationDetail.unboundedValue, "\(station.id)")
+                #expect(capacity.value == StationDetail.unboundedValue, "\(station.id)")
+                #expect(capacity.note == StationDetail.unboundedCapacityNote, "\(station.id)")
+            } else {
+                #expect(returnable != StationDetail.unboundedValue, "\(station.id)")
+                #expect(capacity.value != StationDetail.unboundedValue, "\(station.id)")
+            }
+        }
+    }
+
+    @Test("**詳細の実応答（ドコモの 4161）**：空き枠 32767 は消えずに届き、画面は「上限なし」とその理由")
+    func unboundedDetailInTheRealResponse() throws {
+        let response = try Self.decode(StationDetailResponse.self, "station_detail_unbounded")
+        let station = response.station
+        #expect(station.isCapacityUnbounded)
+        #expect(station.docks == 32767, "数は消さずに届く")
+        #expect(station.capacity == nil, "ドコモは動的な系統なので、容量は送られない")
+        let detail = StationDetail(
+            station: station, feed: response.feeds.first, attribution: nil,
+            now: response.generatedAt)
+        #expect(detail.availability[1].value == StationDetail.unboundedValue)
+        let capacity = try #require(detail.facts.first { $0.label == "容量" })
+        #expect(capacity.value == StationDetail.unboundedValue)
+        // 動的な系統の注記（「上の 2 つの数の合計」）ではなく、上限なしの注記
+        #expect(capacity.note == StationDetail.unboundedCapacityNote)
+    }
+
+    @Test("**行程の実応答**：到着の 20110 は「返せる 上限なし」、出発と代わりの候補は印どおり")
+    func unboundedStationsInTheRealTrip() throws {
+        let response = try Self.decode(TripCheckResponse.self, "trip_check_unbounded")
+        #expect(response.to.isCapacityUnbounded)
+        #expect(!response.from.isCapacityUnbounded)
+        let alternatives = response.alternatives.from + response.alternatives.to
+        #expect(alternatives.allSatisfy { $0.station.capacityUnbounded != nil })
+        let flagged = alternatives.filter(\.station.isCapacityUnbounded).map(\.station.stationID)
+        #expect(flagged == ["20111"])
+        let plan = TripPlan(
+            response: response, now: response.generatedAt, locale: Locale(identifier: "ja_JP"),
+            timeZone: try #require(TimeZone(identifier: "Asia/Tokyo")))
+        #expect(plan.to.count.value == StationDetail.unboundedValue)
+        #expect(plan.from.count.value != StationDetail.unboundedValue)
+    }
 }

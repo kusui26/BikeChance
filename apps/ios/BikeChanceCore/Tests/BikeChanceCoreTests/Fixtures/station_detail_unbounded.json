@@ -1,0 +1,222 @@
+{
+    "api_version": "v1",
+    "generated_at": "2026-10-22T13:04:58.699Z",
+    "stale": false,
+    "station": {
+        "system_id": "docomo-cycle",
+        "station_id": "4161",
+        "name": "\u9053\u306e\u99c5 \u611b\u5f69\u30e9\u30f3\u30c9",
+        "lat": 34.423499,
+        "lon": 135.425842,
+        "capacity": null,
+        "capacity_est": 0,
+        "capacity_days": 1,
+        "capacity_unbounded": true,
+        "bikes": 0,
+        "docks": 32767,
+        "is_installed": true,
+        "is_renting": true,
+        "is_returning": true,
+        "is_present": true,
+        "observed_at": "2026-10-22T13:03:17.000Z",
+        "last_changed_at": "2026-10-20T09:13:45.000Z",
+        "forecast": null
+    },
+    "forecast_curve": {
+        "base_observed_at": "2026-10-22T13:00:28.000Z",
+        "generated_at": "2026-10-22T13:00:00.000Z",
+        "model_version": "composite-v1-20261019",
+        "confidence": 3,
+        "horizons_min": [
+            5,
+            10,
+            15,
+            20,
+            30,
+            45,
+            60,
+            90,
+            120,
+            180
+        ],
+        "p_bike": [
+            0.033,
+            0.05,
+            0.066,
+            0.012,
+            0.016,
+            0.019,
+            0.017,
+            0.017,
+            0.016,
+            0.018
+        ],
+        "p_dock": [
+            1,
+            1,
+            1,
+            1,
+            0.999,
+            0.999,
+            0.998,
+            0.98,
+            0.978,
+            0.967
+        ]
+    },
+    "recent": [
+        {
+            "hour_start": "2026-10-21T14:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-21T15:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-21T16:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-21T17:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-21T18:00:00.000Z",
+            "n": 42,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-21T19:00:00.000Z",
+            "n": 45,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-21T20:00:00.000Z",
+            "n": 45,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-21T21:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-21T22:00:00.000Z",
+            "n": 41,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-21T23:00:00.000Z",
+            "n": 41,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T00:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T01:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T02:00:00.000Z",
+            "n": 44,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T03:00:00.000Z",
+            "n": 42,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T04:00:00.000Z",
+            "n": 42,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T05:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T06:00:00.000Z",
+            "n": 42,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T07:00:00.000Z",
+            "n": 42,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T08:00:00.000Z",
+            "n": 42,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T09:00:00.000Z",
+            "n": 42,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T10:00:00.000Z",
+            "n": 41,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        },
+        {
+            "hour_start": "2026-10-22T11:00:00.000Z",
+            "n": 43,
+            "bikes_mean": 0,
+            "docks_mean": 32767
+        }
+    ],
+    "feeds": [
+        {
+            "system_id": "docomo-cycle",
+            "display_name": "\u30c9\u30b3\u30e2\u30fb\u30d0\u30a4\u30af\u30b7\u30a7\u30a2",
+            "data_updated_at": "2026-10-22T13:03:17.000Z",
+            "expected_cadence_s": 81,
+            "stale_after_s": 303,
+            "stale": false,
+            "capacity_is_dynamic": true
+        }
+    ],
+    "attribution_preface": "\u3053\u306e\u30a2\u30d7\u30ea\u306f\u3001\u4ee5\u4e0b\u306e\u8457\u4f5c\u7269\u3092\u6539\u5909\u3057\u3066\u5229\u7528\u3057\u3066\u3044\u307e\u3059\u3002",
+    "attribution": [
+        {
+            "system_id": "docomo-cycle",
+            "provider": "\u682a\u5f0f\u4f1a\u793e\u30c9\u30b3\u30e2\u30fb\u30d0\u30a4\u30af\u30b7\u30a7\u30a2 / \u516c\u5171\u4ea4\u901a\u30aa\u30fc\u30d7\u30f3\u30c7\u30fc\u30bf\u5354\u8b70\u4f1a",
+            "dataset": "\u30c9\u30b3\u30e2\u30fb\u30d0\u30a4\u30af\u30b7\u30a7\u30a2 \u30d0\u30a4\u30af\u30b7\u30a7\u30a2\u95a2\u9023\u60c5\u5831",
+            "license": "\u30af\u30ea\u30a8\u30a4\u30c6\u30a3\u30d6\u30fb\u30b3\u30e2\u30f3\u30ba\u30fb\u30e9\u30a4\u30bb\u30f3\u30b9 \u8868\u793a4.0\u56fd\u969b",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/deed.ja"
+        }
+    ]
+}

@@ -1,0 +1,284 @@
+{
+    "api_version": "v1",
+    "generated_at": "2026-10-22T13:04:58.958Z",
+    "stale": false,
+    "system_id": "hellocycling",
+    "depart_in_min": 15,
+    "ride_min": 3,
+    "ride_min_estimated": true,
+    "arrive_in_min": 18,
+    "from": {
+        "system_id": "hellocycling",
+        "station_id": "13499",
+        "name": "Casa Blu \u53cd\u753a",
+        "lat": 35.475124790161,
+        "lon": 139.62351948023,
+        "capacity": 5,
+        "capacity_est": 4,
+        "capacity_days": 7,
+        "capacity_unbounded": false,
+        "bikes": 0,
+        "docks": 4,
+        "is_installed": true,
+        "is_renting": true,
+        "is_returning": true,
+        "is_present": true,
+        "observed_at": "2026-10-22T13:00:47.000Z",
+        "last_changed_at": "2026-10-22T12:55:46.000Z",
+        "forecast": {
+            "p_bike": 0.074,
+            "p_dock": 0.997,
+            "confidence": 3,
+            "base_observed_at": "2026-10-22T13:00:47.000Z",
+            "model_version": "composite-v1-20261019"
+        }
+    },
+    "to": {
+        "system_id": "hellocycling",
+        "station_id": "20110",
+        "name": "100.\u795e\u5948\u5ddd\u533a\u5f79\u6240",
+        "lat": 35.476599,
+        "lon": 139.629982,
+        "capacity": 1000,
+        "capacity_est": 1000,
+        "capacity_days": 7,
+        "capacity_unbounded": true,
+        "bikes": 0,
+        "docks": 998,
+        "is_installed": true,
+        "is_renting": true,
+        "is_returning": true,
+        "is_present": true,
+        "observed_at": "2026-10-22T13:00:47.000Z",
+        "last_changed_at": "2026-10-22T07:40:47.000Z",
+        "forecast": {
+            "p_bike": 0.052,
+            "p_dock": 0.999,
+            "confidence": 3,
+            "base_observed_at": "2026-10-22T13:00:47.000Z",
+            "model_version": "composite-v1-20261019"
+        }
+    },
+    "trip": {
+        "p_trip": 0.074,
+        "confidence": 3,
+        "notice": "\u51fa\u767a\u30dd\u30fc\u30c8\u3067\u501f\u308a\u3089\u308c\u308b\u78ba\u7387\u3068\u3001\u5230\u7740\u30dd\u30fc\u30c8\u3067\u8fd4\u305b\u308b\u78ba\u7387\u3092\u3001\u4e92\u3044\u306b\u5f71\u97ff\u3057\u306a\u3044\u3082\u306e\u3068\u307f\u306a\u3057\u3066\u639b\u3051\u5408\u308f\u305b\u305f\u5024\u3067\u3059\u3002\u540c\u3058\u5929\u6c17\u3084\u6642\u9593\u5e2f\u304c\u4e21\u65b9\u306b\u52b9\u304f\u305f\u3081\u3001\u5b9f\u969b\u306e\u6210\u529f\u7387\u306f\u3053\u306e\u5024\u3068\u7570\u306a\u308b\u3053\u3068\u304c\u3042\u308a\u307e\u3059\u3002"
+    },
+    "alternatives": {
+        "from": [
+            {
+                "distance_m": 143,
+                "station": {
+                    "system_id": "hellocycling",
+                    "station_id": "27512",
+                    "name": "\u3010MMS\u3011\u30ea\u30d1\u30fc\u30af\u6a2a\u6d5c\u677e\u672c\u753a\uff11\u4e01\u76ee\u7b2c\uff13",
+                    "lat": 35.4761618,
+                    "lon": 139.6244452,
+                    "capacity": 9,
+                    "capacity_est": 8,
+                    "capacity_days": 7,
+                    "capacity_unbounded": false,
+                    "bikes": 3,
+                    "docks": 5,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-10-22T13:00:47.000Z",
+                    "last_changed_at": "2026-10-22T07:00:46.000Z",
+                    "forecast": {
+                        "p_bike": 0.998,
+                        "p_dock": 1,
+                        "confidence": 3,
+                        "base_observed_at": "2026-10-22T13:00:47.000Z",
+                        "model_version": "composite-v1-20261019"
+                    }
+                }
+            }
+        ],
+        "to": [
+            {
+                "distance_m": 67,
+                "station": {
+                    "system_id": "hellocycling",
+                    "station_id": "20154",
+                    "name": "151.\u53cd\u753a\u516c\u5712",
+                    "lat": 35.476389,
+                    "lon": 139.629294,
+                    "capacity": 15,
+                    "capacity_est": 15,
+                    "capacity_days": 7,
+                    "capacity_unbounded": false,
+                    "bikes": 1,
+                    "docks": 9,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-10-22T13:00:47.000Z",
+                    "last_changed_at": "2026-10-22T12:25:47.000Z",
+                    "forecast": {
+                        "p_bike": 0.889,
+                        "p_dock": 0.999,
+                        "confidence": 3,
+                        "base_observed_at": "2026-10-22T13:00:47.000Z",
+                        "model_version": "composite-v1-20261019"
+                    }
+                }
+            },
+            {
+                "distance_m": 226,
+                "station": {
+                    "system_id": "hellocycling",
+                    "station_id": "25408",
+                    "name": "\u30b5\u30a4\u30af\u30eb\u30d7\u30e9\u30b6\u30de\u30f3\u30b9\u30ea\u30fc\u6771\u795e\u5948\u5ddd",
+                    "lat": 35.4779725,
+                    "lon": 139.6318226,
+                    "capacity": 10,
+                    "capacity_est": 10,
+                    "capacity_days": 7,
+                    "capacity_unbounded": false,
+                    "bikes": 1,
+                    "docks": 7,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-10-22T13:00:47.000Z",
+                    "last_changed_at": "2026-10-22T12:10:48.000Z",
+                    "forecast": {
+                        "p_bike": 0.891,
+                        "p_dock": 0.999,
+                        "confidence": 3,
+                        "base_observed_at": "2026-10-22T13:00:47.000Z",
+                        "model_version": "composite-v1-20261019"
+                    }
+                }
+            },
+            {
+                "distance_m": 315,
+                "station": {
+                    "system_id": "hellocycling",
+                    "station_id": "20145",
+                    "name": "142.\u6771\u795e\u5948\u5ddd\u99c5\u6771\u53e3\u7b2c\u4e8c\u99d0\u8f2a\u5834",
+                    "lat": 35.476736,
+                    "lon": 139.633454,
+                    "capacity": 9,
+                    "capacity_est": 9,
+                    "capacity_days": 7,
+                    "capacity_unbounded": false,
+                    "bikes": 0,
+                    "docks": 7,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-10-22T13:00:47.000Z",
+                    "last_changed_at": "2026-10-22T09:45:47.000Z",
+                    "forecast": {
+                        "p_bike": 0.061,
+                        "p_dock": 0.999,
+                        "confidence": 3,
+                        "base_observed_at": "2026-10-22T13:00:47.000Z",
+                        "model_version": "composite-v1-20261019"
+                    }
+                }
+            },
+            {
+                "distance_m": 325,
+                "station": {
+                    "system_id": "hellocycling",
+                    "station_id": "20111",
+                    "name": "101.\u795e\u5948\u5ddd\u5730\u533a\u30bb\u30f3\u30bf\u30fc",
+                    "lat": 35.474894,
+                    "lon": 139.632903,
+                    "capacity": 1000,
+                    "capacity_est": 999,
+                    "capacity_days": 7,
+                    "capacity_unbounded": true,
+                    "bikes": 0,
+                    "docks": 997,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-10-22T13:00:47.000Z",
+                    "last_changed_at": "2026-10-22T13:00:47.000Z",
+                    "forecast": {
+                        "p_bike": 0.06,
+                        "p_dock": 0.999,
+                        "confidence": 3,
+                        "base_observed_at": "2026-10-22T13:00:47.000Z",
+                        "model_version": "composite-v1-20261019"
+                    }
+                }
+            },
+            {
+                "distance_m": 345,
+                "station": {
+                    "system_id": "hellocycling",
+                    "station_id": "20377",
+                    "name": "mon cheri",
+                    "lat": 35.4788678,
+                    "lon": 139.6273792,
+                    "capacity": 3,
+                    "capacity_est": 3,
+                    "capacity_days": 7,
+                    "capacity_unbounded": false,
+                    "bikes": 0,
+                    "docks": 3,
+                    "is_installed": true,
+                    "is_renting": true,
+                    "is_returning": true,
+                    "is_present": true,
+                    "observed_at": "2026-10-22T13:00:47.000Z",
+                    "last_changed_at": "2026-10-19T23:41:37.000Z",
+                    "forecast": {
+                        "p_bike": 0.046,
+                        "p_dock": 0.999,
+                        "confidence": 3,
+                        "base_observed_at": "2026-10-22T13:00:47.000Z",
+                        "model_version": "composite-v1-20261019"
+                    }
+                }
+            }
+        ]
+    },
+    "feeds": [
+        {
+            "system_id": "docomo-cycle",
+            "display_name": "\u30c9\u30b3\u30e2\u30fb\u30d0\u30a4\u30af\u30b7\u30a7\u30a2",
+            "data_updated_at": "2026-10-22T13:03:17.000Z",
+            "expected_cadence_s": 81,
+            "stale_after_s": 303,
+            "stale": false,
+            "capacity_is_dynamic": true
+        },
+        {
+            "system_id": "hellocycling",
+            "display_name": "HELLO CYCLING",
+            "data_updated_at": "2026-10-22T13:00:47.000Z",
+            "expected_cadence_s": 300,
+            "stale_after_s": 960,
+            "stale": false,
+            "capacity_is_dynamic": false
+        }
+    ],
+    "attribution_preface": "\u3053\u306e\u30a2\u30d7\u30ea\u306f\u3001\u4ee5\u4e0b\u306e\u8457\u4f5c\u7269\u3092\u6539\u5909\u3057\u3066\u5229\u7528\u3057\u3066\u3044\u307e\u3059\u3002",
+    "attribution": [
+        {
+            "system_id": "hellocycling",
+            "provider": "OpenStreet\u682a\u5f0f\u4f1a\u793e / \u516c\u5171\u4ea4\u901a\u30aa\u30fc\u30d7\u30f3\u30c7\u30fc\u30bf\u5354\u8b70\u4f1a",
+            "dataset": "OpenStreet\uff08\u30cf\u30ed\u30fc\u30b5\u30a4\u30af\u30ea\u30f3\u30b0\uff09 \u30d0\u30a4\u30af\u30b7\u30a7\u30a2\u95a2\u9023\u60c5\u5831",
+            "license": "\u30af\u30ea\u30a8\u30a4\u30c6\u30a3\u30d6\u30fb\u30b3\u30e2\u30f3\u30ba\u30fb\u30e9\u30a4\u30bb\u30f3\u30b9 \u8868\u793a4.0\u56fd\u969b",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/deed.ja"
+        },
+        {
+            "system_id": "docomo-cycle",
+            "provider": "\u682a\u5f0f\u4f1a\u793e\u30c9\u30b3\u30e2\u30fb\u30d0\u30a4\u30af\u30b7\u30a7\u30a2 / \u516c\u5171\u4ea4\u901a\u30aa\u30fc\u30d7\u30f3\u30c7\u30fc\u30bf\u5354\u8b70\u4f1a",
+            "dataset": "\u30c9\u30b3\u30e2\u30fb\u30d0\u30a4\u30af\u30b7\u30a7\u30a2 \u30d0\u30a4\u30af\u30b7\u30a7\u30a2\u95a2\u9023\u60c5\u5831",
+            "license": "\u30af\u30ea\u30a8\u30a4\u30c6\u30a3\u30d6\u30fb\u30b3\u30e2\u30f3\u30ba\u30fb\u30e9\u30a4\u30bb\u30f3\u30b9 \u8868\u793a4.0\u56fd\u969b",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/deed.ja"
+        }
+    ]
+}
