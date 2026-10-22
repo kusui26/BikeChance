@@ -103,18 +103,21 @@ xcrun simctl launch booted app.bikechance.BikeChance
 ### 毎回
 
 1. **Archive**：実行先を **Any iOS Device (arm64)** にして Product → Archive。
-   終わると Organizer（Window → Organizer → Archives）に並ぶ
+   終わると Organizer（Window → Organizer → Archives）に並ぶ。**Product メニューの「Archive」のすぐ下の
+   「Xcode Cloud」を選ばない**——Xcode Cloud（Apple のクラウドのビルド）を始める道で、
+   「Grant Access to Your Source Code」（GitHub への権限）の画面に進む（2026-10-22 の M5 で一度入った。使わない）
 2. **確かめる**（任意）：Archive を右クリック（Control クリック）→ **Generate Privacy Report** で、
    集めるデータが**おおよその位置（Coarse Location）だけ**（ユーザーに連結しない・トラッキングに使わない・
    目的はアプリの機能）であることを見る。App Store Connect のプライバシーの回答と同じ中身になる
    （W7-07、開発プランの D-43）。**Validate App** で、上げる前の自動の検証だけを先に通せる
-3. **アップロード**：**Distribute App** → **TestFlight & App Store** → Distribute。
+3. **アップロード**：**Distribute App** → **App Store Connect** → Distribute。いまの Xcode では、以前の
+   「TestFlight & App Store」がこの名前になっている（内部・外部のテストにも申請にも使えるビルド。2026-10-22 の M5）。
    この選択肢は**ビルド番号を Xcode が付け直す**ので、リポジトリの `CURRENT_PROJECT_VERSION`（1）を
    毎回上げなくてよい（同じバージョン `MARKETING_VERSION`（0.1）の中で、アップロードごとに違う番号が要る）。
    チームの中だけで試し、App Store へは出さないと決めた回は **TestFlight Internal Only** を選ぶ
    （その回のビルドは申請に使えない）
 4. **入れる**：処理が終わると App Store Connect の TestFlight に出る。Internal Testing の
-   グループに自分を足し、iPhone の TestFlight アプリから入れる
+   グループ（**自動配布に印を付けてある**。2026-10-21）に届くので、iPhone の TestFlight アプリから入れる
 
 手順の元は Apple の「Distributing your app for beta testing and releases」。メニューや
 選択肢の名前は、Xcode の版で変わることがある。
