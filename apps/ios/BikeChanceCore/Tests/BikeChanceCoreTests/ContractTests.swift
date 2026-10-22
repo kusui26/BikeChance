@@ -111,6 +111,25 @@ struct ContractTests {
         #expect(!response.stations.isEmpty)
     }
 
+    @Test("**上限なしの印を読める。送られていなければ偽**（W7-05。PR C より前の応答）")
+    func decodesTheUnboundedFlag() throws {
+        // ドコモの 4161 の形（2026-10-20 の本番）。本番の応答のフィクスチャはデプロイの後に取る
+        let fields = """
+            "system_id":"docomo-cycle","station_id":"4161","name":null,"lat":35.0,"lon":139.0,
+            "capacity":null,"capacity_est":0,"capacity_days":4,"bikes":0,"docks":32767,
+            "is_installed":true,"is_renting":true,"is_returning":true,"is_present":true,
+            "observed_at":"2026-10-20T00:00:00.000Z","last_changed_at":"2026-10-20T00:00:00.000Z"
+            """
+        let decoder = V1Client.makeDecoder()
+        let flagged = try decoder.decode(
+            StationCurrent.self, from: Data("{\(fields),\"capacity_unbounded\":true}".utf8))
+        let older = try decoder.decode(StationCurrent.self, from: Data("{\(fields)}".utf8))
+        #expect(flagged.isCapacityUnbounded)
+        #expect(flagged.docks == 32767, "数は消さずに届く")
+        #expect(older.capacityUnbounded == nil)
+        #expect(!older.isCapacityUnbounded)
+    }
+
     @Test("/v1/meta をデコードできる（クレジットと通知文つき）")
     func decodesMeta() throws {
         let meta = try Self.decode(MetaResponse.self, "meta")

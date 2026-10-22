@@ -25,6 +25,11 @@ public struct StationCurrent: Decodable, Hashable, Sendable, Identifiable {
     public let capacityEstimate: Int?
     /// `capacityEstimate` に寄与した日数（1〜7）。7 未満なら「まだその日数ぶん」。
     public let capacityDays: Int?
+    /// **上限なしの印**（W7-05）。宣言の容量・空き枠・推定容量のどれかが番兵の大きさの
+    /// ポートで真。**判定はサーバーの 1 か所**で、端末は数から計算し直さない（W5-01 と同じ理由）。
+    ///
+    /// nil は「サーバーが送っていない」（PR C より前の応答）。偽として読む（`isCapacityUnbounded`）。
+    public let capacityUnbounded: Bool?
     public let bikes: Int?
     public let docks: Int?
     public let isInstalled: Bool?
@@ -40,6 +45,9 @@ public struct StationCurrent: Decodable, Hashable, Sendable, Identifiable {
     /// システムをまたいで一意。`station_id` はシステム内でしか一意でない。
     public var id: String { "\(systemID)/\(stationID)" }
 
+    /// 上限なしか。**印が送られていなければ偽**（古い応答では数をそのまま出す）。
+    public var isCapacityUnbounded: Bool { capacityUnbounded == true }
+
     private enum CodingKeys: String, CodingKey {
         case systemID = "system_id"
         case stationID = "station_id"
@@ -49,6 +57,7 @@ public struct StationCurrent: Decodable, Hashable, Sendable, Identifiable {
         case capacity
         case capacityEstimate = "capacity_est"
         case capacityDays = "capacity_days"
+        case capacityUnbounded = "capacity_unbounded"
         case bikes
         case docks
         case isInstalled = "is_installed"

@@ -265,6 +265,23 @@ describe("buildStationsResponse", () => {
     expect(() => stationsResponseSchema.parse(build([station()]))).not.toThrow();
   });
 
+  it("**上限なし**を添え、数は消さない（W7-05。判定はサーバーの 1 か所）", () => {
+    const response = build([
+      station(),
+      // 2026-10-20 の本番の値：HELLO の宣言の容量 1000、ドコモの 4161 の空き枠 32767
+      station({ station_id: "20038", capacity: 1000, docks: 991, capacity_est: 1000 }),
+      station({
+        system_id: "docomo-cycle",
+        station_id: "4161",
+        capacity: null,
+        docks: 32767,
+        capacity_est: 0,
+      }),
+    ]);
+    expect(response.stations.map((one) => one.capacity_unbounded)).toEqual([false, true, true]);
+    expect(response.stations[2]?.docks).toBe(32767);
+  });
+
   it("観測時刻はフィードの last_updated（値が変わった時刻ではない）", () => {
     const response = build([station({ last_changed_at: "2026-09-01T00:00:00.000Z" })]);
     expect(response.stations[0]?.observed_at).toBe("2026-09-07T23:58:00.000Z");

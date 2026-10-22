@@ -6,15 +6,19 @@ import Foundation
 /// テストできる形にしておかないと、「未観測を 0 と出していないか」のような、
 /// 表示義務に直結する規則を機械で守れない。
 ///
-/// 守る規則は 5 つ（CLAUDE.md §2 の 7・8、データ辞書 §2）。
+/// 守る規則は 6 つ（CLAUDE.md §2 の 7・8、データ辞書 §2）。
 ///   * **未観測は「—」。0 台と区別する**
 ///   * **鮮度を超えた値は「現在値」として出さない**
 ///   * **停止中は台数があっても借りられない**ことを言葉で添える
 ///   * **ドコモの「容量」は固定のラック数ではない**ので、**数を出さない**
+///   * **上限なしのポートは、空き枠と容量の数の代わりに「上限なし」**（W7-05。判定はサーバー）
 ///   * **予測と現在値を混ぜない。** 予測は別の欄に置き、出せなければ台数だけを出す
 public struct StationDetail: Equatable, Sendable {
     /// 値が分からないときの表示。**0 と混同させない。**
     public static let unknownValue = "—"
+    /// 上限なしのポートの空き枠と容量（W7-05）。上流は 1000 や 32767 のような番兵の数を
+    /// 報告していて、**そのまま出すと「返せる 32767」と読ませてしまう。**
+    public static let unboundedValue = "上限なし"
 
     public let name: String
     public let systemName: String
@@ -65,6 +69,11 @@ public struct StationDetail: Equatable, Sendable {
     public static let dynamicCapacityNote =
         "この事業者は固定のラック数を公開していないため、表示していません。いまの受け入れ枠は上の 2 つの数の合計です。"
 
+    /// 上限なしのポートに添える説明。**数を出さない理由を言う**（断定はしない。上流の意図は
+    /// 公開されていない）。**しきい値の数は書かない**——判定はサーバーにあり、ここに写すと 2 つになる。
+    public static let unboundedCapacityNote =
+        "事業者がこのポートについて、ラック数とは考えにくい大きな数を報告しています。返せる台数に上限が無いとみられるため、数の代わりに「上限なし」と表示しています。"
+
     /// 容量の表示。**容量が動的なシステムでは数を出さない**（W4 プラン §12 の 115）。
     ///
     /// ドコモの `capacity` は**日次同期の瞬間の `bikes + docks` が凍結された値**で、
@@ -73,17 +82,29 @@ public struct StationDetail: Equatable, Sendable {
     ///
     /// **サーバー（migration 0035）も NULL を返すが、ここでも受け取らない。** CDN に
     /// 残った古い応答や、将来の別の経路が数を持ってきても、画面には出さない。
-    private static func capacity(_ value: Int?, feed: FeedStatus?) -> String {
-        guard feed?.capacityIsDynamic != true, let value else { return unknownValue }
+    ///
+    /// **上限なしは系統によらず「上限なし」**（W7-05）。ドコモの 4161 も含む——動的な系統の
+    /// 説明（「上の 2 つの数の合計」）は、空き枠が「上限なし」のときには成り立たない。
+    private static func capacity(of station: StationCurrent, feed: FeedStatus?) -> String {
+        if station.isCapacityUnbounded { return unboundedValue }
+        guard feed?.capacityIsDynamic != true, let value = station.capacity else {
+            return unknownValue
+        }
         return "\(value)"
+    }
+
+    /// 容量の欄の説明。上限なしの説明を、動的な系統の説明より先に見る（理由は `capacity`）。
+    private static func capacityNote(of station: StationCurrent, feed: FeedStatus?) -> String? {
+        if station.isCapacityUnbounded { return unboundedCapacityNote }
+        return feed?.capacityIsDynamic == true ? dynamicCapacityNote : nil
     }
 
     private static func facts(station: StationCurrent, feed: FeedStatus?) -> [Fact] {
         [
             Fact(
                 label: "容量",
-                value: capacity(station.capacity, feed: feed),
-                note: feed?.capacityIsDynamic == true ? dynamicCapacityNote : nil
+                value: capacity(of: station, feed: feed),
+                note: capacityNote(of: station, feed: feed)
             ),
             Fact(label: "設置", value: installation(station.isInstalled), note: nil),
             Fact(label: "座標", value: coordinate(station), note: nil),
@@ -141,12 +162,16 @@ extension StationCurrent {
     /// **詳細画面と行程チェックが同じ実装を通る。** この規則（未観測を 0 と区別する・
     /// 鮮度切れを現在値として出さない）は表示義務に直結していて、2 か所に別々に
     /// 書くと片方だけ直したときに静かに食い違う（W5 §12 の 142 と同じ形）。
+    ///
+    /// **上限なしのポートの空き枠は「上限なし」**（W7-05）。ただし**上の規則が先**：鮮度切れ・
+    /// 返却停止・未観測なら「—」のまま（「上限なし」も、いま返せるという現在値の主張になる）。
     public func countText(for intent: RideIntent, freshness: Freshness) -> String {
         let value = intent == .borrow ? bikes : docks
         let enabled = intent == .borrow ? isRenting : isReturning
         guard freshness.isPresentable, enabled != false, let value else {
             return StationDetail.unknownValue
         }
+        if intent == .returnBike && isCapacityUnbounded { return StationDetail.unboundedValue }
         return "\(value)"
     }
 
