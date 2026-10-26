@@ -282,10 +282,7 @@ public struct ForecastCurve: Decodable, Equatable, Sendable {
     ///
     /// 長さがそろっていなければ nil（欠けた表から数を作らない）。
     public func nearestIndex(toMinutes minutes: Int) -> Int? {
-        guard !horizonsMinutes.isEmpty,
-            horizonsMinutes.count == rentProbabilities.count,
-            horizonsMinutes.count == returnProbabilities.count
-        else { return nil }
+        guard lengthsMatch else { return nil }
         // 同じ距離なら**手前**を採る（到着が早いほうの確率を出す）
         return horizonsMinutes.indices.min {
             let left = (abs(horizonsMinutes[$0] - minutes), horizonsMinutes[$0])
@@ -299,6 +296,19 @@ public struct ForecastCurve: Decodable, Equatable, Sendable {
         let values = intent == .borrow ? rentProbabilities : returnProbabilities
         guard values.indices.contains(index) else { return nil }
         return values[index]
+    }
+
+    /// 水平と 2 つの確率の**長さがそろっている**か（空でもない）。**そろっていなければ読まない**
+    /// ——添字がずれたまま読むと、別の時刻の確率をその時刻のものとして出してしまう。
+    public var lengthsMatch: Bool {
+        !horizonsMinutes.isEmpty
+            && horizonsMinutes.count == rentProbabilities.count
+            && horizonsMinutes.count == returnProbabilities.count
+    }
+
+    /// 水平が**狭義に増えている**か。重複や逆順の曲線は、点を時刻の順に並べられない。
+    public var horizonsIncrease: Bool {
+        zip(horizonsMinutes, horizonsMinutes.dropFirst()).allSatisfy { $0 < $1 }
     }
 }
 
@@ -353,6 +363,10 @@ public struct StationDetailResponse: Decodable, Equatable, Sendable {
         case attributionPreface = "attribution_preface"
         case attribution
     }
+
+    /// **このポートの系統の**フィード。詳細は 1 系統ぶんしか返さないが、`feeds.first` ではなく
+    /// 名指しで引く（`TripCheckResponse.feed` と同じ理由）。お気に入りの行と詳細の画面が通る。
+    public var feed: FeedStatus? { feeds.first { $0.systemID == station.systemID } }
 }
 
 public struct MetaResponse: Decodable, Equatable, Sendable {

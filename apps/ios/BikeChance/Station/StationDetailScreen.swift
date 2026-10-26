@@ -7,8 +7,9 @@ import SwiftUI
 /// 「未観測は 0 と出さない」「鮮度切れの値を『現在値』として出さない」といった規則は
 /// `BikeChanceCore` 側でテストしている。
 ///
-/// **予測は到着時刻を選んだときだけ出す**（W4 の PR B）。10 水平の曲線と履歴は W5
-/// （`/v1/stations/{system}/{id}` と同じ PR）。
+/// **選んだ到着の予測は、地図で到着時刻を選んだときだけ出す**（W4 の PR B）。
+/// **到着時刻ごとの予測（10 水平）と直近 24 時間は、開いたときに詳細の応答から出す**（iOS-3。
+/// 判断は `ForecastTimeline` と `RecentHistory`）。台数と鮮度は地図の行のまま（ピンと同じ値）。
 ///
 /// **予測と現在値を混ぜない。** 欄を分け、予測が出せなくても台数は出す。
 struct StationDetailScreen: View {
@@ -20,11 +21,18 @@ struct StationDetailScreen: View {
     let intent: RideIntent
     /// **応答が指している到着時刻**（`StationsResponse.forecastArrival`）。nil なら予測を出さない。
     let arrival: Date?
+    /// 地図の時計（30 秒ごと）。**詳細を開いているあいだも進む**（地図の `.task` はナビゲーションの
+    /// 外側にある。所見 233）。「N 分前の観測」と、過ぎた予測の点を落とすのに使う。
     let now: Date
     /// **アプリに 1 つだけ**（`BikeChanceApp` が持つ）。☆ の状態と一覧が同じものを見る。
     var favorites: FavoritesModel
 
     @Environment(\.v1Client) private var client
+    @Environment(\.scenePhase) private var scenePhase
+    /// 詳細の応答（到着時刻ごとの予測と直近 24 時間）。
+    @State private var loader = StationDetailModel()
+    /// 増やすと取り直す（「もう一度読み込む」・前面に戻った）。
+    @State private var attempt = 0
 
     private var detail: StationDetail {
         StationDetail(
@@ -34,9 +42,11 @@ struct StationDetailScreen: View {
 
     var body: some View {
         List {
-            // **確率が主、台数は従**（CLAUDE.md §2 の 7）。出せるときは先に置く
+            // **確率が主、台数は従**（CLAUDE.md §2 の 7）。予測を先に、実測を後に置く
             forecastSection
+            timelineSection
             availabilitySection
+            recentSection
             tripSection
             factsSection
             creditSection
@@ -45,6 +55,15 @@ struct StationDetailScreen: View {
         .navigationTitle(detail.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .primaryAction) { favoriteButton } }
+        // **開くたびに 1 度取る。開いたまま叩き続けない**（お気に入りと同じ）。画面が消えれば取り消す
+        .task(id: attempt) {
+            await loader.load(
+                client: client, system: station.systemID, stationID: station.stationID)
+        }
+        // 前面に戻ったら取り直す。開いたまま置かれた画面の予測を、古い点のままにしない
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { attempt += 1 }
+        }
     }
 
     /// ☆。**上限に達していたら押せなくする**（押せるのに何も起きない、を作らない）。
@@ -134,6 +153,124 @@ struct StationDetailScreen: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(display.accessibilityLabel)
     }
+
+    // MARK: - 到着時刻ごとの予測（iOS-3）
+
+    /// 到着時刻ごとの予測。**取れるまでは読み込み中、取れなければ理由ともう一度のボタン。**
+    @ViewBuilder
+    private var timelineSection: some View {
+        switch loader.state {
+        case .loading:
+            Section(ForecastTimeline.header(for: intent)) { loadingRow }
+        case .failed(let message):
+            Section(ForecastTimeline.header(for: intent)) {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                    .font(.subheadline)
+                Button("もう一度読み込む") { attempt += 1 }
+            }
+        case .loaded(let response):
+            timelineSection(
+                ForecastTimelineState.make(
+                    detail: response, intent: intent, selectedArrival: arrival, now: now))
+        }
+    }
+
+    /// **出せないときも欄は出す**（`forecastSection` と同じ。黙って消すと、無いのか選んでいないのか
+    /// 分からない）。出せるときは、**基づく観測の時刻と、点をつながない理由を必ず添える。**
+    @ViewBuilder
+    private func timelineSection(_ state: ForecastTimelineState) -> some View {
+        switch state {
+        case .unavailable(let message):
+            Section(ForecastTimeline.header(for: intent)) {
+                Label(message, systemImage: "questionmark.circle")
+                    .foregroundStyle(.secondary)
+                    .font(.subheadline)
+            }
+        case .available(let timeline):
+            Section {
+                if timeline.isReference {
+                    Label(ForecastTimeline.referenceNote, systemImage: "info.circle")
+                        .font(.caption)
+                }
+                ForecastTimelineChart(timeline: timeline)
+                timelineNumbers(timeline)
+            } header: {
+                Text(ForecastTimeline.header(for: intent))
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(timeline.basis, systemImage: "chart.dots.scatter")
+                    Text(ForecastTimeline.pointsNote)
+                }
+            }
+        }
+    }
+
+    /// 点の数字。**グラフからは読み取れない値を、畳んで置く**（読み上げでも 1 点ずつ読める）。
+    private func timelineNumbers(_ timeline: ForecastTimeline) -> some View {
+        DisclosureGroup("数字で見る") {
+            ForEach(timeline.points) { point in
+                LabeledContent(point.display.arrival) {
+                    Text("\(point.display.percent)%")
+                        .foregroundStyle(point.display.band.textColor)
+                        .monospacedDigit()
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(point.accessibilityLabel)
+            }
+        }
+    }
+
+    private var loadingRow: some View {
+        ProgressView()
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+    }
+
+    // MARK: - 直近 24 時間（iOS-3）
+
+    /// 直近 24 時間。**実測値なので観測の時刻を添える**（契約 43）。取れていなければ出さない
+    /// （読み込み中と失敗は上の予測の欄が言う）。
+    @ViewBuilder
+    private var recentSection: some View {
+        if case .loaded(let response) = loader.state {
+            recentSection(RecentHistoryState.make(detail: response, intent: intent))
+        }
+    }
+
+    @ViewBuilder
+    private func recentSection(_ state: RecentHistoryState) -> some View {
+        switch state {
+        case .empty(let message):
+            Section(RecentHistory.header(for: intent)) {
+                Label(message, systemImage: "clock.badge.questionmark")
+                    .foregroundStyle(.secondary)
+                    .font(.subheadline)
+            }
+        case .unbounded(let note):
+            // **上限なしのポートの空き枠は数を出さない**（W7-05。番兵の 32767 を棒にしない）
+            Section(RecentHistory.header(for: intent)) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(StationDetail.unboundedValue)
+                        .font(.system(.title3, design: .rounded).weight(.semibold))
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+        case .available(let history):
+            Section {
+                RecentHistoryChart(history: history)
+            } header: {
+                Text(RecentHistory.header(for: intent))
+            } footer: {
+                Label(history.footnote, systemImage: "clock")
+            }
+        }
+    }
+
+    // MARK: - 現在値
 
     /// 借りられる／返せる。**実測値なので、観測時刻を必ず添える**（CLAUDE.md §2 の 7）。
     private var availabilitySection: some View {

@@ -72,6 +72,29 @@ struct MapScreen: View {
                     )
                 }
         }
+        // **2 つの `.task` は地図ではなく、ナビゲーションの外側に付ける**（W7 プランの所見 233）。
+        // 地図に付けると、ポートの詳細を開いて地図が覆われるたびに取り消され、戻るたびに始め直す。
+        // そのせいで、詳細を開いているあいだは時計も取り直しも止まり（詳細は地図の時計と
+        // 最新の行を借りている。鮮度を超えた台数を現在値として出し続けた）、戻るたびに
+        // 最初の範囲（東京駅）で取り直していた
+        //
+        // 最初の 1 回。カメラの位置は以降 `onMapCameraChange` が持つ
+        .task { model.viewportChanged(to: Bbox(region: MapScreen.initialRegion)) }
+        // **`id:` を付けて、場面が変わるたびに作り直す。**
+        // `.task` に閉じ込めた `@Environment` は**開始時の値のまま固まる**ので、
+        // ループの中で `scenePhase` を見ても永遠に起動時の値になる（§12 の 108）。
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                now = Date()
+                // **時刻を進めるだけでは値は新しくならない**（§12 の 107）。
+                // 地図を動かさない利用者には、データが古くなっていく様子だけが見えて、
+                // やがて全部が灰色になったまま戻らなかった。
+                // 前面に戻った直後にも 1 度試すよう、眠る前に呼ぶ
+                model.refreshIfDue()
+                try? await Task.sleep(for: .seconds(Self.tickSeconds))
+            }
+        }
     }
 
     private var map: some View {
@@ -133,23 +156,6 @@ struct MapScreen: View {
             Button("閉じる", role: .cancel) {}
         } message: {
             Text("位置情報の利用が制限されています。地図を動かしたり目的地を探したりして使えます。")
-        }
-        // 最初の 1 回。カメラの位置は以降 `onMapCameraChange` が持つ
-        .task { model.viewportChanged(to: Bbox(region: MapScreen.initialRegion)) }
-        // **`id:` を付けて、場面が変わるたびに作り直す。**
-        // `.task` に閉じ込めた `@Environment` は**開始時の値のまま固まる**ので、
-        // ループの中で `scenePhase` を見ても永遠に起動時の値になる（§12 の 108）。
-        .task(id: scenePhase) {
-            guard scenePhase == .active else { return }
-            while !Task.isCancelled {
-                now = Date()
-                // **時刻を進めるだけでは値は新しくならない**（§12 の 107）。
-                // 地図を動かさない利用者には、データが古くなっていく様子だけが見えて、
-                // やがて全部が灰色になったまま戻らなかった。
-                // 前面に戻った直後にも 1 度試すよう、眠る前に呼ぶ
-                model.refreshIfDue()
-                try? await Task.sleep(for: .seconds(Self.tickSeconds))
-            }
         }
     }
 
