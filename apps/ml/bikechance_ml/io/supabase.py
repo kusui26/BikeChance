@@ -582,6 +582,21 @@ class SupabaseIo:
         rows = as_list(response.json(), "storage.list")
         return tuple(as_str(as_dict(one, "storage.list").get("name"), "name") for one in rows)
 
+    def remove_objects(self, bucket: str, paths: Sequence[str]) -> tuple[str, ...]:
+        """Storage のオブジェクトを消す（D-28 の ③、W8 の PR D）。**消えた名前を返す。**
+
+        一括削除（`DELETE /storage/v1/object/{bucket}`、本文の `prefixes`）は、**消したものだけを
+        フルパスで返し、無かった名前は返さない**（2026-10-27 に手元の Storage で確かめた）。
+        **空なら呼ばない**——空の `prefixes` は 400 で断られる。
+        """
+        if not paths:
+            return ()
+        response = self._request(
+            "DELETE", f"/storage/v1/object/{bucket}", "storage", json={"prefixes": list(paths)}
+        )
+        rows = as_list(response.json(), "storage.remove")
+        return tuple(as_str(as_dict(one, "storage.remove").get("name"), "name") for one in rows)
+
     def download_forecast_log(self, path: str) -> bytes | None:
         """予測ログの 1 サイクルぶんを取る。**無ければ None。**"""
         return self.download(FORECAST_LOG_BUCKET, path)

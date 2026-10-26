@@ -40,6 +40,14 @@
 `--date` は **JST の暦日**（省略すると昨日）。**さかのぼって作るときは古い日から順に**
 ——転がしが前日の版を読むためである。
 
+**`--prune` は古い `profile.parquet` を消す**（D-28 の ③、W8 の PR D）。**35 日より古い日**の
+`profile.parquet` だけを、**1 回に 3 個まで**消す（日付を誤っても、1 回で失うのはそれだけ）。
+**`daily.parquet` は消さない**——`profile` は `daily` から作り直せる派生物である（`--from-dailies
+--compare` が本番の 3 日でバイト一致した。2026-09-24）。記録は作る回と別の名前（`prune_profiles`）
+に残す。**`--dry-run` は並べるだけ**で、消さず記録もしない（初めて消す前に一覧を見るため）。
+
+    ./.venv/bin/python -m bikechance_ml.jobs.build_profiles --prune --dry-run
+
 **`--from-dailies` は転がさずに作り直す**（`profile.sum_dailies` の入口。D-28、W5 プラン
 §6.10 の J1）。Storage に置いてある `daily` を窓ぶん（28 日）読んで素直に足す。
 **`--compare` を付けると、置いてある `profile.parquet` とバイト単位で突き合わせる**
@@ -52,6 +60,7 @@
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -83,6 +92,27 @@ JOB_NAME: Final[str] = "build_profiles"
 #: 有無を確かめるときに並べる数の上限。**その日の階層には 2 つしか無い**（`daily`・`profile`）。
 EXISTS_LIST_LIMIT: Final[int] = 10
 
+#: **`profile.parquet` を残す日数**（D-28 の ③：28 日の窓と余白）。`daily.parquet` は消さない。
+PROFILE_KEEP_DAYS: Final[int] = 35
+
+#: 1 回に消す数の上限。**ふつうは 1 日 1 個**古くなるので、3 あれば 1 回の取りこぼしを
+#: 翌日に取り返せる。**日付の計算を誤っても、1 回で失うのはこれだけ**にする。
+PRUNE_MAX_PER_RUN: Final[int] = 3
+
+#: `profiles/` の下を並べるときの上限（日付の階層の数。1 日 1 つ増える）。**名前の昇順**で
+#: 並ぶので、上限に当たっても切れるのは新しい側で、消す側（古い日）は先に並ぶ。
+PROFILES_LIST_LIMIT: Final[int] = 1000
+
+#: 掃除の `job_runs` の名前。**作る回（`build_profiles`）とは分ける**——掃除の失敗が
+#: 「プロファイルを作れなかった」と混ざらないように。失敗は `job_failed:prune_profiles` で鳴る。
+PRUNE_JOB_NAME: Final[str] = "prune_profiles"
+
+#: `profile_path` の頭（`features/grid.py`）。**一覧はこの 1 階層を並べる。**
+PROFILES_PREFIX: Final[str] = "profiles/"
+
+#: `profiles/` の下の日付の階層の名前（`date=2026-09-07`）。**この形でない名前は拾わない。**
+_FOLDER: Final[re.Pattern[str]] = re.compile(r"date=(\d{4}-\d{2}-\d{2})")
+
 #: `profile.parquet` で**辞書にせず、差分で書く列**（W6 プランの所見 204）。
 #:
 #: 1 行群はほぼ全ポート（約 2 万 1 千）を含むので、`station_id` を辞書にすると**行群ごとに
@@ -110,6 +140,15 @@ class ProfilesPort(ReadsStorage, Protocol):
     def list_holidays(self) -> tuple[date, ...]: ...
     def list_objects(self, bucket: str, prefix: str, limit: int) -> tuple[str, ...]: ...
     def upload_parquet(self, path: str, body: bytes) -> None: ...
+    def job_started(self, job_name: str) -> int: ...
+    def job_finished(self, run_id: int, status: str, detail: Mapping[str, object]) -> None: ...
+
+
+class PrunesProfiles(Protocol):
+    """掃除（`--prune`）が使う入出力。**一覧と削除と記録だけ**（作る道の口は要らない）。"""
+
+    def list_objects(self, bucket: str, prefix: str, limit: int) -> tuple[str, ...]: ...
+    def remove_objects(self, bucket: str, paths: Sequence[str]) -> tuple[str, ...]: ...
     def job_started(self, job_name: str) -> int: ...
     def job_finished(self, run_id: int, status: str, detail: Mapping[str, object]) -> None: ...
 
@@ -291,6 +330,79 @@ def compare_with_stored(source: ReadsStorage, day: date, summed: Summed) -> dict
     }
 
 
+# ── 古い `profile.parquet` を消す（D-28 の ③。W8 の PR D）──────────
+@dataclass(frozen=True)
+class Pruned:
+    """1 回の掃除の結果。**消してよい日（全部）・この回に消す名前・実際に消えた名前**を分ける。"""
+
+    day: date
+    due: tuple[date, ...]
+    targets: tuple[str, ...]
+    removed: tuple[str, ...]
+
+    def summary(self) -> dict[str, object]:
+        """記録と CLI の出力。**`pending` が 0 でなければ、翌日以降の回が続きを消す。**"""
+        return {
+            "date": self.day.isoformat(),
+            "cutoff": prune_cutoff(self.day).isoformat(),
+            "due": [one.isoformat() for one in self.due],
+            "removed": list(self.removed),
+            "pending": len(self.due) - len(self.targets),
+        }
+
+
+def prune_cutoff(day: date) -> date:
+    """`day` を基準に、**この日以前**の `profile.parquet` を消してよい（35 日を越えたもの）。"""
+    return day - _ONE_DAY * PROFILE_KEEP_DAYS
+
+
+def folder_day(name: str) -> date | None:
+    """`date=2026-09-07` → その日。**形の違う名前・在り得ない日付は None**（拾わない）。"""
+    matched = _FOLDER.fullmatch(name)
+    if matched is None:
+        return None
+    try:
+        return date.fromisoformat(matched.group(1))
+    except ValueError:
+        return None
+
+
+def days_to_prune(folders: Sequence[str], day: date) -> tuple[date, ...]:
+    """消してよい日（**古い順・重複なし**）。`prune_cutoff(day)` 以前の日だけ。"""
+    cutoff = prune_cutoff(day)
+    found = {one for one in map(folder_day, folders) if one is not None and one <= cutoff}
+    return tuple(sorted(found))
+
+
+def prune_profiles(
+    source: PrunesProfiles, day: date, *, limit: int = PRUNE_MAX_PER_RUN, dry_run: bool = False
+) -> Pruned:
+    """古い `profile.parquet` を**古い順に `limit` 個まで**消す。**`daily.parquet` には触らない。**
+
+    消す名前は日付から組み立てる（`profile_path`）——一覧に出た名前をそのまま消さないので、
+    `daily.parquet` や形の違う名前が紛れ込む道が無い。
+    """
+    folders = source.list_objects(PARQUET_BUCKET, PROFILES_PREFIX, PROFILES_LIST_LIMIT)
+    due = days_to_prune(folders, day)
+    targets = tuple(profile_path(one, profile.PROFILE_NAME) for one in due[:limit])
+    removed = () if dry_run or not targets else source.remove_objects(PARQUET_BUCKET, targets)
+    return Pruned(day=day, due=due, targets=targets, removed=removed)
+
+
+def prune_and_record(source: PrunesProfiles, day: date, limit: int) -> Pruned:
+    """消して、`job_runs` の `prune_profiles` に記録する。**失敗も記録してから投げ直す。**"""
+    run_id = recording.started_quietly(source, PRUNE_JOB_NAME)
+    try:
+        pruned = prune_profiles(source, day, limit=limit)
+    except Exception as cause:
+        recording.record_quietly(
+            source, run_id, "failed", {"date": day.isoformat(), "error": type(cause).__name__}
+        )
+        raise
+    recording.record_quietly(source, run_id, "ok", pruned.summary())
+    return pruned
+
+
 # ── 実行 ──────────────────────────────────────────────────────
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ポートプロファイルを 1 日ぶん作る")
@@ -313,6 +425,22 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="--from-dailies の結果を置いてある profile.parquet とバイト単位で比べる",
     )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help=f"{PROFILE_KEEP_DAYS} 日より古い profile.parquet を消す（作らない。daily は消さない）",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="--prune で、消すものを並べるだけ（消さず記録もしない）",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=f"--prune で 1 回に消す数の上限（既定 {PRUNE_MAX_PER_RUN}）",
+    )
     return parser.parse_args(argv)
 
 
@@ -322,7 +450,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     if refused is not None:
         print(refused, file=sys.stderr)
         return 2
-    day = date.fromisoformat(args.date) if args.date else jst_yesterday(datetime.now(UTC))
+    yesterday = jst_yesterday(datetime.now(UTC))
+    day = date.fromisoformat(args.date) if args.date else yesterday
+    if args.prune:
+        return _run_prune(args, day, yesterday)
     if args.from_dailies:
         return _run_from_dailies(args, day)
     with open_storage(read_storage_config()) as source:
@@ -337,6 +468,9 @@ def run(argv: Sequence[str] | None = None) -> int:
 
 def _refused(args: argparse.Namespace) -> str | None:
     """一緒に使えない組み合わせなら、その理由。**Storage を開く前に止める。**"""
+    pruning = _refused_pruning(args)
+    if pruning is not None:
+        return pruning
     if args.compare and not args.from_dailies:
         return "--compare は --from-dailies と一緒に使います"
     if args.from_dailies and args.upload:
@@ -344,6 +478,36 @@ def _refused(args: argparse.Namespace) -> str | None:
     if args.skip_if_exists and not args.upload:
         return "--skip-if-exists は --upload と一緒に使います（置く回が、在れば作らないためのもの）"
     return None
+
+
+def _refused_pruning(args: argparse.Namespace) -> str | None:
+    """`--prune` の組み合わせ。**掃除は作らない**ので、作る道の指定とは一緒に使えない。"""
+    if not args.prune:
+        if args.dry_run or args.limit is not None:
+            return "--dry-run と --limit は --prune と一緒に使います"
+        return None
+    building = (args.upload, args.skip_if_exists, args.from_dailies, args.compare, args.out)
+    if any(building) or args.cache:
+        return "--prune は作りません（消すだけ）。--upload などの作る道の指定とは一緒に使えません"
+    if args.limit is not None and args.limit < 1:
+        return "--limit は 1 以上です"
+    return None
+
+
+def _run_prune(args: argparse.Namespace, day: date, yesterday: date) -> int:
+    """`--prune` の道。**昨日より新しい日を基準にしない**（先の日付で、残すべき版を消さない）。"""
+    if day > yesterday:
+        print(f"--prune の --date は昨日（{yesterday}）以前です", file=sys.stderr)
+        return 2
+    limit = PRUNE_MAX_PER_RUN if args.limit is None else args.limit
+    with open_storage(read_storage_config()) as source:
+        pruned = (
+            prune_profiles(source, day, limit=limit, dry_run=True)
+            if args.dry_run
+            else prune_and_record(source, day, limit)
+        )
+    print(json.dumps({**pruned.summary(), "dry_run": args.dry_run}, ensure_ascii=False))
+    return 0
 
 
 def _build(args: argparse.Namespace, source: ProfilesPort, day: date) -> Made | None:

@@ -43,7 +43,7 @@ name: 学習サンプルとプロファイル（日次）
 on:
   schedule:
     - cron: "0 21 * * *"
-    # **この文字列は下の「学習サンプル」の `if:` と 1 文字も違えない**。違うと 00:40 の回が
+    # **この文字列は下の「学習サンプル」と「古いプロファイルを消す」の `if:` と 1 文字も違えない**。違うと 00:40 の回が
     # 学習サンプルまで作ろうとし、観測が当日 03:00 まで揃っていないので、欠けた版を置くか
     # 失敗する（どちらも 06:00 の回が置き直すまで残る）
     - cron: "40 15 * * *"
@@ -161,3 +161,16 @@ jobs:
           done
           echo "::error::3 回とも失敗しました。job_runs の build_profiles を見てください"
           exit 1
+
+      # **古い `profile.parquet` を消す**（D-28 の ③。35 日を越えた日のもの。W8 の PR D）。
+      # **00:40 の回だけ**——1 日 1 個ずつ古くなるので 1 日 1 回で足り、1 回に消すのは 3 個まで
+      # （日付を誤っても、1 回で失うのはそれだけ）。**`daily.parquet` は消さない**（`profile` は
+      # `daily` から作り直せる。`--from-dailies --compare`）。前の段が落ちた回は消さない（`if:` に
+      # 状態の関数を書かないと `success()` が付く）。記録と失敗の警報は `job_runs` の `prune_profiles`。
+      # **取り直さない**：消し残しは翌日の回が消す（3 回試す理由が無い）
+      - name: 古いプロファイルを消す
+        if: github.event.schedule == '40 15 * * *'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: uv run python -m bikechance_ml.jobs.build_profiles --prune
