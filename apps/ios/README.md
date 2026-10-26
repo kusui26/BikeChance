@@ -122,8 +122,11 @@ xcrun simctl launch booted app.bikechance.BikeChance
    毎回上げなくてよい（同じバージョン `MARKETING_VERSION`（0.1）の中で、アップロードごとに違う番号が要る）。
    チームの中だけで試し、App Store へは出さないと決めた回は **TestFlight Internal Only** を選ぶ
    （その回のビルドは申請に使えない）
-4. **入れる**：処理が終わると App Store Connect の TestFlight に出る。Internal Testing の
-   グループ（**自動配布に印を付けてある**。2026-10-21）に届くので、iPhone の TestFlight アプリから入れる
+4. **グループに足す**：処理が終わると（数分〜数十分）App Store Connect の TestFlight にビルドが出る。
+   **Internal Testing のグループには自動では届かない**（自動配布に印を付けてあるが、2026-10-22 の M5 では
+   入らなかった）——**TestFlight → Internal Testing の自分のグループ → ビルドの「＋」から、今日のビルドを足す**
+5. **入れる**：iPhone の TestFlight アプリで「アップデート」（初めてなら「インストール」）→ 開く。
+   TestFlight の版は、ホーム画面の名前の前にオレンジの点が付く
 
 手順の元は Apple の「Distributing your app for beta testing and releases」。メニューや
 選択肢の名前は、Xcode の版で変わることがある。
