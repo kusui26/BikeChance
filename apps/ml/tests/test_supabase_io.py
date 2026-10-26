@@ -289,6 +289,44 @@ def test_a_listing_failure_is_labelled_storage() -> None:
     assert caught.value.failure.phase == "storage"
 
 
+# ── Storage の削除（D-28 の ③、W8 の PR D）──────────────────────
+OLD_PROFILE = "profiles/date=2026-09-07/profile.parquet"
+
+
+def test_removal_sends_the_exact_paths_in_one_call() -> None:
+    """**名指しした名前だけを 1 回で消す**（一括削除の `prefixes`）。消えた名前を返す。"""
+    io, seen = io_with(lambda request: json_response([{"name": OLD_PROFILE, "id": "x"}]))
+    removed = io.remove_objects(PARQUET_BUCKET, [OLD_PROFILE])
+    assert removed == (OLD_PROFILE,)
+    request = seen[0]
+    assert (request.method, request.url.path) == ("DELETE", f"/storage/v1/object/{PARQUET_BUCKET}")
+    assert json.loads(request.content) == {"prefixes": [OLD_PROFILE]}
+    assert KEY not in str(request.url)
+
+
+def test_removal_returns_only_what_was_there() -> None:
+    """**無かった名前は返らない**（Storage はそう返す。2026-10-27 に手元の Storage で確かめた）。"""
+    gone = "profiles/date=2026-09-08/profile.parquet"
+    io, _ = io_with(lambda request: json_response([{"name": OLD_PROFILE}]))
+    assert io.remove_objects(PARQUET_BUCKET, [OLD_PROFILE, gone]) == (OLD_PROFILE,)
+
+
+def test_an_empty_removal_does_not_call_storage() -> None:
+    """**空なら呼ばない**——空の `prefixes` は 400 で断られる。"""
+    io, seen = io_with(lambda request: httpx.Response(400, text="must NOT have fewer than 1 items"))
+    assert io.remove_objects(PARQUET_BUCKET, []) == ()
+    assert seen == []
+
+
+def test_a_removal_failure_is_labelled_storage_and_hides_the_key() -> None:
+    """**消せなければ止まる**。例外の文言にキーを残さない。"""
+    io, _ = io_with(lambda request: httpx.Response(500, text=f"boom {KEY}"))
+    with pytest.raises(SupabaseError) as caught:
+        io.remove_objects(PARQUET_BUCKET, [OLD_PROFILE])
+    assert caught.value.failure.phase == "storage"
+    assert KEY not in caught.value.failure.describe()
+
+
 # ── 登録簿の shadow（W6 の PR E）──────────────────────────────
 SHADOW_ROW: dict[str, object] = {
     "model_version": "baseline-b3-v0-20260928",
