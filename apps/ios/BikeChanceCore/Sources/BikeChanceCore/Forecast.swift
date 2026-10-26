@@ -45,11 +45,16 @@ public enum ProbabilityBand: Equatable, Sendable {
         }
     }
 
+    /// 「高」の下限（%）。**帯の境は 1 か所**——詳細のグラフの目盛りもここを読む。
+    public static let highLowerPercent = 85
+    /// 「中」の下限（%）。
+    public static let mediumLowerPercent = 60
+
     /// 表示する百分率から帯を決める。**丸めた後の数で決める**ので、
     /// 「85% と出ているのに『余裕を持って』」という食い違いが起きない。
     public static func of(percent: Int) -> ProbabilityBand {
-        if percent >= 85 { return .high }
-        if percent >= 60 { return .medium }
+        if percent >= highLowerPercent { return .high }
+        if percent >= mediumLowerPercent { return .medium }
         return .low
     }
 }
@@ -122,17 +127,39 @@ extension ForecastState {
         // ときの確率は、数字の形をしているぶんだけ余計に信用されてしまう
         if feed?.isStale == true { return .unavailable(staleFeedText) }
         guard let forecast = station.forecast else { return .unavailable(unavailableText) }
-        let percent = ForecastDisplay.percent(of: forecast.probability(for: intent))
         return .available(
             ForecastDisplay(
-                percent: percent,
-                band: ProbabilityBand.of(percent: percent),
-                headline: "\(intent.verb)可能性 \(percent)%",
-                arrival: "\(Arrival.clockText(arrival, locale: locale, timeZone: timeZone)) 到着",
-                basis: ForecastDisplay.basisText(
-                    forecast.baseObservedAt, locale: locale, timeZone: timeZone),
-                isReference: forecast.confidence <= ForecastDisplay.referenceConfidence
-            )
+                probability: forecast.probability(for: intent), intent: intent,
+                confidence: forecast.confidence, arrival: arrival,
+                basis: forecast.baseObservedAt, locale: locale, timeZone: timeZone)
+        )
+    }
+}
+
+extension ForecastDisplay {
+    /// 確率 1 つから見せ方を作る。**地図・お気に入り・詳細の点が、同じ丸めと言い回しを通る**
+    /// （別々に書くと、片方だけ直したときに静かに食い違う。W5 §12 の 142 と同じ形）。
+    ///
+    /// - Parameters:
+    ///   - arrival: この確率が指している到着の絶対時刻。
+    ///   - basis: この予測が基づく観測の時刻（`base_observed_at`）。
+    public init(
+        probability: Double,
+        intent: RideIntent,
+        confidence: Int,
+        arrival: Date,
+        basis: Date,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) {
+        let percent = ForecastDisplay.percent(of: probability)
+        self.init(
+            percent: percent,
+            band: ProbabilityBand.of(percent: percent),
+            headline: "\(intent.verb)可能性 \(percent)%",
+            arrival: "\(Arrival.clockText(arrival, locale: locale, timeZone: timeZone)) 到着",
+            basis: ForecastDisplay.basisText(basis, locale: locale, timeZone: timeZone),
+            isReference: confidence <= ForecastDisplay.referenceConfidence
         )
     }
 }

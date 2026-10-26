@@ -104,10 +104,12 @@ public struct V1Client: Sendable {
     ///
     /// **本文をそのまま返す口も持つ**（`stationDetailBody`）。お気に入りは**受け取った
     /// バイトをそのまま取っておく**ので、型に写してから書き戻さない。
+    ///
+    /// **読めない本文は `malformedBody` に詰め替える**（ほかの口と同じ。見せる文言を 1 か所に）。
     public func stationDetail(system: String, stationID: String) async throws
         -> StationDetailResponse
     {
-        try V1Client.makeDecoder().decode(
+        try V1Client.decoded(
             StationDetailResponse.self,
             from: await stationDetailBody(system: system, stationID: stationID))
     }

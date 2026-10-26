@@ -62,9 +62,8 @@ extension FavoriteRow {
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) {
-        // **この行の系統のフィード。** 詳細はそのポートの系統ぶんしか返さないが、
-        // `first` ではなく名指しで引く（`TripPlan` と同じ理由）
-        let feed = detail.feeds.first { $0.systemID == detail.station.systemID }
+        // **この行の系統のフィード**（名指しで引く。`StationDetailResponse.feed`）
+        let feed = detail.feed
         let freshness = detail.station.freshness(feed: feed, now: now)
         self.favorite = favorite
         // **取れた名前があれば、そちらを出す。** 登録時の名前は控えにすぎない
@@ -122,35 +121,14 @@ extension FavoriteRow {
             let arrival = curve.arrival(at: index),
             let probability = curve.probability(for: intent, at: index)
         else { return .unavailable(ForecastState.unavailableText) }
+        // **地図と同じ丸めと言い回し**を通す（`ForecastDisplay` の規則は 1 か所）。
+        // **片方だけを大きく出す。** 20 件を 2 段で並べると読めないので、借りる／返すは
+        // 画面の切替（`FavoritesModel.intent`）で選ぶ——地図と同じ作法で、
+        // **切り替えても取りに行かない**（曲線に両方が入っている）
         return .available(
-            display(
+            ForecastDisplay(
                 probability: probability, intent: intent, confidence: curve.confidence,
                 arrival: arrival, basis: curve.baseObservedAt,
                 locale: locale, timeZone: timeZone))
-    }
-
-    /// **地図と同じ丸めと言い回し**を通す（`ForecastDisplay` の規則は 1 か所）。
-    ///
-    /// **片方だけを大きく出す。** 20 件を 2 段で並べると読めないので、借りる／返すは
-    /// 画面の切替（`FavoritesModel.intent`）で選ぶ——地図と同じ作法で、
-    /// **切り替えても取りに行かない**（曲線に両方が入っている）。
-    private static func display(
-        probability: Double,
-        intent: RideIntent,
-        confidence: Int,
-        arrival: Date,
-        basis: Date,
-        locale: Locale,
-        timeZone: TimeZone
-    ) -> ForecastDisplay {
-        let percent = ForecastDisplay.percent(of: probability)
-        return ForecastDisplay(
-            percent: percent,
-            band: ProbabilityBand.of(percent: percent),
-            headline: "\(intent.verb)可能性 \(percent)%",
-            arrival: "\(Arrival.clockText(arrival, locale: locale, timeZone: timeZone)) 到着",
-            basis: ForecastDisplay.basisText(basis, locale: locale, timeZone: timeZone),
-            isReference: confidence <= ForecastDisplay.referenceConfidence
-        )
     }
 }
