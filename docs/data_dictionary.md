@@ -1082,7 +1082,7 @@ profiles/date=YYYY-MM-DD/profile.parquet   ← 直近 28 日の累計（読む�
 
 **作る時刻（W6 の PR C）**：`build-features.yml` が **1 日に 2 回**作る。**00:40 JST の回はプロファイルだけ**、**06:00 JST の回は学習サンプルと、まだ無ければプロファイル**。定時の回は **在れば作らず、`job_runs` にも残さない**（`--skip-if-exists`。有無は Storage の一覧で確かめる）。どちらの回も Actions の遅れで 2 時間前後遅れて始まる（W6 プランの所見 203）。**後に動く手順は `job_runs` の `ok` で始める。**
 
-**`profile.parquet` は 35 日で消す**（D-28 の ③、W8 の PR D）：00:40 の回の最後に `build_profiles --prune` が、**35 日を越えた日の `profile.parquet` を古い順に 1 回 3 個まで**消す（記録は `job_runs` の `prune_profiles`）。**`daily.parquet` は消さない**——`profile` は `daily` から作り直せる（`--from-dailies --compare` が本番の 3 日でバイト一致した。2026-09-24）。消した日の `profile` が要るとき（古い日の学習サンプルを作り直すなど）は、`--from-dailies` で作り直してから使う。
+**`profile.parquet` は 35 日で消す**（D-28 の ③、W8 の PR D）：00:40 の回の最後に `build_profiles --prune` が、**35 日を越えた日の `profile.parquet` を古い順に 1 回 3 個まで**消す（記録は `job_runs` の `prune_profiles`）。**消すのは `profile.parquet` がまだ在ると確かめた日だけ**（W8 の PR H）：日付の階層は `daily.parquet` のために残るので、階層の名前だけで決めると消し終えた日で枠を使い切る（10/28 の定時の回は 09-07〜09-09 を狙って何も消さなかった）。新しい日から確かめ、**無い日が 3 日続いたら打ち切る**（消すのは古い順なので、その先は消し終えている。ふだんの回は 4 回の確かめで終わる）。記録の `found` はまだ在った日、`checked` は確かめた日の数。**`daily.parquet` は消さない**——`profile` は `daily` から作り直せる（`--from-dailies --compare` が本番の 3 日でバイト一致した。2026-09-24）。消した日の `profile` が要るとき（古い日の学習サンプルを作り直すなど）は、`--from-dailies` で作り直してから使う。
 
 **前日の毎時 Parquet を 00:40 の回の後に埋め戻したら、`profile` を手で作り直す**：`build-features.yml` を日付つきで手で起動する（手で起動した回は在っても作り直す）。**転がしの鎖があるので、その後の日も古い日から順に**作り直す。前は 06:00 の回が拾っていたが、06:00 の回は在れば作らない。
 
