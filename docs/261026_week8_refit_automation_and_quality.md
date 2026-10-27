@@ -99,7 +99,7 @@ W7 で M5（TestFlight の内部ベータ）が出て、合成器は B3 を平�
 
 | # | 何を | 決めたこと | 理由 |
 |---|---|---|---|
-| **W8-01** | 自動化の起動 | **GitHub Actions の `schedule`（月曜 01:30 UTC ＝ 10:30 JST）と `workflow_dispatch`**。始めに**前提の門**：日曜の学習サンプル（`build_features`）とプロファイル（`build_profiles`）の `job_runs` が `ok` か。無ければ 10 分おきに最大 3 時間待ち、来なければ `failed` で終える（警報） | 日次の枠は毎朝 2〜3 時間遅れる（06:00 の枠が 07:48〜09:03 に届く）。10:30 なら W7 の最遅（10/20 の 09:03）より後で、遅れても門が待つ。`workflow_run`（日次評価の完了で起動）は採らない——`build-features.yml` は 2 つの定時を持ち、どちらの回の完了かを区別できず、学習サンプルより先に日次評価が終わる日もある |
+| **W8-01** | 自動化の起動 | **GitHub Actions の `schedule`（月曜 01:30 UTC ＝ 10:30 JST）と `workflow_dispatch`**。始めに**前提の門**：日曜の学習サンプル（`build_features`）とプロファイル（`build_profiles`）の `job_runs` が `ok` か。無ければ 10 分おきに最大 3 時間待ち、来なければ `failed` で終える（警報）。**PR G で日曜の日次評価（`evaluate_daily`）も足した**（削るセルが日曜の成績まで読む。D-45 に追記） | 日次の枠は毎朝 2〜3 時間遅れる（06:00 の枠が 07:48〜09:03 に届く）。10:30 なら W7 の最遅（10/20 の 09:03）より後で、遅れても門が待つ。`workflow_run`（日次評価の完了で起動）は採らない——`build-features.yml` は 2 つの定時を持ち、どちらの回の完了かを区別できず、学習サンプルより先に日次評価が終わる日もある |
 | **W8-02** | 自動化が作るもの | **B3 だけ**：B3 を当てはめて置く → 置いたバイト列を確かめる → candidate で登録 → 削るセル（直近 7 日、W6-12 の決まり）→ 合成器（森は active のまま）を組んで置いて登録 → 点検 2 つ → 評価（検証は日曜と土曜）→ 本番の口で試し打ち（両系統 2 回、何も書かない）。**森の当てはめ直しは入れない**（W8-10 で測ってから決める） | #5 の手順そのまま（§8）。森を変える週は shadow 3 日が要り（D-44）、週ごとの自動には重い。B3 は 7 日の窓なので週 1 回の当てはめ直しで新しく保たれる |
 | **W8-03** | 記録とモデルカード | **自動化が枝を切って PR を開く**：モデルカード（`docs/model_cards/composite-v1-<日>.md`）と、その回の記録（`docs/refits/<日>.md`：門・当てはめ・点検・評価・削るセル・試し打ちの数と、昇格の手順）。**PR が通知になり、昇格の確認の場所になる**。文書だけなので Vercel のビルドは飛ぶ | CLAUDE.md §6（モデルカードの無いモデルを登録しない）。カードは登録の前に書けるが、リポジトリに入れるには PR が要る。成果物（Actions の artifact）に置くだけだと、昇格のときに人が書き写すことになる。**`docs/model_cards/README.md` の「Actions で登録した回はその日のうちにコミットする」を、この PR が引き受ける**（README を直す） |
 | **W8-04** | 昇格の確かめ方 | **人が PR を読み、確認を取ってから、PR 本文の昇格の SQL を流す**（`promote_model_version` 3 行。#4・#5 と同じ）。その後 2 周期を見て PR をマージする。**昇格のワークフローは作らない** | CLAUDE.md §6（`active` の切替は確認の後）。手で流す 3 行に、ワークフローの権限（DB に書ける秘密）を足す理由が無い。**CI も止める**：`.github/workflows`・`scripts` などに `promote_model_version`・`retire_model_version` の名前があれば落ちる（ci.yml の「昇格と退役が自動化されていないか」）。記録の文書（`docs/refits/`）に手順として書くのは許される（`docs` は除外） |
@@ -155,10 +155,14 @@ W7 プラン §4.2（#4）と同じ手順を、**日曜までのデータで月�
 | ファイル | 変更 |
 |---|---|
 | `.github/workflows/weekly-refit.yml`（新しい） | `schedule`（月曜 01:30 UTC）と `workflow_dispatch`（入力：最終学習日・**試しの形**＝置かず登録せず PR も開かない）。`concurrency` で 2 重に走らせない。権限は PR を開くぶんだけ（`contents: write`・`pull-requests: write`） |
-| `apps/ml/bikechance_ml/jobs/weekly_refit.py`（新しい） | 段ごとの関数（門 → 当てはめて置く → 確かめる → 登録 → 削るセル → 合成器 → 点検 → 評価 → 試し打ち → 記録）。**各段は今の CLI の関数を呼ぶ**（二つ目の実装を作らない）。止まった段を `job_runs.detail.phase` に残す |
-| `apps/ml/bikechance_ml/jobs/register_body.py`（新しい） | 登録の本文を作る（いまは手元の道具 `b3_tools.py register`。それをパッケージに移す） |
-| `apps/ml/tests/…` | 門（来ない・遅れて来る・失敗の行）、段の失敗で止まる、同じ名前が active・shadow なら置かない（契約 38）、試しの形は何も書かない |
-| `docs/refits/README.md`（新しい） | 記録の形 |
+| `apps/ml/bikechance_ml/jobs/weekly_refit.py`（新しい） | 段ごとの関数（`gate` → `fit_b3` → `verify` → `inspect_b3` → `evaluate` → `register_b3` → `serving` → `drop` → `compose` → `inspect_composite` → `dry_run` → `record`。#5 で手で通した順）。**各段は今の CLI の関数を呼ぶ**（`fit_baseline.run`・`evaluate_baselines.prepare` と `harness`・`build_composite` の `make`・`write_outputs`・`publish`・`scripts/inspect-artifact.py`）。止まった段を `job_runs.detail.phase` に残す。**門で待つ間は行を作らず**、門で諦めたらその時刻に `failed` の行を作る |
+| `apps/ml/bikechance_ml/jobs/refit_gate.py`（新しい） | 前提の門（学習サンプル・プロファイル・**日次評価**の 3 つを日付で待つ。10 分おき・3 時間まで） |
+| `apps/ml/bikechance_ml/jobs/register_body.py`（新しい） | 登録の本文（いまは手元の道具 `b3_tools.py register`。**報告書の Markdown を読み直さず、成果物と `harness.Outcome` から作る**。形は #5 と同じ） |
+| `apps/ml/bikechance_ml/jobs/drop_cells.py`（新しい） | 削るセル（W6-12。いまは `drop_check.sql`）：昇格の翌日から最終学習日まで（7 日まで）、森が B3 より厳密に悪いセルを削り、**前に削ったセルは引き継ぐ** |
+| `apps/ml/bikechance_ml/jobs/dry_run.py`・`io/infer_client.py`（新しい） | 試し打ち（いまは `dryrun.sh`）。**本番の周期の合間**（HELLO 2 分 20 秒・ドコモ 3 分 00 秒から 15 秒の窓）に、系統ごとに 1 周期 1 回 × 2 周期。合格は HTTP 200・`dry_run`・頼んだ版・予測あり・`rss_mb` < 1.6 GB |
+| `apps/ml/bikechance_ml/jobs/refit_record.py`（新しい） | 記録の Markdown と、昇格の SQL（`docs/refits/promote.sql.template` に版を差し込む。**昇格の文はコードに書かない**） |
+| `apps/ml/tests/…` | 門（来ない・遅れて来る・最後の確かめ・別の日）、段の失敗で止まる（点検・確かめ・試し打ち・active が合成器でない）、門で諦めた行の作り方、試しの形は何も書かない、削るセル（境目・引き継ぎ・片方だけのセル）、試し打ちの窓と合否、登録の本文が報告書と同じ組を数える |
+| `docs/refits/README.md`・`promote.sql.template`（新しい） | 記録の形・昇格の手順（合成器を active、B3 を shadow の 2 行。前の shadow は自動で retired）・止まったときの続け方 |
 
 **完了条件**：10/30 に手で起動した試しの形が最後まで進む（置かず登録せず）。11/2（月）の定時の回が候補を作り、PR が開く → 利用者の確認で昇格。
 

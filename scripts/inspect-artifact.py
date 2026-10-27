@@ -74,7 +74,6 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 
-import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -94,10 +93,9 @@ from bikechance_ml.models import gates as gate_tables
 
 
 def counts_by_dow(usable: Bools) -> dict[str, int]:
-    """曜日種別ごとの使えるセルの数。**鍵から種別を取り出す式は `climatology` の 1 か所。**"""
-    keys = np.asarray(np.nonzero(usable)[0], dtype=np.int64)
-    found = np.bincount(climatology.dow_of_cell(keys), minlength=len(DOW_TYPE_ORDER))
-    return {name: int(found[index]) for index, name in enumerate(DOW_TYPE_ORDER)}
+    """曜日種別ごとの使えるセルの数。**数え方は `climatology.usable_by_dow` の 1 か所**
+    （登録の本文も同じ関数で数える。W8 の PR G）。"""
+    return climatology.usable_by_dow(usable)
 
 
 def fewest_cells(one: baseline_artifact.Artifact) -> dict[str, int]:
