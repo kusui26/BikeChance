@@ -604,7 +604,7 @@ select is(
      select count(*)::int as jsonb_object_keys_count
        from jsonb_object_keys((select detail->'checks' from public.job_runs
                                 where job_name='monitor_jobs' order by id desc limit 1))) t),
-  9, '9 つの検査すべてが detail に残る（0021 の check_cron_jobs、0029 の check_inference、0048 の check_model_freshness、0052 の check_weather_stale、0056 の check_jobs_stuck）'
+  11, '11 の検査すべてが detail に残る（0021 の check_cron_jobs、0029 の check_inference、0048 の check_model_freshness、0052 の check_weather_stale、0056 の check_jobs_stuck、0058 の check_forest_freshness・check_shadow）'
 );
 
 -- **1 つ壊しても他は走る。** 0009 の monitor_feeds は全検査を 1 つの exception で
