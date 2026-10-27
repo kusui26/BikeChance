@@ -27,6 +27,13 @@ struct MapScreen: View {
     @State private var showsLocationRestricted = false
     @State private var camera: MapCameraPosition = .region(MapScreen.initialRegion)
     @State private var visible: [StationCurrent] = []
+    /// 地図に出す印（**近すぎるポートは 1 つにまとめる**。W8-11）。`visible` はその中のポート全部
+    @State private var markers: [MarkerGroup] = []
+    /// 地図で押された印。**すぐ空に戻す**（まとめた印なら一覧、1 つなら詳細へ渡す）
+    @State private var tapped: MarkerGroup?
+    /// 一覧を出しているまとめた印と、そこで選ばれたポート（一覧が閉じきってから詳細へ進む）
+    @State private var choosing: MarkerGroup?
+    @State private var chosen: StationCurrent?
     @State private var feeds: [String: FeedStatus] = [:]
     @State private var attributions: [String: Attribution] = [:]
     /// クレジットの前置き（W6-31）。**応答の文言を使う**（焼き付けない）。
@@ -98,20 +105,13 @@ struct MapScreen: View {
     }
 
     private var map: some View {
-        Map(position: $camera, selection: $selected) {
+        Map(position: $camera, selection: $tapped) {
             // **許されているときだけ出す**（出せないときに印だけを出さない）
             if location.authorization.showsUserLocation {
                 UserAnnotation()
             }
-            ForEach(visible) { station in
-                Marker(
-                    station.name ?? station.stationID,
-                    systemImage: "bicycle",
-                    coordinate: CLLocationCoordinate2D(
-                        latitude: station.latitude, longitude: station.longitude)
-                )
-                .tint(tint(for: station))
-                .tag(station)
+            ForEach(markers) { group in
+                marker(for: group).tag(group)
             }
         }
         // 現在地のボタンは自前（`locationButton`）。システムのものは許可を求めない（所見 224）
@@ -138,6 +138,18 @@ struct MapScreen: View {
         .safeAreaInset(edge: .bottom) { CreditFooter(showsCredits: $showsCredits) }
         .sheet(isPresented: $showsCredits) { CreditsScreen() }
         .sheet(isPresented: $showsFavorites) { FavoritesScreen(model: favorites) }
+        .onChange(of: tapped) { _, group in open(group) }
+        .sheet(item: $choosing, onDismiss: showChosen) { group in
+            MarkerChooser(
+                choices: MarkerChoice.list(
+                    group, feeds: feeds, intent: model.intent, arrival: forecastArrival, now: now),
+                tint: tint(for:),
+                choose: { station in
+                    chosen = station
+                    choosing = nil
+                }
+            )
+        }
         .onChange(of: model.state) { _, state in apply(state) }
         // **現在地が届いてから動かす**（押して許したあとも、もう 1 度押させない）
         .onChange(of: location.target) { _, target in
@@ -224,10 +236,49 @@ struct MapScreen: View {
         .accessibilityLabel("お気に入り \(favorites.favorites.count) 件")
     }
 
-    /// 応答から画面の状態を作る。**表示上限を超えたら中心に近い順に絞る。**
+    /// 1 つの印。**まとめた印は灰色に数**（どれか 1 つの色にしない。W8-11）、1 つなら今までどおり。
+    @MapContentBuilder
+    private func marker(for group: MarkerGroup) -> some MapContent {
+        let anchor = group.anchor
+        let coordinate = CLLocationCoordinate2D(
+            latitude: anchor.latitude, longitude: anchor.longitude)
+        let title = anchor.name ?? anchor.stationID
+        if group.isGroup {
+            Marker(title, monogram: Text("\(group.members.count)"), coordinate: coordinate)
+                .tint(.gray)
+        } else {
+            Marker(title, systemImage: "bicycle", coordinate: coordinate)
+                .tint(tint(for: anchor))
+        }
+    }
+
+    /// 押された印を開く。**1 つなら詳細、まとめた印なら系統の一覧**。押した跡は残さない
+    /// （戻ったときに同じ印をもう 1 度押せるように）。
+    private func open(_ group: MarkerGroup?) {
+        guard let group else { return }
+        tapped = nil
+        if group.isGroup {
+            choosing = group
+        } else {
+            selected = group.anchor
+        }
+    }
+
+    /// 一覧が閉じきってから詳細へ進む（閉じる途中で積むと、遷移が落ちることがある）。
+    private func showChosen() {
+        guard let station = chosen else { return }
+        chosen = nil
+        selected = station
+    }
+
+    /// 応答から画面の状態を作る。**近すぎるポートを 1 つの印にまとめ、表示上限を超えたら
+    /// 中心に近い印から残す**（上限は印の数で数える。W8-11）。
     private func apply(_ state: StationsModel.State) {
         guard case .loaded(let response) = state else {
-            if case .needsZoom = state { visible = [] }
+            if case .needsZoom = state {
+                visible = []
+                markers = []
+            }
             return
         }
         feeds = response.feedIndex()
@@ -237,11 +288,12 @@ struct MapScreen: View {
         // まだ前の応答が出ており、ピンの色はそちらの時刻の話をしている）
         forecastArrival = response.forecastArrival
         let center = response.bbox.bbox
-        visible = MarkerSelection.nearest(
-            response.stations,
+        markers = MarkerSelection.nearestGroups(
+            MarkerGrouping.group(response.stations),
             toLatitude: (center.north + center.south) / 2,
             longitude: (center.east + center.west) / 2
         )
+        visible = markers.flatMap(\.members)
     }
 
     /// マーカーの色。**到着を選んでいれば確率の帯、選んでいなければ現在値。**
