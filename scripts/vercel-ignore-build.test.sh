@@ -58,10 +58,11 @@ from_base() {
 
 # expect <skip|build> <場面> <前回の SHA> [起動する場所。既定はリポジトリの最上位]
 # EXPECT_PATH を置くと、その PATH で起動する（偽の git を前に挟む場面）
+# EXPECT_ENV を置くと、それを VERCEL_ENV に渡す（既定は空。枝の最初のプレビューの場面で使う）
 expect() {
   local want="$1" name="$2" previous="$3" dir="${4:-$REPO}" code=0 got
   (cd "$dir" && PATH="${EXPECT_PATH:-$PATH}" VERCEL_GIT_PREVIOUS_SHA="$previous" \
-    bash "$SCRIPT" >"$WORK/out" 2>&1) || code=$?
+    VERCEL_ENV="${EXPECT_ENV:-}" bash "$SCRIPT" >"$WORK/out" 2>&1) || code=$?
   case "$code" in 0) got=skip ;; 1) got=build ;; *) got="落ちた（終了コード ${code}）" ;; esac
   if [[ "$got" == "$want" ]]; then
     echo "ok    $name"
@@ -89,6 +90,22 @@ documents_only_are_skipped() {
   expect skip "文書だけのコミットを 2 つ、1 回で push" "$BASE"
 }
 
+ios_and_ci_are_skipped() {
+  echo "── 飛ばす（iOS と CI の設定も Vercel のビルドは読まない。W8-08）"
+  from_base && touch_files apps/ios/BikeChance/Map/MapScreen.swift >/dev/null
+  expect skip "apps/ios/ の下" "$BASE"
+  from_base && touch_files apps/ios/BikeChance.xcodeproj/project.pbxproj >/dev/null
+  expect skip "Xcode のプロジェクト" "$BASE"
+  from_base && touch_files .github/workflows/ios.yml >/dev/null
+  expect skip ".github/ の下" "$BASE"
+  from_base && touch_files apps/ios/BikeChance/App.swift docs/plan.md .github/workflows/ci.yml >/dev/null
+  expect skip "iOS・文書・CI の設定が同じコミット" "$BASE"
+  from_base && touch_files apps/ios/BikeChance/App.swift apps/web/app/page.tsx >/dev/null
+  expect build "iOS と web のコードが同じコミット" "$BASE"
+  from_base && touch_files .github/workflows/ci.yml apps/ml/main.py >/dev/null
+  expect build "CI の設定と ml のコードが同じコミット" "$BASE"
+}
+
 code_is_built() {
   echo "── ビルドする（コードがある）"
   from_base && touch_files apps/web/app/page.tsx >/dev/null
@@ -113,7 +130,8 @@ lookalikes_are_built() {
   echo "── ビルドする（文書に似ているが文書でない）"
   local path
   for path in docsx/a.txt apps/web/docs/a.ts apps/web/.claude/a.ts apps/web/notes.md.ts \
-    README.MD "apps/web/app/日本.ts" 'docs/a"b.md'; do
+    README.MD "apps/web/app/日本.ts" 'docs/a"b.md' apps/iosx/a.swift apps/web/apps/ios/a.ts \
+    apps/ios .githubx/a.yml apps/web/.github/a.yml; do
     from_base && touch_files "$path" >/dev/null
     expect build "$path" "$BASE"
   done
@@ -169,6 +187,48 @@ shallow_clone_is_handled() {
   expect skip "前回が深さ 10 の内（文書だけ）" "$middle" "$WORK/shallow"
 }
 
+# 枝の最初のプレビュー（前回が無い）は、`main` を浅く取ってきて分岐点と比べる（W8-08）。
+# `origin` は手元のリポジトリ（`file://`）。`main` は土台のコミットを指している
+first_preview_compares_with_main() {
+  echo "── 枝の最初のプレビュー（前回が無い）：main との分岐点と比べる"
+  local clone="$WORK/branch"
+  rm -rf "$clone"
+  git clone -q --depth=10 --branch main "file://$REPO" "$clone"
+  git -C "$clone" checkout -q -b docs-branch origin/main
+  touch_files_in "$clone" docs/plan.md
+  EXPECT_ENV=preview expect skip "文書だけの枝の最初のプレビュー" "" "$clone"
+  EXPECT_ENV=production expect build "本番で前回が無い（プロジェクトの最初のデプロイ）" "" "$clone"
+  expect build "VERCEL_ENV が無い" "" "$clone"
+  git -C "$clone" checkout -q -b code-branch origin/main
+  touch_files_in "$clone" apps/web/app/page.tsx
+  EXPECT_ENV=preview expect build "コードの枝の最初のプレビュー" "" "$clone"
+  git -C "$clone" checkout -q -b ios-branch origin/main
+  touch_files_in "$clone" apps/ios/BikeChance/App.swift
+  EXPECT_ENV=preview expect skip "iOS だけの枝の最初のプレビュー" "" "$clone"
+  # 枝を切った後に main がコードの変更で進んでも、比べるのは分岐点（main の先頭ではない）
+  git -C "$REPO" checkout -q main && touch_files apps/web/app/later.tsx >/dev/null
+  EXPECT_ENV=preview expect skip "main が先に進んでも、枝の変更（iOS だけ）だけを見る" "" "$clone"
+  git -C "$REPO" checkout -q --detach "$BASE"
+  git -C "$clone" remote remove origin
+  EXPECT_ENV=preview expect build "origin が無い（main を取ってこられない）" "" "$clone"
+  git -C "$clone" remote add origin "file://$REPO"
+  git -C "$clone" checkout -q --orphan unrelated && git -C "$clone" rm -rqf . &&
+    touch_files_in "$clone" docs/other.md
+  EXPECT_ENV=preview expect build "main と分岐点の無い枝" "" "$clone"
+}
+
+# 別のクローンでファイルを変えてコミットする（`touch_files` と同じ。リポジトリを選べる）
+touch_files_in() {
+  local repo="$1" path
+  shift
+  for path in "$@"; do
+    mkdir -p "$(dirname "$repo/$path")"
+    echo "$path $RANDOM" >>"$repo/$path"
+    git -C "$repo" add -- "$path"
+  done
+  git -C "$repo" commit -qm change
+}
+
 # git が途中で想定外の終了コードを返す偽物を、PATH の前に挟む
 fake_git() {
   local dir="$WORK/fakebin" real
@@ -199,12 +259,14 @@ git init -q -b main "$REPO"
 BASE="$(touch_files apps/web/app/page.tsx apps/web/AGENTS.md apps/ml/main.py docs/plan.md \
   .claude/CLAUDE.md vercel.json)"
 documents_only_are_skipped
+ios_and_ci_are_skipped
 code_is_built
 lookalikes_are_built
 unusable_previous_is_built
 services_decide_alike
 merges_into_main
 shallow_clone_is_handled
+first_preview_compares_with_main
 unexpected_failures_build
 
 if ((FAILED > 0)); then

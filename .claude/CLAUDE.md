@@ -62,7 +62,7 @@
 - **`push --force` 禁止・`rebase` 禁止**。マージは **merge commit**（`--merge`）で、**squash 禁止**。
 - コミットメッセージのプレフィックス：`feat:` / `fix:` / `refactor:` / `docs:` / `chore:`。
 - 「PR を作って」＝**PR 作成**（マージではない）。作成前にターゲットブランチを確認。
-- `main` へのマージは Vercel の本番デプロイ＝**収集器と Cron 設定の更新**を意味する。収集に触れる PR は影響範囲を PR 本文に明記する。**例外：前回成功したデプロイからの変更が文書だけ（`docs/`・`.claude/`・`*.md`）ならビルドを飛ばす**（本番もプレビューも。Vercel では Canceled と出るのが正常。W6-22）。判定は `scripts/vercel-ignore-build.sh` で、**Vercel のプロジェクトの設定（Build and Deployment → Ignored Build Step）から呼ぶ**——`vercel.json` のサービスごとの `ignoreCommand` は走らない。設定のコマンドは末尾の `|| exit 1` を外さない（Vercel は終了コード 0・1 以外のデプロイを失敗にする）。ビルドが読むファイルを文書の場所に置かない。
+- `main` へのマージは Vercel の本番デプロイ＝**収集器と Cron 設定の更新**を意味する。収集に触れる PR は影響範囲を PR 本文に明記する。**例外：前回成功したデプロイからの変更が、Vercel のビルドが読まない場所だけ（文書の `docs/`・`.claude/`・`*.md`、iOS の `apps/ios/`、CI の設定の `.github/`）ならビルドを飛ばす**（本番もプレビューも。枝の最初のプレビューは `main` との分岐点と比べ、取れなければビルドする。Vercel では Canceled と出るのが正常。W6-22・W8-08）。判定は `scripts/vercel-ignore-build.sh` で、**Vercel のプロジェクトの設定（Build and Deployment → Ignored Build Step）から呼ぶ**——`vercel.json` のサービスごとの `ignoreCommand` は走らない。設定のコマンドは末尾の `|| exit 1` を外さない（Vercel は終了コード 0・1 以外のデプロイを失敗にする）。ビルドが読むファイルを、読まない場所（文書・`apps/ios/`・`.github/`）に置かない。
 
 **変更範囲**
 - **明示的に依頼された変更のみ**行う。機能・ツール・パッケージ・ベンダー・コンテンツを**自律的に追加しない**。必要そうならまず確認。ドキュメント・コミットメッセージは簡潔に。
