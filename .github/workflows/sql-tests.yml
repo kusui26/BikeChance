@@ -2,11 +2,21 @@ name: SQL tests
 
 # supabase start は初回にイメージを取得するため 2〜4 分かかる。既存の ci.yml に混ぜず
 # 別ワークフローにし、supabase/ が変わった PR だけで動かす（W1 プラン §6.3）。
+#
+# **週 1 回の定時と手動でも回す**（W8 プラン §4.3。W7 プランの所見 225・§10.3）。PR だけだと、
+# **日が経つと落ちる検査**（固定の日付を `now()` と比べるもの）に気づけない——0016 は 10/10 から
+# main で落ちていたのに、次に supabase/ を変える PR（10/17）まで誰も知らなかった。
+# **月曜 03:00 JST（日曜 18:00 UTC）**：当てはめ直しの自動化（月曜 10:30 JST。D-45）より前に、
+# 落ちていれば分かる。落ちたら Actions の失敗のメールで届く。**秘密は使わない**（CI の中で
+# 手元の Supabase を起こすだけで、本番には触れない）。
 on:
   pull_request:
     paths:
       - "supabase/**"
       - ".github/workflows/sql-tests.yml"
+  schedule:
+    - cron: "0 18 * * 0"
+  workflow_dispatch:
 
 concurrency:
   group: sql-tests-${{ github.ref }}
