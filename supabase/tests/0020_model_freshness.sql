@@ -2,7 +2,8 @@
 --
 -- **主題は「鳴るべき日にだけ鳴ること」。** 見張りの値打ちは境目にしか無い——
 -- 1 日早ければ毎週鳴って読まれなくなり、1 日遅ければ回し忘れを 1 週間見逃す。
--- だから 7 日（鳴らない）と 8 日（鳴る）を両側から挟む。
+-- だから 8 日（鳴らない）と 9 日（鳴る）を両側から挟む。**0058 で 8 日から 9 日にした**
+-- （月曜の朝に日曜までで当てはめ直す形では、次の月曜の昇格までがちょうど 8 日。所見 234）。
 --
 -- **`now()` はトランザクションの中で固定される**（0011 と同じ前提）。日付はすべて
 -- 「JST の今日から何日前か」で作るので、いつ走らせても同じ結果になる。
@@ -56,7 +57,7 @@ select is(
 -- 閾値は app_config に置いてある（周期を変えたら migration 無しで追随できる）
 select is(
   (select value from public.app_config where key = 'model_stale_days'),
-  '8', '既定の閾値は 8 日（週次 ＋ 1 日の余白）'
+  '9', '既定の閾値は 9 日（月曜に日曜までで当てはめ直す形の正常の上限 8 日 ＋ 1 日。0058）'
 );
 
 -- ────────────────────────────────────────────────────────────────
@@ -72,7 +73,7 @@ select ok(
 );
 
 -- ────────────────────────────────────────────────────────────────
--- 境目：7 日は鳴らない・8 日は鳴る
+-- 境目：8 日は鳴らない・9 日は鳴る
 -- ────────────────────────────────────────────────────────────────
 delete from public.alert_state;
 select pg_temp.active(0);
@@ -80,22 +81,22 @@ select is(pg_temp.fresh() -> 'age_days', '0'::jsonb, '今日まで当てはめ�
 select is(pg_temp.fresh() -> 'alerts', '0'::jsonb, '当日は鳴らない');
 
 delete from public.alert_state;
-select pg_temp.active(7);
-select is(pg_temp.fresh() -> 'age_days', '7'::jsonb, '7 日前まで');
+select pg_temp.active(8);
+select is(pg_temp.fresh() -> 'age_days', '8'::jsonb, '8 日前まで');
 select is(pg_temp.fresh() -> 'alerts', '0'::jsonb,
-  '**7 日は鳴らない**（週次で回している正常の上限。ここで鳴ると毎週鳴る）');
+  '**8 日は鳴らない**（日曜までの版を次の月曜に替える、正常の上限。ここで鳴ると毎週月曜に鳴る）');
 
 delete from public.alert_state;
-select pg_temp.active(8);
+select pg_temp.active(9);
 select is(pg_temp.fresh() -> 'alerts', '1'::jsonb,
-  '**8 日で鳴る**（週次を 1 回飛ばした、だけが意味になる）');
+  '**9 日で鳴る**（月曜の回を 1 回飛ばした、だけが意味になる）');
 select is(
   (select last_value ->> 'model_version' from public.alert_state where alert_key = 'model_stale'),
   'baseline-b3-v0-test', '通知にどの版かが入る'
 );
 select is(
   (select last_value ->> 'age_days' from public.alert_state where alert_key = 'model_stale'),
-  '8', '通知に何日古いかが入る'
+  '9', '通知に何日古いかが入る'
 );
 
 -- ────────────────────────────────────────────────────────────────
@@ -124,10 +125,10 @@ select is(pg_temp.fresh() -> 'alerts', '0'::jsonb, '最新の日で判定する�
 -- ────────────────────────────────────────────────────────────────
 delete from public.alert_state;
 select pg_temp.active(4);
-select is(pg_temp.fresh() -> 'alerts', '0'::jsonb, '既定（8 日）では 4 日は鳴らない');
+select is(pg_temp.fresh() -> 'alerts', '0'::jsonb, '既定（9 日）では 4 日は鳴らない');
 update public.app_config set value = '3' where key = 'model_stale_days';
 select is(pg_temp.fresh() -> 'alerts', '1'::jsonb, '閾値を 3 日に縮めると同じ行で鳴る');
-update public.app_config set value = '8' where key = 'model_stale_days';
+update public.app_config set value = '9' where key = 'model_stale_days';
 
 -- ────────────────────────────────────────────────────────────────
 -- 親に組み込まれている
@@ -139,7 +140,7 @@ select is(
   (select count(*)::int
      from jsonb_object_keys((select detail->'checks' from public.job_runs
                               where job_name = 'monitor_jobs' order by id desc limit 1))),
-  9, '検査は 9 つになった（0048 の check_model_freshness、0052 の check_weather_stale、0056 の check_jobs_stuck）'
+  11, '検査は 11 になった（0048 の check_model_freshness、0052 の check_weather_stale、0056 の check_jobs_stuck、0058 の check_forest_freshness・check_shadow）'
 );
 select ok(
   (select detail->'checks' ? 'check_model_freshness' from public.job_runs
