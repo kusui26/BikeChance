@@ -29,6 +29,7 @@ from bikechance_ml.features.reference import (
 from bikechance_ml.features.weather import SERIES as WEATHER_SERIES
 from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.io.range_file import Piece
+from bikechance_ml.jobs.drop_cells import DailyMetric
 from bikechance_ml.jobs.snapshot_table import Snapshot, StationRow
 from bikechance_ml.jobs.weather_archive import SERIES as ARCHIVE_SERIES
 from bikechance_ml.jobs.weather_archive import PendingIssue
@@ -70,6 +71,9 @@ SNAPSHOT_PAGE_SIZE: Final[int] = 24
 
 #: 予報の 1 ページ。1 行は 8 要素の配列 3 本なので、台帳と同じくらいの大きさで刻める。
 WEATHER_PAGE_SIZE: Final[int] = 5_000
+
+#: 日次評価を読むページの長さ（1 日 1 版 240 行。7 日 × 2 版で 3,360 行）。
+METRICS_PAGE_SIZE: Final[int] = 1_000
 
 #: ページ送りの上限。`offset` が効かない相手に当たっても無限に回らないための歯止め。
 #: 台帳 14,900 件でも 4 往復で終わるので、100 は十分に余裕がある。
@@ -444,6 +448,55 @@ class SupabaseIo:
         fields = as_dict(response.json(), "register_model_version")
         return as_str(field(fields, "model_version", "register"), "model_version")
 
+    def promoted_at(self, model_version: str) -> datetime | None:
+        """その版を active にした時刻（0038 の `promoted_at`）。**無ければ None。**"""
+        rows = self._rows(
+            "/rest/v1/model_versions",
+            {"select": "promoted_at", "model_version": f"eq.{model_version}", "limit": "1"},
+            "model_versions",
+        )
+        if not rows:
+            return None
+        value = field(as_dict(rows[0], "model_versions"), "promoted_at", "model")
+        return None if value is None else _to_datetime(as_str(value, "promoted_at"))
+
+    # ── 当てはめ直しの自動化（W8 の PR G）──────────────────────
+    def latest_ok_run(self, job_name: str, date_key: str, day: date) -> datetime | None:
+        """`job_name` の `ok` で、`detail.<date_key>` が `day` の行の、いちばん新しい始まり。"""
+        rows = self._rows(
+            "/rest/v1/job_runs",
+            {
+                "select": "started_at",
+                "job_name": f"eq.{job_name}",
+                "status": "eq.ok",
+                f"detail->>{date_key}": f"eq.{day.isoformat()}",
+                "order": "started_at.desc",
+                "limit": "1",
+            },
+            "job_runs",
+        )
+        if not rows:
+            return None
+        started = field(as_dict(rows[0], "job_runs"), "started_at", "job_runs")
+        return _to_datetime(as_str(started, "started_at"))
+
+    def list_daily_metrics(
+        self, versions: Sequence[str], first: date, last: date
+    ) -> tuple[DailyMetric, ...]:
+        """日次評価（0050）の、版と日の範囲の行。**ページを空になるまで読む**（`_paged`）。"""
+        rows = self._paged(
+            "/rest/v1/model_daily_metrics",
+            {
+                "select": "model_version,metric_date,system_id,target,h_min,bucket,n,brier",
+                "model_version": f"in.({','.join(versions)})",
+                "and": f"(metric_date.gte.{first.isoformat()},metric_date.lte.{last.isoformat()})",
+                "order": "model_version,metric_date,system_id,target,h_min,bucket",
+            },
+            METRICS_PAGE_SIZE,
+            "model_daily_metrics",
+        )
+        return tuple(_to_daily_metric(row) for row in rows)
+
     # ── 天気（W4 プラン §6.4）────────────────────────────────
     def list_weather_pending(self, since: datetime, limit: int) -> tuple[PendingIssue, ...]:
         """まだ取り込んでいない発行を、古い順に。**下限を必ず渡す。**
@@ -724,6 +777,20 @@ def _to_registered(row: object) -> Registered:
         feature_set=as_str(field(fields, "feature_set", "model"), "feature_set"),
         artifact_path=as_str(field(fields, "artifact_path", "model"), "artifact_path"),
         status=as_str(field(fields, "status", "model"), "status"),
+    )
+
+
+def _to_daily_metric(row: object) -> DailyMetric:
+    fields = as_dict(row, "model_daily_metrics")
+    return DailyMetric(
+        model_version=as_str(field(fields, "model_version", "metrics"), "model_version"),
+        metric_date=date.fromisoformat(as_str(field(fields, "metric_date", "metrics"), "date")),
+        system_id=as_str(field(fields, "system_id", "metrics"), "system_id"),
+        target=as_str(field(fields, "target", "metrics"), "target"),
+        h_min=as_int(field(fields, "h_min", "metrics"), "h_min"),
+        bucket=as_str(field(fields, "bucket", "metrics"), "bucket"),
+        n=as_int(field(fields, "n", "metrics"), "n"),
+        brier=as_float(field(fields, "brier", "metrics"), "brier"),
     )
 
 

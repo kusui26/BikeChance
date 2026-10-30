@@ -530,6 +530,14 @@ def dow_of_cell(key: Int64) -> Int64:
     return np.asarray((key // SLOTS_PER_DAY) % len(DOW_TYPE_ORDER), dtype=np.int64)
 
 
+def usable_by_dow(usable: Bools) -> dict[str, int]:
+    """曜日種別ごとの使えるセルの数。**点検（`scripts/inspect-artifact.py`）と登録の本文
+    （`jobs/register_body.py`）が同じ数を読む**ように、数え方はここに 1 つだけ置く。"""
+    keys = np.asarray(np.nonzero(usable)[0], dtype=np.int64)
+    found = np.bincount(dow_of_cell(keys), minlength=len(DOW_TYPE_ORDER))
+    return {name: int(found[index]) for index, name in enumerate(DOW_TYPE_ORDER)}
+
+
 # ── B2 の作り方（学習側）──────────────────────────────────────
 class Source(Protocol):
     """**B2 の表をどう作るか。** 学習サンプルの行からか、プロファイルからか。
