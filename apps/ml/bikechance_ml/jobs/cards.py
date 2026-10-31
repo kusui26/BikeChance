@@ -35,7 +35,17 @@ def card_reference(card_path: str | None) -> str | None:
     if card_path is None:
         return None
     resolved = Path(card_path).resolve()
-    for parent in resolved.parents:
-        if (parent / ".git").exists():
-            return str(resolved.relative_to(parent))
-    return card_path
+    root = repo_root(resolved.parent)
+    return card_path if root is None else str(resolved.relative_to(root))
+
+
+def repo_root(start: Path) -> Path | None:
+    """`start` から上へ辿って、`.git` のある場所（リポジトリの根）。**無ければ None。**
+
+    worktree では `.git` がファイルになるので、在るかどうかだけを見る。
+    """
+    resolved = start.resolve()
+    for candidate in (resolved, *resolved.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None

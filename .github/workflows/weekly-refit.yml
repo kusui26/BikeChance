@@ -1,0 +1,145 @@
+name: 当てはめ直し（月曜の朝。B3 だけ）
+
+# 月曜の朝に、日曜までのデータで B3 を当てはめ直し、合成器を組んで**候補まで**作る
+# （W8 の PR G、開発プランの D-45、W8 プランの W8-01〜06）。**昇格はしない**——記録の PR を
+# 人が読み、確認を取ってから、PR に入れた昇格の SQL を psql で流す（W8-04、CLAUDE.md §6）。
+#
+# **段**（`bikechance_ml.jobs.weekly_refit`）：前提の門（日曜の学習サンプル・プロファイル・
+# 日次評価の `ok` を 10 分おきに 3 時間まで待つ）→ B3 を当てはめて置く → 置いたバイト列を確かめる
+# → 点検 → 評価（検証は日曜と土曜）→ B3 を candidate で登録 → 削るセル（日次評価の直近 7 日。W6-12）
+# → 合成器を組んで置いて登録（森は active のまま）→ 点検 → 本番の口で試し打ち（両系統 2 回、
+# 何も書かない）→ 記録。**止まったら `job_runs` の `weekly_refit` に `failed` と段の名前**
+# （`detail.phase`）が残り、`monitor_jobs` が鳴らす（W8-05）。
+#
+# **月曜 01:30 UTC（10:30 JST）**。日次の枠は毎朝 2〜3 時間遅れて届く（10/27 は 06:00 の枠が
+# 09:08 に始まった）。10:30 は W7 の最遅（09:03）より後で、それでも遅れたら門が待つ。
+# `schedule` そのものも遅れる（W6 プランの所見 203）が、門は日付で待つので順序は崩れない。
+#
+# **手で起こす回は既定で試しの形**（置かず・登録せず・`job_runs` にも残さず・PR も開かない）。
+# 試し打ちは今の shadow で叩く（候補は登録していないので本番の口で引けない）。定時の回を手で
+# やり直すときだけ `trial` を外す。
+#
+# **秘密**：`training` 環境の `SUPABASE_URL`・`SUPABASE_SECRET_KEY`（既存の再学習用）と、
+# 試し打ちの `CRON_SECRET`（W8-06 で足した）。**`push` / `pull_request` を付けない**（秘密を
+# 使うワークフローの決まり。D-12）。**公開リポジトリの実行ログは誰でも読める**ので、記録に出す
+# のは版の名前と数だけ（URL も秘密も出さない。試し打ちの宛先は公開の本番のドメイン）。
+#
+# **持つ権限は記録の PR を開く分だけ**（`contents: write`・`pull-requests: write`）。
+# `GITHUB_TOKEN` で開いた PR では他のワークフロー（CI）が走らないが、入れるのは `docs/` の
+# 3 ファイルだけで、Vercel のビルドも飛ぶ（D-42）。**昇格を呼ぶ形はここに書かない**
+# （ci.yml の「昇格と退役が自動化されていないか」が止める。SQL は `docs/refits/` にだけ入る）。
+#
+# **ファイル名を変えない**（`schedule` はワークフローのファイル単位で登録される）。
+on:
+  schedule:
+    - cron: "30 1 * * 1"
+  workflow_dispatch:
+    inputs:
+      to_date:
+        description: "最終学習日（JST、YYYY-MM-DD）。空なら昨日"
+        required: false
+        type: string
+      trial:
+        description: "試しの形（置かず・登録せず・記録の PR も開かない）"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# **2 本を同時に走らせない。** 同じ日の B3 と合成器を 2 本が置き合うと、確かめたバイト列と
+# 置かれたバイト列が食い違いうる。後から来た回は前の回が終わるまで待つ。
+concurrency:
+  group: weekly-refit
+  cancel-in-progress: false
+
+jobs:
+  refit:
+    name: B3 と合成器の候補を作る
+    runs-on: ubuntu-latest
+    # 門 3 時間 ＋ 当てはめ・評価・組み立て（#5 の手元で 9 分）＋ 試し打ち（2 周期 10 分）
+    timeout-minutes: 240
+    # **ここが鍵の在り処。** `training` 環境の secrets だけがこのジョブに渡る（`main` だけ）
+    environment: training
+    defaults:
+      run:
+        working-directory: apps/ml
+    steps:
+      - uses: actions/checkout@v7
+
+      # python.yml と同じ組み立て。**サードパーティのアクションに依存しない**
+      - name: uv を入れる
+        run: pip install --upgrade uv
+
+      - name: Python 3.12 を用意する
+        run: uv python install 3.12
+
+      # **`--extra dev` を付けない。** B3 の当てはめ・評価・合成器・点検は本番の依存で足りる
+      - name: 依存を入れる（uv.lock どおり、本番の依存だけ）
+        run: uv sync --frozen --python 3.12
+
+      # **入力は `env:` で渡す**（`${{ }}` をスクリプトに直接埋めない）。
+      #
+      # **試し直さない。** 置く回を 2 度走らせると、1 回目の候補を 2 回目が上書きする。落ちたら
+      # `job_runs` の `detail.phase` と記録を読んでから、人がもう 1 度起こす（W8-05）。
+      #
+      # `TRIAL` は**定時の回では必ず false**。手で起こした回は入力のまま（既定 true）
+      - name: 当てはめ直す
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          TO_DATE: ${{ inputs.to_date }}
+          TRIAL: ${{ github.event_name == 'workflow_dispatch' && inputs.trial }}
+          ORIGIN: https://bike-chance.vercel.app
+        run: |
+          args=(--out "${RUNNER_TEMP}/refit" --origin "${ORIGIN}")
+          if [ -n "${TO_DATE}" ]; then
+            args+=(--to "${TO_DATE}")
+          fi
+          if [ "${TRIAL}" = "true" ]; then
+            args+=(--trial)
+          fi
+          uv run python -m bikechance_ml.jobs.weekly_refit "${args[@]}"
+
+      # **要約欄だけに書かない**（`GITHUB_STEP_SUMMARY` は API から取れない）。ログにも流す。
+      # **記録・昇格の SQL・モデルカードの 3 つを出す**——次の段（PR を開く）で落ちても、
+      # ログから手で PR を作り直せる（置いた回は、候補の登録まで済んでいる）
+      - name: 記録を要約とログに出す
+        if: always()
+        run: |
+          out="${RUNNER_TEMP}/refit"
+          if [ ! -f "${out}/record.md" ]; then
+            echo "記録はありません（途中で止まりました。job_runs の weekly_refit の detail.phase を見てください）"
+            exit 0
+          fi
+          for name in record.md promote.sql card.md; do
+            if [ -f "${out}/${name}" ]; then
+              { echo ""; echo "<!-- ${name} -->"; cat "${out}/${name}"; } | tee -a "${GITHUB_STEP_SUMMARY}"
+            fi
+          done
+
+      # **試しの形では開かない。** 条件を `inputs.trial == false` だけで書かない——定時の回では
+      # `inputs` が空で、GitHub の式は `null == false` を真にする（緩い比較）
+      - name: 記録の PR を開く
+        if: >-
+          success() && (github.event_name == 'schedule'
+          || (github.event_name == 'workflow_dispatch' && !inputs.trial))
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL: ${{ runner.temp }}/refit/pr.json
+        run: |
+          branch="$(jq -r .branch "${PULL}")"
+          title="$(jq -r .title "${PULL}")"
+          body="$(jq -r .body "${PULL}")"
+          mapfile -t files < <(jq -r '.files[]' "${PULL}")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${branch}"
+          git add -- "${files[@]}"
+          git commit -m "${title}"
+          git push origin "${branch}"
+          gh pr create --base main --head "${branch}" --title "${title}" --body-file "${body}"

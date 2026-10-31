@@ -454,3 +454,67 @@ def test_other_failures_are_not_read_as_missing() -> None:
     assert not is_missing_object(400, '{"statusCode":"409","code":"KeyAlreadyExists"}')
     assert not is_missing_object(400, "これは JSON ではない")
     assert not is_missing_object(400, "[]")
+
+
+# ── 当てはめ直しの自動化（W8 の PR G）──────────────────────────
+def test_the_gate_asks_for_an_ok_row_of_that_day() -> None:
+    """**`detail` の日付の欄で絞る**（PostgREST の `detail->>date=eq.…`）。"""
+    io, seen = io_with(lambda request: json_response([{"started_at": "2026-11-02T00:08:56Z"}]))
+    found = io.latest_ok_run("build_features", "date", datetime(2026, 11, 1).date())
+    assert found == datetime(2026, 11, 2, 0, 8, 56, tzinfo=UTC)
+    params = seen[0].url.params
+    assert seen[0].url.path == "/rest/v1/job_runs"
+    assert (params["job_name"], params["status"]) == ("eq.build_features", "eq.ok")
+    assert params["detail->>date"] == "eq.2026-11-01"
+    assert (params["order"], params["limit"]) == ("started_at.desc", "1")
+
+
+def test_the_gate_reads_a_missing_run_as_none() -> None:
+    io, seen = io_with(lambda request: json_response([]))
+    assert io.latest_ok_run("evaluate_daily", "metric_date", datetime(2026, 11, 1).date()) is None
+    assert seen[0].url.params["detail->>metric_date"] == "eq.2026-11-01"
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            [{"promoted_at": "2026-10-26T01:32:32.123+00:00"}],
+            datetime(2026, 10, 26, 1, 32, 32, 123000, tzinfo=UTC),
+        ),
+        ([{"promoted_at": None}], None),
+        ([], None),
+    ],
+)
+def test_the_promotion_time_is_read_or_none(
+    payload: list[object], expected: datetime | None
+) -> None:
+    io, seen = io_with(lambda request: json_response(payload))
+    assert io.promoted_at("composite-v1-20261025") == expected
+    assert seen[0].url.params["model_version"] == "eq.composite-v1-20261025"
+
+
+def _metric(version: str, index: int) -> dict[str, object]:
+    return {
+        "model_version": version,
+        "metric_date": "2026-10-28",
+        "system_id": "hellocycling",
+        "target": "bike",
+        "h_min": 30,
+        "bucket": str(index),
+        "n": 100 + index,
+        "brier": 0.05,
+    }
+
+
+def test_daily_metrics_read_every_page_for_both_versions() -> None:
+    """**ページを空になるまで読む**（7 日 × 2 版で 3,360 行。サーバ側の上限より長い）。"""
+    rows: list[object] = [_metric("composite-v1-x", index) for index in range(2_500)]
+    io, seen = io_with(server_with(rows, max_rows=1_000))
+    first, last = datetime(2026, 10, 27).date(), datetime(2026, 11, 1).date()
+    found = io.list_daily_metrics(["composite-v1-x", "baseline-b3-v0-y"], first, last)
+    assert len(found) == 2_500
+    assert found[7].bucket == "7" and found[7].n == 107 and found[7].h_min == 30
+    params = seen[0].url.params
+    assert params["model_version"] == "in.(composite-v1-x,baseline-b3-v0-y)"
+    assert params["and"] == "(metric_date.gte.2026-10-27,metric_date.lte.2026-11-01)"
