@@ -8,6 +8,8 @@
  *   * **鮮度切れの予測は返さない**（`base_observed_at` で測る）
  *   * **直近の実績は 24 時間で切り、観測の無い時間帯は行ごと欠ける**
  *   * **`capacity_est` は `capacity` と別の欄**（W5-14）
+ *   * **ふだんの傾向は今日（JST）から 7 日の祝日で組み、行が無くても 200**（D-47。組み方の
+ *     細部は `station-trend.test.ts`）
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -16,7 +18,7 @@ import {
   stationDetailResponseSchema,
 } from "@bikechance/shared";
 import { RECENT_HOURS, buildStationDetailResponse, queryStationDetail } from "./station-detail";
-import type { FeedRow, HourlyRow, ReadPort, StationRow } from "./read-port";
+import type { FeedRow, HourlyRow, ReadPort, StationRow, TrendRow } from "./read-port";
 
 const NOW = new Date("2026-09-08T00:00:00.000Z");
 
@@ -65,15 +67,29 @@ const hour = (offset_h: number, n = 12): HourlyRow => ({
   docks_mean: 6.5,
 });
 
+/** 72 個とも 0.8（平日も土日祝も同じ値）。 */
+const TREND: TrendRow = {
+  profile_date: "2026-09-07",
+  p_bike_x1000: Array.from({ length: 72 }, () => 800),
+  p_dock_x1000: Array.from({ length: 72 }, () => 600),
+};
+
 type PortOptions = {
   readonly row?: StationRow | null;
   readonly recent?: readonly HourlyRow[];
   readonly feeds?: readonly FeedRow[];
-  readonly throwOn?: "feeds" | "station" | "recent";
+  readonly trend?: TrendRow | null;
+  readonly holidays?: readonly string[];
+  readonly throwOn?: "feeds" | "station" | "recent" | "trend" | "holidays";
 };
 
 const fakePort = (options: PortOptions = {}) => {
-  const asked: { since?: Date; station_id?: string } = {};
+  const asked: {
+    since?: Date;
+    station_id?: string;
+    trend_station_id?: string;
+    holidays?: { readonly from: string; readonly to: string };
+  } = {};
   const port: ReadPort = {
     listFeeds: async () => {
       if (options.throwOn === "feeds") throw new Error("db down");
@@ -89,6 +105,16 @@ const fakePort = (options: PortOptions = {}) => {
       if (options.throwOn === "recent") throw new Error("db down");
       asked.since = since;
       return options.recent ?? [];
+    },
+    findTrend: async ({ station_id }) => {
+      if (options.throwOn === "trend") throw new Error("db down");
+      asked.trend_station_id = station_id;
+      return options.trend === undefined ? TREND : options.trend;
+    },
+    listHolidays: async (window) => {
+      if (options.throwOn === "holidays") throw new Error("db down");
+      asked.holidays = window;
+      return options.holidays ?? [];
     },
     // この経路では使わない。`ReadPort` を満たすためだけに置く
     listStationsInBbox: async () => ({ rows: [], total: 0 }),
@@ -237,6 +263,8 @@ describe("予測の曲線（W5-13）", () => {
       row: station(),
       feed: FEED,
       recent: [],
+      trend: null,
+      holidays: [],
       now: NOW,
     });
     expect(response?.forecast_curve?.horizons_min).toEqual([...HORIZONS_MIN]);
@@ -257,7 +285,14 @@ describe("予測の曲線（W5-13）", () => {
       forecast_model_version: null,
       forecast_generated_at: null,
     });
-    const response = buildStationDetailResponse({ row, feed: FEED, recent: [], now: NOW });
+    const response = buildStationDetailResponse({
+      row,
+      feed: FEED,
+      recent: [],
+      trend: null,
+      holidays: [],
+      now: NOW,
+    });
     expect(response?.forecast_curve).toBeNull();
     expect(response?.station.station_id).toBe("s-1");
   });
@@ -265,13 +300,27 @@ describe("予測の曲線（W5-13）", () => {
   it("**鮮度切れは返さない**（`base_observed_at` で測る）", () => {
     const stale = new Date(NOW.getTime() - (FORECAST_STALE_AFTER_S + 60) * 1000).toISOString();
     const row = station({ forecast_base_observed_at: stale });
-    const response = buildStationDetailResponse({ row, feed: FEED, recent: [], now: NOW });
+    const response = buildStationDetailResponse({
+      row,
+      feed: FEED,
+      recent: [],
+      trend: null,
+      holidays: [],
+      now: NOW,
+    });
     expect(response?.forecast_curve).toBeNull();
   });
 
   it("**長さがそろっていなければ返さない**（欠けた表から数を作らない）", () => {
     const row = station({ forecast_p_bike_x1000: [900, 880] });
-    const response = buildStationDetailResponse({ row, feed: FEED, recent: [], now: NOW });
+    const response = buildStationDetailResponse({
+      row,
+      feed: FEED,
+      recent: [],
+      trend: null,
+      holidays: [],
+      now: NOW,
+    });
     expect(response?.forecast_curve).toBeNull();
   });
 });
@@ -307,7 +356,72 @@ describe("直近の実績", () => {
   it("24 件までしか入らない（スキーマが上限を持つ）", () => {
     const many = Array.from({ length: 25 }, (_, index) => hour(index + 1));
     expect(() =>
-      buildStationDetailResponse({ row: station(), feed: FEED, recent: many, now: NOW }),
+      buildStationDetailResponse({
+        row: station(),
+        feed: FEED,
+        recent: many,
+        trend: null,
+        holidays: [],
+        now: NOW,
+      }),
     ).toThrow();
+  });
+});
+
+describe("ふだんの傾向（D-47）", () => {
+  it("**そのポートの 1 行を読み、今日（JST）から 7 日の祝日を読む**", async () => {
+    const { port, asked } = fakePort();
+    const outcome = await queryStationDetail({
+      makePort: () => port,
+      system: "hellocycling",
+      station_id: "s-1",
+      now: NOW,
+    });
+    if (!outcome.ok) throw new Error("ok を期待した");
+    expect(asked.trend_station_id).toBe("s-1");
+    // NOW は 09:00 JST の 09-08。7 日目は 09-14
+    expect(asked.holidays).toEqual({ from: "2026-09-08", to: "2026-09-14" });
+    expect(outcome.response.trend?.profile_date).toBe("2026-09-07");
+    expect(outcome.response.trend?.days).toHaveLength(7);
+    expect(outcome.response.trend?.days[0]?.p_bike[9]).toBe(0.8);
+  });
+
+  it("**祝日はその日の曜日種別を変える**", async () => {
+    const { port } = fakePort({ holidays: ["2026-09-09"] });
+    const outcome = await queryStationDetail({
+      makePort: () => port,
+      system: "hellocycling",
+      station_id: "s-1",
+      now: NOW,
+    });
+    if (!outcome.ok) throw new Error("ok を期待した");
+    expect(outcome.response.trend?.days[1]?.dow_type).toBe("sun_holiday");
+  });
+
+  it("**行が無くても 200**（`trend` だけ null。欄ごと optional）", async () => {
+    const { port } = fakePort({ trend: null });
+    const outcome = await queryStationDetail({
+      makePort: () => port,
+      system: "hellocycling",
+      station_id: "s-1",
+      now: NOW,
+    });
+    if (!outcome.ok) throw new Error("ok を期待した");
+    expect(outcome.response.trend).toBeNull();
+    expect(outcome.response.forecast_curve).not.toBeNull();
+  });
+
+  it("傾向が読めなければ 503（他の欄と同じ。理由は載せない）", async () => {
+    for (const throwOn of ["trend", "holidays"] as const) {
+      const { port } = fakePort({ throwOn });
+      const outcome = await queryStationDetail({
+        makePort: () => port,
+        system: "hellocycling",
+        station_id: "s-1",
+        now: NOW,
+      });
+      expect(outcome.ok, throwOn).toBe(false);
+      if (!outcome.ok) expect(outcome.failure.status).toBe(503);
+    }
   });
 });

@@ -594,6 +594,18 @@ class SupabaseIo:
         )
         return as_int(response.json(), "upsert_capacity_est")
 
+    def upsert_station_trend(self, rows: Sequence[Mapping[str, object]]) -> int:
+        """ふだんの傾向をまとめて書く（0059、D-47）。**1 回の往復で送る量は呼ぶ側が刻む。**
+
+        **古い版では上書きしない**（関数の側で弾く）ので、戻り値は実際に書いた行の数。
+        """
+        if not rows:
+            return 0
+        response = self._request(
+            "POST", "/rest/v1/rpc/upsert_station_trend", "rest", json={"p_rows": list(rows)}
+        )
+        return as_int(response.json(), "upsert_station_trend")
+
     # ── 書き込み ────────────────────────────────────────────────
     def upload_parquet(self, path: str, body: bytes) -> None:
         """同じパスに上書きする。同じ時間帯を 2 回処理しても結果が変わらない。"""

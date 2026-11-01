@@ -107,6 +107,8 @@ const fakePort = (options: PortOptions = {}): ReadPort => {
     findStation: async () => null,
     listCells: async () => [],
     listRecentHours: async () => [],
+    findTrend: async () => null,
+    listHolidays: async () => [],
   };
 };
 

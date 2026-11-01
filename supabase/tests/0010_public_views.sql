@@ -10,7 +10,7 @@
 -- **行単位の検査は必ず `system_id` で絞る。** 他のデータが混ざっていても結果が変わらないように。
 
 begin;
-select plan(51);
+select plan(54);
 
 -- ────────────────────────────────────────────────────────────────
 -- 権限
@@ -36,15 +36,15 @@ select is(
      from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'v'
       and has_table_privilege('anon', c.oid, 'select')),
-  4, 'anon が select できる「ビュー」はちょうど 4 つ（0046 で v1_station_hourly を足した）');
+  6, 'anon が select できる「ビュー」はちょうど 6 つ（0059 で v1_station_trend と v1_holidays を足した）');
 
 select is(
   (select string_agg(c.relname, ',' order by c.relname)
      from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'v'
       and has_table_privilege('anon', c.oid, 'select')),
-  'v1_feeds,v1_station_hourly,v1_station_neighbors,v1_stations_current',
-  '公開しているのはこの 4 枚（名前も固定する）');
+  'v1_feeds,v1_holidays,v1_station_hourly,v1_station_neighbors,v1_station_trend,v1_stations_current',
+  '公開しているのはこの 6 枚（名前も固定する）');
 
 select ok(not has_table_privilege('anon', 'public.station_status_latest', 'select'),
           'anon は station_status_latest を読めない');
@@ -247,10 +247,20 @@ select columns_are('public'::name, 'v1_station_hourly'::name, array[
   'system_id', 'station_id', 'hour_start', 'n', 'bikes_mean', 'docks_mean'
 ]::name[], 'v1_station_hourly の列は view-query.ts の HOURLY_COLUMNS と同じ');
 
+-- **ふだんの傾向と祝日**（0059）。`n_days` は基底表にだけ在り、公開しない
+select columns_are('public'::name, 'v1_station_trend'::name, array[
+  'system_id', 'station_id', 'profile_date', 'p_bike_x1000', 'p_dock_x1000'
+]::name[], 'v1_station_trend の列は view-query.ts の TREND_COLUMNS と同じ');
+select columns_are('public'::name, 'v1_holidays'::name, array[
+  'holiday_date'
+]::name[], 'v1_holidays の列は view-query.ts の HOLIDAY_COLUMNS と同じ');
+
 select ok(not has_table_privilege('anon', 'public.station_hourly', 'select'),
           'anon は station_hourly（基底表）を読めない');
 select ok(not has_table_privilege('anon', 'public.station_capacity_est', 'select'),
           'anon は station_capacity_est を読めない');
+select ok(not has_table_privilege('anon', 'public.station_trend', 'select'),
+          'anon は station_trend（基底表）を読めない');
 
 -- **`capacity_est = 0` は通る**（0047）。「7 日とも 1 台も並ばなかった」という観測で、
 -- 「分からない」ではない（実測 37 件）。**0 と NULL を分ける約束をここで固定する**

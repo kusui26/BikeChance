@@ -5,7 +5,13 @@
  * bbox の 4 辺を列と演算子に写す部分は取り違えやすく（南北と東西を入れ替えても
  * 型は通る）、静かに間違った範囲を返す類の誤りになるので、純粋な関数にして固定する。
  */
-import { SYSTEM_IDS, type Bbox, type SystemId } from "@bikechance/shared";
+import {
+  DOW_TYPE_ORDER,
+  SYSTEM_IDS,
+  TREND_HOURS_PER_DAY,
+  type Bbox,
+  type SystemId,
+} from "@bikechance/shared";
 import { z } from "zod";
 
 /** ビューの名前はここだけに書く。基底テーブルは公開経路のどこからも名指ししない。 */
@@ -17,6 +23,10 @@ export const NEIGHBORS_VIEW = "v1_station_neighbors";
 export const HOURLY_VIEW = "v1_station_hourly";
 /** 低ズームの格子集約（migration 0049）。**ビューではなく関数**（刻みを引数で受ける）。 */
 export const CELLS_FUNCTION = "v1_station_cells";
+/** ふだんの傾向（`/v1/stations/{system}/{id}`。migration 0059、D-47）。 */
+export const TREND_VIEW = "v1_station_trend";
+/** 祝日（傾向の 7 日の曜日種別を暦で決める。migration 0059）。 */
+export const HOLIDAYS_VIEW = "v1_holidays";
 
 /** `v1_feeds` から読む列。`select("*")` にしないのは、列が増えたときに気づけるようにするため。 */
 export const FEED_COLUMNS =
@@ -35,11 +45,16 @@ export const NEIGHBOR_COLUMNS = "station_id,nb_station_id,distance_m";
 /** `v1_station_hourly` から読む列（0046）。`system_id` は絞り込みで分かっているので読まない。 */
 export const HOURLY_COLUMNS = "station_id,hour_start,n,bikes_mean,docks_mean";
 
+/** `v1_station_trend` から読む列（0059）。**ポートは絞り込みで分かっている**ので読まない。 */
+export const TREND_COLUMNS = "profile_date,p_bike_x1000,p_dock_x1000";
+
+export const HOLIDAY_COLUMNS = "holiday_date";
+
 /** 絞り込み 1 つ。`op` は supabase-js の同名メソッドに対応する。 */
 export type Filter =
   | { readonly op: "gte" | "lte"; readonly column: string; readonly value: number }
-  // 時刻の下限。**数と混ぜない**——`gte` は数のための口で、型で取り違えを止める
-  | { readonly op: "gte_text"; readonly column: string; readonly value: string }
+  // 時刻・暦日の範囲。**数と混ぜない**——`gte`・`lte` は数のための口で、型で取り違えを止める
+  | { readonly op: "gte_text" | "lte_text"; readonly column: string; readonly value: string }
   | { readonly op: "eq"; readonly column: string; readonly value: string }
   | { readonly op: "is"; readonly column: string; readonly value: boolean }
   | { readonly op: "in"; readonly column: string; readonly values: readonly string[] };
@@ -121,6 +136,20 @@ export const hourlyFilters = (params: {
   { op: "eq", column: "system_id", value: params.system_id },
   { op: "eq", column: "station_id", value: params.station_id },
   { op: "gte_text", column: "hour_start", value: params.since },
+];
+
+/**
+ * 祝日の絞り込み（0059）。**両端を含む** JST の暦日（`YYYY-MM-DD`）。
+ *
+ * 曜日種別に効くのは**その日が祝日か**だけ（飛び石は平日のまま。`dowType`）なので、
+ * 傾向の 7 日の外を読む必要は無い。
+ */
+export const holidayFilters = (params: {
+  readonly from: string;
+  readonly to: string;
+}): readonly Filter[] => [
+  { op: "gte_text", column: "holiday_date", value: params.from },
+  { op: "lte_text", column: "holiday_date", value: params.to },
 ];
 
 /** 並びは固定する。同じ要求が同じ応答になり、差分も追える。 */
@@ -245,8 +274,30 @@ export const hourlyRowSchema = z.object({
   docks_mean: z.number().nonnegative(),
 });
 
+/** 1 ポートの配列の長さ（曜日種別 3 × 24 時間。0059 の `station_trend_shape`）。 */
+const TREND_CELLS = DOW_TYPE_ORDER.length * TREND_HOURS_PER_DAY;
+
+/** 72 個の ×1000 の確率。**出せない時間は null**（0 に写さない）。 */
+const trendCellsSchema = z.array(z.number().int().min(0).max(1000).nullable()).length(TREND_CELLS);
+
+/**
+ * `v1_station_trend` の 1 行（0059）。**長さを検査する**——72 でなければ、添字が別の
+ * 曜日の時間を指す（表の制約と同じ約束を、読む側でも持つ）。
+ */
+export const trendRowSchema = z.object({
+  profile_date: z.iso.date(),
+  p_bike_x1000: trendCellsSchema,
+  p_dock_x1000: trendCellsSchema,
+});
+
+/** `v1_holidays` の 1 行（0059）。 */
+export const holidayRowSchema = z.object({
+  holiday_date: z.iso.date(),
+});
+
 export type CellRow = z.infer<typeof cellRowSchema>;
 export type FeedRow = z.infer<typeof feedRowSchema>;
 export type StationRow = z.infer<typeof stationRowSchema>;
 export type NeighborRow = z.infer<typeof neighborRowSchema>;
 export type HourlyRow = z.infer<typeof hourlyRowSchema>;
+export type TrendRow = z.infer<typeof trendRowSchema>;

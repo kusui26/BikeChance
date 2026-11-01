@@ -1,6 +1,7 @@
 /** 公開 API `/v1` のスキーマ。iOS / Web / テストがこの型を共有する。 */
 import { z } from "zod";
-import { SYSTEM_IDS } from "./constants";
+import { DOW_TYPES } from "./calendar";
+import { SYSTEM_IDS, TREND_DAYS, TREND_HOURS_PER_DAY } from "./constants";
 
 export const systemIdSchema = z.enum(SYSTEM_IDS);
 
@@ -403,6 +404,38 @@ export const recentHourSchema = z.object({
   docks_mean: z.number().nonnegative(),
 });
 
+/** 傾向の 1 時間ぶんの確率（0〜1）。**出せない時間は null**（灰色に描く）。 */
+const trendHoursSchema = z.array(z.number().min(0).max(1).nullable()).length(TREND_HOURS_PER_DAY);
+
+/**
+ * ふだんの傾向の 1 日（JST の暦日。0〜23 時）。
+ *
+ * **`dow_type` は読む側が暦で決めたもの**（祝日は `sun_holiday`）。iOS は曜日の印に使い、
+ * 祝日の印は「`sun_holiday` で日曜でない日」で付けられる。
+ */
+export const trendDaySchema = z.object({
+  date: z.iso.date(),
+  dow_type: z.enum(DOW_TYPES),
+  /** 借りられる確率（0 時〜23 時の 24 個）。 */
+  p_bike: trendHoursSchema,
+  /** 返せる確率。 */
+  p_dock: trendHoursSchema,
+});
+
+/**
+ * ポートの「ふだんの傾向」（W9-05、開発プランの D-47）。**予測ではない。**
+ *
+ * いまの台数を見ない、過去 28 日の統計を校正したもの。来週の水曜も再来週の水曜も同じ数に
+ * なる。**画面では「予測」と書かず、版の日付（`profile_date`）を添える**（W9-06）。
+ * **今日の過ぎた時間も返す**（ヒートマップの形を揃える。iOS が薄く描く）。
+ */
+export const stationTrendSchema = z.object({
+  /** どの日までの 28 日のプロファイルから作ったか（JST の暦日）。 */
+  profile_date: z.iso.date(),
+  /** 今日から `TREND_DAYS` 日。 */
+  days: z.array(trendDaySchema).length(TREND_DAYS),
+});
+
 /**
  * `/v1/stations/{system}/{station_id}` の応答（開発プラン §8.3 の 2 行目、W5 の PR F）。
  *
@@ -422,6 +455,11 @@ export const stationDetailResponseSchema = z.object({
   forecast_curve: forecastCurveSchema.nullable(),
   /** 直近 24 時間の実績（**最大 24 件**。観測の無い時間帯は出さない）。 */
   recent: z.array(recentHourSchema).max(24),
+  /**
+   * ふだんの傾向（今日から 7 日 × 24 時間。**予測ではない**。W9-05）。まだ写していない・
+   * 版が古い（`TREND_MAX_AGE_DAYS`）ポートは null。
+   */
+  trend: stationTrendSchema.nullable(),
   /** **そのポートのシステムだけ**。地図と違い 1 系統しか関係しない。 */
   feeds: z.array(feedStatusSchema),
   attribution_preface: attributionPrefaceSchema,
@@ -457,5 +495,7 @@ export type TripAlternative = z.infer<typeof tripAlternativeSchema>;
 export type TripCheckResponse = z.infer<typeof tripCheckResponseSchema>;
 export type ForecastCurve = z.infer<typeof forecastCurveSchema>;
 export type RecentHour = z.infer<typeof recentHourSchema>;
+export type TrendDay = z.infer<typeof trendDaySchema>;
+export type StationTrend = z.infer<typeof stationTrendSchema>;
 export type StationDetailResponse = z.infer<typeof stationDetailResponseSchema>;
 export type Problem = z.infer<typeof problemSchema>;
