@@ -76,10 +76,14 @@ def _at(minute: int, second: int) -> datetime:
 
 # ── 窓 ────────────────────────────────────────────────────────
 def test_the_slots_sit_between_the_production_cycles() -> None:
-    """**本番はドコモが 60 秒・HELLO が 240 秒から**（`vercel.json` の `1-59/5`・`4-59/5`）。"""
+    """**本番は HELLO が 0 秒・ドコモが 60 秒から**（`vercel.json` の `0-59/5`・`1-59/5`。W9-14）。
+
+    試し打ちはドコモの本番（60 秒から 30 秒ほど）の後に始め、次の周期の HELLO（300 秒）の
+    30 秒前までに窓を閉じる。
+    """
     for offset in dry_run.SLOT_OFFSETS_S.values():
         assert offset >= 60 + 30
-        assert offset + dry_run.SLOT_WINDOW_S + 30 <= 240
+        assert offset + dry_run.SLOT_WINDOW_S + 30 <= dry_run.CYCLE_S
 
 
 @pytest.mark.parametrize(

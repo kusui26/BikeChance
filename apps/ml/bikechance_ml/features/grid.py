@@ -48,7 +48,7 @@ def jst_date(at: datetime) -> date:
 def jst_yesterday(now: datetime) -> date:
     """**JST の昨日。** 日次ジョブが「前日ぶん」を作るときの既定の対象。
 
-    参照スナップショット（05:00 JST）も学習サンプル（06:00 JST）も、**前日ぶん**を
+    参照スナップショット（05:02 JST）も学習サンプル（06:00 JST）も、**前日ぶん**を
     作る。どちらも JST の暦日で切るので、ここで 1 か所にまとめる。
     """
     return jst_date(now) - timedelta(days=1)
