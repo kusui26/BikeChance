@@ -16,9 +16,12 @@ name: LightGBM v1 を当てはめる
 # しない。CLAUDE.md §6）。**このワークフローはリポジトリに書かない**（`permissions: {}`）ので、
 # 記録に出したカードを人がコミットする。登録簿の `card_path` はその場所を指す。
 #
-# **分割は W6-14 の形に固定する**：学習 `days` 日・パージ 1 日・検証 2 日（平日）で、
+# **分割は W6-14 の形**：学習 `days` 日・パージ 1 日・検証 `eval_days` 日（既定 2）で、
 # 窓はちょうど `to_date` で終わる。**`to_date` の学習サンプルが無ければ当てはめない**
 # （検証日が 1 日ずれて、1 日短い v1 が本物の名前で置かれるのを防ぐ。W6 プラン §8.7）。
+# **検証を 2 日より長くするのは測るときだけ**（W9 プランの W9-10：雨の日・週末を含む 1 週で
+# 森を比べ直す）。**置く回・登録する回は 2 日に限る**——門の表は検証日で決まるので、
+# 置く版の門は W6-14 の形のままにする。
 #
 # **定時では走らせない。** `push` / `pull_request` も付けない——秘密を使うワークフローだから
 # である（D-12）。**ファイル名を変えない**（`workflow_dispatch` の登録もファイル単位）。
@@ -34,6 +37,11 @@ on:
         required: false
         type: string
         default: "28"
+      eval_days:
+        description: "検証の日数（to_date から逆に数える。既定 2＝W6-14。W9-10 の測り直しは 7。置く回は 2 だけ）"
+        required: false
+        type: string
+        default: "2"
       candidates:
         description: "候補（本数:学習率 をカンマで並べる。例 50:0.15,100:0.15,300:0.05）"
         required: false
@@ -71,7 +79,7 @@ concurrency:
 
 jobs:
   fit:
-    name: 学習 ${{ inputs.days }} 日（${{ inputs.to_date }} まで）
+    name: 学習 ${{ inputs.days }} 日・検証 ${{ inputs.eval_days }} 日（${{ inputs.to_date }} まで）
     runs-on: ubuntu-latest
     # 学習 8 日・300 本で 26 分（W5 プラン §12 の 168）。28 日・候補 3 つ（450 本）は
     # その数倍を見ておく。**6 時間がジョブの上限**（公開リポジトリ）
@@ -120,14 +128,24 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           TO_DATE: ${{ inputs.to_date }}
           TRAIN_DAYS: ${{ inputs.days }}
+          EVAL_DAYS: ${{ inputs.eval_days }}
           CANDIDATES: ${{ inputs.candidates }}
           CHOOSE: ${{ inputs.choose }}
           LABEL: ${{ inputs.label }}
           UPLOAD: ${{ inputs.upload }}
           REGISTER: ${{ inputs.register }}
         run: |
+          # **検証の日数は正の整数だけ**。置く回・登録する回は 2 日に限る（上の注記）
+          if ! [[ "${EVAL_DAYS}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::eval_days は正の整数で指定してください: ${EVAL_DAYS}"
+            exit 1
+          fi
+          if [ "${EVAL_DAYS}" != "2" ] && { [ "${UPLOAD}" = "true" ] || [ "${REGISTER}" = "true" ]; }; then
+            echo "::error::置く回・登録する回は検証 2 日だけです（W6-14）。測るだけの回は upload と register を外してください"
+            exit 1
+          fi
           args=(
-            --to "${TO_DATE}" --train-days "${TRAIN_DAYS}" --eval-days 2 --purge-days 1
+            --to "${TO_DATE}" --train-days "${TRAIN_DAYS}" --eval-days "${EVAL_DAYS}" --purge-days 1
             --candidates "${CANDIDATES}"
             --report "${RUNNER_TEMP}/fit.md"
             --card "../../docs/model_cards/{version}.md"
@@ -144,7 +162,31 @@ jobs:
           if [ "${REGISTER}" = "true" ]; then
             args+=(--register)
           fi
-          uv run python -m bikechance_ml.jobs.fit_lightgbm "${args[@]}"
+          # **山を記録に出す**（W9-10。検証を延ばすと行列が増え、28 日の当てはめ 12.1〜12.5 GiB が
+          # ランナーの 16 GB の縁に来る）。GNU time が無い機械では、測らずにそのまま走らせる
+          if [ -x /usr/bin/time ]; then
+            /usr/bin/time -v -o "${RUNNER_TEMP}/time.txt" \
+              uv run python -m bikechance_ml.jobs.fit_lightgbm "${args[@]}"
+          else
+            uv run python -m bikechance_ml.jobs.fit_lightgbm "${args[@]}"
+          fi
+
+      # **落ちた回も山を残す**（落ちた理由がメモリかどうかを、記録から読めるように）
+      - name: 当てはめの山を記録と要約に出す
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/time.txt" ]; then
+            kb="$(awk -F': ' '/Maximum resident set size/ {print $2}' "${RUNNER_TEMP}/time.txt")"
+            elapsed="$(awk -F': ' '/Elapsed \(wall clock\)/ {print $2}' "${RUNNER_TEMP}/time.txt")"
+            {
+              echo "### 当てはめの山"
+              echo ''
+              echo "- 最大常駐：${kb} kB（$(awk -v kb="${kb}" 'BEGIN {printf "%.2f", kb / 1048576}') GiB）"
+              echo "- 所要：${elapsed}"
+            } | tee -a "${GITHUB_STEP_SUMMARY}"
+          else
+            echo '（山を測っていない。GNU time が無いか、当てはめの前に止まった）' | tee -a "${GITHUB_STEP_SUMMARY}"
+          fi
 
       # **報告書とカードを要約に畳み、記録にも残す**（measure-fit.yml の作法）。
       # カードは**この回に書かれたもの**だけを出す（チェックアウトに在った古いカードは出さない）。

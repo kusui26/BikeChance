@@ -42,6 +42,8 @@
 
 **`--prune` は古い `profile.parquet` を消す**（D-28 の ③、W8 の PR D）。**35 日より古い日**の
 `profile.parquet` だけを、**1 回に 3 個まで**消す（日付を誤っても、1 回で失うのはそれだけ）。
+**消すのは `profile.parquet` がまだ在ると確かめた日だけ**（W8 の PR H）——日付の階層は
+`daily.parquet` のために残るので、階層の名前だけで決めると消し終えた日で枠を使い切る。
 **`daily.parquet` は消さない**——`profile` は `daily` から作り直せる派生物である（`--from-dailies
 --compare` が本番の 3 日でバイト一致した。2026-09-24）。記録は作る回と別の名前（`prune_profiles`）
 に残す。**`--dry-run` は並べるだけ**で、消さず記録もしない（初めて消す前に一覧を見るため）。
@@ -103,6 +105,13 @@ PRUNE_MAX_PER_RUN: Final[int] = 3
 #: 並ぶので、上限に当たっても切れるのは新しい側で、消す側（古い日）は先に並ぶ。
 PROFILES_LIST_LIMIT: Final[int] = 1000
 
+#: **`profile.parquet` の無い日がこの数だけ続いたら、それより古い日は確かめない**（W8 の PR H）。
+#: 消すのは古い順なので、残っている `profile.parquet` はいつも新しい側に連なる。新しい日から
+#: 確かめて無い日が続けば、その先は消し終えている。**3 にするのは、作れなかった日（穴）が
+#: 1〜2 日あっても、その先に残ったものを見落とさないため**。ふだんの回は「消す 1 日と無い 3 日」の
+#: 4 回の確かめで終わる（消してよい日は 1 日 1 つ増え、日付の階層は `daily.parquet` のために残る）。
+PRUNE_MISSING_STREAK: Final[int] = 3
+
 #: 掃除の `job_runs` の名前。**作る回（`build_profiles`）とは分ける**——掃除の失敗が
 #: 「プロファイルを作れなかった」と混ざらないように。失敗は `job_failed:prune_profiles` で鳴る。
 PRUNE_JOB_NAME: Final[str] = "prune_profiles"
@@ -142,6 +151,12 @@ class ProfilesPort(ReadsStorage, Protocol):
     def upload_parquet(self, path: str, body: bytes) -> None: ...
     def job_started(self, job_name: str) -> int: ...
     def job_finished(self, run_id: int, status: str, detail: Mapping[str, object]) -> None: ...
+
+
+class ListsObjects(Protocol):
+    """Storage の 1 階層を並べる口だけ（有無の確かめ。`profile_exists`）。"""
+
+    def list_objects(self, bucket: str, prefix: str, limit: int) -> tuple[str, ...]: ...
 
 
 class PrunesProfiles(Protocol):
@@ -193,7 +208,7 @@ def profile_bytes(table: pa.Table) -> bytes:
     return bytes(sink.getvalue())
 
 
-def profile_exists(source: ProfilesPort, day: date) -> bool:
+def profile_exists(source: ListsObjects, day: date) -> bool:
     """その日の `profile.parquet` が Storage に在るか。**一覧で確かめる**（`list_objects`）。"""
     folder, _, name = profile_path(day, profile.PROFILE_NAME).rpartition("/")
     return name in source.list_objects(PARQUET_BUCKET, f"{folder}/", EXISTS_LIST_LIMIT)
@@ -333,10 +348,13 @@ def compare_with_stored(source: ReadsStorage, day: date, summed: Summed) -> dict
 # ── 古い `profile.parquet` を消す（D-28 の ③。W8 の PR D）──────────
 @dataclass(frozen=True)
 class Pruned:
-    """1 回の掃除の結果。**消してよい日（全部）・この回に消す名前・実際に消えた名前**を分ける。"""
+    """1 回の掃除の結果。**まだ在る日・この回に消す名前・実際に消えた名前**を分ける。"""
 
     day: date
-    due: tuple[date, ...]
+    #: 消してよい日のうち、`profile.parquet` がまだ在った日（古い順）
+    found: tuple[date, ...]
+    #: 有無を確かめた日の数（新しい日から。`PRUNE_MISSING_STREAK` で打ち切る）
+    checked: int
     targets: tuple[str, ...]
     removed: tuple[str, ...]
 
@@ -345,9 +363,10 @@ class Pruned:
         return {
             "date": self.day.isoformat(),
             "cutoff": prune_cutoff(self.day).isoformat(),
-            "due": [one.isoformat() for one in self.due],
+            "checked": self.checked,
+            "found": [one.isoformat() for one in self.found],
             "removed": list(self.removed),
-            "pending": len(self.due) - len(self.targets),
+            "pending": len(self.found) - len(self.targets),
         }
 
 
@@ -374,19 +393,40 @@ def days_to_prune(folders: Sequence[str], day: date) -> tuple[date, ...]:
     return tuple(sorted(found))
 
 
+def find_profiles(source: ListsObjects, due: Sequence[date]) -> tuple[tuple[date, ...], int]:
+    """消してよい日のうち、**`profile.parquet` がまだ在る日**（古い順）と、確かめた日の数。
+
+    **日付の階層の名前だけでは決めない**（W8 の PR H）。階層は `daily.parquet` のために残るので、
+    消し終えた日も一覧に出る——それで決めると、1 回の枠を消し終えた日に使い切り、何も消えない
+    （10/28 の定時の回がそうだった）。**新しい日から確かめ、無い日が `PRUNE_MISSING_STREAK` 日
+    続いたら打ち切る**（その先は消し終えている）。
+    """
+    found: list[date] = []
+    missing_streak = 0
+    checked = 0
+    for one in reversed(due):
+        if missing_streak >= PRUNE_MISSING_STREAK:
+            break
+        checked += 1
+        present = profile_exists(source, one)
+        found += [one] if present else []
+        missing_streak = 0 if present else missing_streak + 1
+    return tuple(sorted(found)), checked
+
+
 def prune_profiles(
     source: PrunesProfiles, day: date, *, limit: int = PRUNE_MAX_PER_RUN, dry_run: bool = False
 ) -> Pruned:
     """古い `profile.parquet` を**古い順に `limit` 個まで**消す。**`daily.parquet` には触らない。**
 
     消す名前は日付から組み立てる（`profile_path`）——一覧に出た名前をそのまま消さないので、
-    `daily.parquet` や形の違う名前が紛れ込む道が無い。
+    `daily.parquet` や形の違う名前が紛れ込む道が無い。**消すのはまだ在ると確かめた日だけ。**
     """
     folders = source.list_objects(PARQUET_BUCKET, PROFILES_PREFIX, PROFILES_LIST_LIMIT)
-    due = days_to_prune(folders, day)
-    targets = tuple(profile_path(one, profile.PROFILE_NAME) for one in due[:limit])
+    found, checked = find_profiles(source, days_to_prune(folders, day))
+    targets = tuple(profile_path(one, profile.PROFILE_NAME) for one in found[:limit])
     removed = () if dry_run or not targets else source.remove_objects(PARQUET_BUCKET, targets)
-    return Pruned(day=day, due=due, targets=targets, removed=removed)
+    return Pruned(day=day, found=found, checked=checked, targets=targets, removed=removed)
 
 
 def prune_and_record(source: PrunesProfiles, day: date, limit: int) -> Pruned:
