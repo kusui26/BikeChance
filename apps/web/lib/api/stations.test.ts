@@ -118,6 +118,8 @@ const fakePort = (options: PortOptions = {}) => {
     listNeighbors: async () => [],
     findStation: async () => null,
     listRecentHours: async () => [],
+    findTrend: async () => null,
+    listHolidays: async () => [],
   };
   return { port, calls, cellCalls };
 };

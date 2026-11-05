@@ -3,11 +3,13 @@
  *
  * **`/v1/stations` と同じ部品を通る。** ポートの写し方は `station-row.ts`、鮮度の規則は
  * `@bikechance/shared` の `freshness.ts` にある。ここが持つのは**この経路だけの判断**で、
- * それは 3 つしかない。
+ * それは 4 つしかない。
  *
  *   1. **経路の系統と ID を検証してから DB に触る**（誤りは常に 400 で返す）
  *   2. **知らないポートは 404**。`ok: false` で返し、例外にしない
  *   3. **直近 24 時間は「読む側が切る」**——ビューは 26 時間持っている（0046）
+ *   4. **ふだんの傾向（7 日 × 24 時間）は「読む側が暦で組む」**——表は 72 個だけ（0059、
+ *      D-47。組み方は `station-trend.ts`）
  *
  * **`at` を受けない。** 曲線を返すので到着時刻が要らず、受けると同じポートの URL が
  * 5 分ごとに割れて CDN が効かない（W5 プラン §6.6）。
@@ -24,8 +26,9 @@ import {
   type SystemId,
 } from "@bikechance/shared";
 import type { ProblemCode } from "./problem";
-import type { FeedRow, HourlyRow, ReadPort, StationRow } from "./read-port";
+import type { FeedRow, HourlyRow, ReadPort, StationRow, TrendRow } from "./read-port";
 import { hasLocation, toForecastCurve, toRecentHours, toStation } from "./station-row";
+import { toStationTrend, trendWindow } from "./station-trend";
 
 /** 直近の実績を返す幅。**ビューは 26 時間持っている**ので、切るのはここ（W4-26 と同じ方針）。 */
 export const RECENT_HOURS = 24;
@@ -66,6 +69,10 @@ export const buildStationDetailResponse = (params: {
   readonly row: StationRow;
   readonly feed: FeedRow;
   readonly recent: readonly HourlyRow[];
+  /** まだ写していないポートは null。 */
+  readonly trend: TrendRow | null;
+  /** 傾向の 7 日のうちの祝日（JST の暦日）。 */
+  readonly holidays: readonly string[];
   readonly now: Date;
 }): StationDetailResponse | null => {
   // **座標の無いポートは詳細も返さない。** `StationCurrent` は座標を必須にしており、
@@ -82,6 +89,11 @@ export const buildStationDetailResponse = (params: {
     station: toStation(params.row, params.row.is_present ? feed.data_updated_at : null, null),
     forecast_curve: toForecastCurve(params.row, params.now),
     recent: toRecentHours(params.recent),
+    trend: toStationTrend({
+      row: params.trend,
+      holidays: new Set(params.holidays),
+      now: params.now,
+    }),
     // **そのポートのシステムだけ。** 地図と違い 1 系統しか関係しない
     feeds: [feed],
     attribution_preface: CREDIT_PREFACE,
@@ -111,10 +123,13 @@ export const queryStationDetail = async (params: {
   try {
     const port = params.makePort();
     const since = new Date(params.now.getTime() - RECENT_HOURS * MS_PER_HOUR);
-    const [feeds, row, recent] = await Promise.all([
+    // **5 つを同時に投げる。** どれも 1 ポートか数行で、待ち時間を足し合わせない
+    const [feeds, row, recent, trend, holidays] = await Promise.all([
       port.listFeeds(),
       port.findStation({ system_id, station_id: params.station_id }),
       port.listRecentHours({ system_id, station_id: params.station_id, since }),
+      port.findTrend({ system_id, station_id: params.station_id }),
+      port.listHolidays(trendWindow(params.now)),
     ]);
     const feed = feeds.find((one) => one.system_id === system_id);
     // **フィードが無いのは「そのシステムが停止中」**（`v1_feeds` は停止中を出さない）。
@@ -122,7 +137,14 @@ export const queryStationDetail = async (params: {
     if (row === null || feed === undefined) {
       return failure("station_not_found", 404, "そのポートは見つかりません。");
     }
-    const response = buildStationDetailResponse({ row, feed, recent, now: params.now });
+    const response = buildStationDetailResponse({
+      row,
+      feed,
+      recent,
+      trend,
+      holidays,
+      now: params.now,
+    });
     return response === null
       ? failure("station_not_found", 404, "そのポートは見つかりません。")
       : { ok: true, response };

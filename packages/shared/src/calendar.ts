@@ -39,6 +39,20 @@ export type DayType = (typeof DAY_TYPES)[number];
 export const DOW_TYPES = ["weekday", "sat", "sun_holiday"] as const;
 export type DowType = (typeof DOW_TYPES)[number];
 
+/**
+ * 曜日種別を**番号で持つときの並び**。**`DOW_TYPES` の並びではない。**
+ *
+ * Python の `features/calendar.py` の `DOW_TYPE_ORDER`（`sorted()` を通した並び）と同じ。
+ * ふだんの傾向の 72 個（`station_trend`。D-47）は**この並び × 0〜23 時**で、添字は
+ * 「この並びの番号 × 24 ＋ 時」。**ずれても例外は出ず、別の曜日の確率が出る**ので、
+ * 2 つの言語で同じフィクスチャ（`fixtures/trend/layout_golden.json`）に突き合わせる。
+ */
+export const DOW_TYPE_ORDER = [
+  "sat",
+  "sun_holiday",
+  "weekday",
+] as const satisfies readonly DowType[];
+
 const MS_PER_DAY = 86_400_000;
 const JST_OFFSET_MS = 9 * 3_600_000;
 
