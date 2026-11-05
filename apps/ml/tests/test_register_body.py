@@ -96,8 +96,8 @@ def test_the_facts_count_the_same_pairs_as_the_report() -> None:
 
 def test_the_briers_are_rounded_like_the_report_table() -> None:
     keys = {f"{one.slice.system}/{one.slice.target}" for one in harness_test.OUTCOME.overall}
-    assert set(FACTS.brier_b3) == keys == set(FACTS.brier_b1)
-    for value in (*FACTS.brier_b3.values(), *FACTS.brier_b1.values()):
+    assert set(FACTS.brier_b3) == keys == set(FACTS.brier_b1) == set(FACTS.brier_b0)
+    for value in (*FACTS.brier_b3.values(), *FACTS.brier_b1.values(), *FACTS.brier_b0.values()):
         assert value == round(value, register_body.BRIER_DIGITS)
 
 
@@ -122,6 +122,6 @@ def test_the_worst_pair_is_the_largest_excess() -> None:
         register_body.Behind("hellocycling", "dock", 30, 0.0596),
         register_body.Behind("docomo-cycle", "bike", 10, 0.0524),
     )
-    facts = register_body.EvalFacts(VALIDATION, "分割", 1, {}, {}, behind, 40)
+    facts = register_body.EvalFacts(VALIDATION, "分割", 1, {}, {}, {}, behind, 40)
     assert facts.worst == behind[0]
     assert facts.worst.describe() == "hellocycling の dock の 30 分（+5.96%）"
