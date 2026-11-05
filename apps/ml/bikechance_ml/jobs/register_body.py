@@ -59,6 +59,9 @@ class EvalFacts:
     n_eval: int
     brier_b3: Mapping[str, float]
     brier_b1: Mapping[str, float]
+    #: BSS の基準（B0。`harness.BASELINE_MODELS` の先頭）。**記録の評価の表だけが読む**——
+    #: 登録の `metrics` には入れない（#5 と同じ形を変えない。W9-13）
+    brier_b0: Mapping[str, float]
     behind: tuple[Behind, ...]
     pairs: int
 
@@ -75,6 +78,7 @@ def eval_facts(outcome: Outcome, validation: date) -> EvalFacts:
         n_eval=outcome.n_eval,
         brier_b3=_briers(outcome.overall, "B3"),
         brier_b1=_briers(outcome.overall, "B1"),
+        brier_b0=_briers(outcome.overall, "B0"),
         behind=tuple(_behind(one) for one in outcome.by_horizon if _is_behind(one)),
         pairs=len(outcome.by_horizon),
     )

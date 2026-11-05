@@ -15,6 +15,12 @@ name: 当てはめ直し（月曜の朝。B3 だけ）
 # 09:08 に始まった）。10:30 は W7 の最遅（09:03）より後で、それでも遅れたら門が待つ。
 # `schedule` そのものも遅れる（W6 プランの所見 203）が、門は日付で待つので順序は崩れない。
 #
+# **定時の回は 1 日 1 度だけ**（W9-13、W9 プランの所見 237）。定時は何時間も遅れて来る・来ない
+# ことがあり（11/2 は 6 時間 39 分遅れ）、来なければ手で起こす。**手で済ませた後に遅れた定時の回が
+# 来ても、その日（最終学習日）の `weekly_refit` の `ok` が在れば何もしない**（`--skip-if-done`。
+# `job_runs` に行を作らず、記録の PR も開かない）。`concurrency` は待たせるだけで取り消さないので、
+# これが無いと、昇格の前の候補を置き直して人が読んだ記録と実物が食い違う。
+#
 # **手で起こす回は既定で試しの形**（置かず・登録せず・`job_runs` にも残さず・PR も開かない）。
 # 試し打ちは今の shadow で叩く（候補は登録していないので本番の口で引けない）。定時の回を手で
 # やり直すときだけ `trial` を外す。
@@ -87,12 +93,15 @@ jobs:
       #
       # `TRIAL` は**定時の回では必ず false**。手で起こした回は入力のまま（既定 true）
       - name: 当てはめ直す
+        id: refit
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           TO_DATE: ${{ inputs.to_date }}
           TRIAL: ${{ github.event_name == 'workflow_dispatch' && inputs.trial }}
+          # **定時の回だけ**、その日の `ok` が在れば何もしない（W9-13）。手で起こす回はやり直せる
+          SKIP_IF_DONE: ${{ github.event_name == 'schedule' }}
           ORIGIN: https://bike-chance.vercel.app
         run: |
           args=(--out "${RUNNER_TEMP}/refit" --origin "${ORIGIN}")
@@ -102,7 +111,14 @@ jobs:
           if [ "${TRIAL}" = "true" ]; then
             args+=(--trial)
           fi
+          if [ "${SKIP_IF_DONE}" = "true" ]; then
+            args+=(--skip-if-done)
+          fi
           uv run python -m bikechance_ml.jobs.weekly_refit "${args[@]}"
+          # 何もしなかった回は印を書く（`weekly_refit.SKIPPED_NAME`）→ 記録の PR の段を飛ばす
+          if [ -f "${RUNNER_TEMP}/refit/skipped.json" ]; then
+            echo "skipped=true" >> "${GITHUB_OUTPUT}"
+          fi
 
       # **要約欄だけに書かない**（`GITHUB_STEP_SUMMARY` は API から取れない）。ログにも流す。
       # **記録・昇格の SQL・モデルカードの 3 つを出す**——次の段（PR を開く）で落ちても、
@@ -111,6 +127,11 @@ jobs:
         if: always()
         run: |
           out="${RUNNER_TEMP}/refit"
+          if [ -f "${out}/skipped.json" ]; then
+            echo "その日の当てはめ直しは済んでいたので、何もしていません（job_runs の weekly_refit に ok。W9-13）" \
+              | tee -a "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
           if [ ! -f "${out}/record.md" ]; then
             echo "記録はありません（途中で止まりました。job_runs の weekly_refit の detail.phase を見てください）"
             exit 0
@@ -125,7 +146,7 @@ jobs:
       # `inputs` が空で、GitHub の式は `null == false` を真にする（緩い比較）
       - name: 記録の PR を開く
         if: >-
-          success() && (github.event_name == 'schedule'
+          success() && steps.refit.outputs.skipped != 'true' && (github.event_name == 'schedule'
           || (github.event_name == 'workflow_dispatch' && !inputs.trial))
         working-directory: .
         env:

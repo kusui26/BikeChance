@@ -232,16 +232,24 @@ def _evaluation_block(evaluations: Sequence[EvalFacts]) -> str:
 
 
 def _brier_rows(facts: EvalFacts) -> list[str]:
+    """重み付き Brier と **B3 の BSS**（B0 からの改善）。昇格の目安「+10% 前後」はここで読む
+    （W9-13）。"""
     rows = [
-        f"重み付き Brier（検証 {facts.validation}）：",
+        f"重み付き Brier と B3 の BSS（検証 {facts.validation}。BSS は B0 からの改善）：",
         "",
-        "| 系統/ターゲット | B1 | B3 |",
-        "|---|---:|---:|",
+        "| 系統/ターゲット | B0 | B1 | B3 | B3 の BSS |",
+        "|---|---:|---:|---:|---:|",
     ]
     return rows + [
-        f"| {key} | {facts.brier_b1[key]:.5f} | {facts.brier_b3[key]:.5f} |"
+        f"| {key} | {facts.brier_b0[key]:.5f} | {facts.brier_b1[key]:.5f} "
+        f"| {facts.brier_b3[key]:.5f} | {_bss(facts.brier_b3[key], facts.brier_b0[key])} |"
         for key in sorted(facts.brier_b3)
     ]
+
+
+def _bss(brier: float, reference: float) -> str:
+    """`1 − Brier / 基準`。**基準の Brier が 0 なら比は書けない**（完全に当てた切り口）。"""
+    return "—" if reference == 0 else f"{1 - brier / reference:+.1%}"
 
 
 def _drop_block(drops: drop_cells.DropDecision) -> str:

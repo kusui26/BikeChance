@@ -14,7 +14,7 @@
 
 ## 昇格（W8-04。人が確認してから）
 
-1. PR の記録を読む。目安は #5（W8 プラン §8 の 10/26）：点検が合格、評価の BSS が +10% 前後、森が悪いセルが少ない、試し打ちの `rss_mb` が 1.6 GB 未満
+1. PR の記録を読む。目安は #5（W8 プラン §8 の 10/26）：点検が合格、評価の BSS が +10% 前後（記録の §3 の表の「B3 の BSS」。B0 からの改善）、森が悪いセルが少ない、試し打ちの `rss_mb` が 1.6 GB 未満
 2. **確認を取ってから**、推論の合間（毎 5 分の 2〜3 分。ドコモは 1 分・HELLO は 4 分に始まる）に昇格の SQL を流す：
 
    ```sh
@@ -29,10 +29,16 @@
 
 ## 止まったとき（W8-05）
 
-`job_runs` の `weekly_refit` に `failed` と `detail.phase`（止まった段）が残り、`monitor_jobs` の `job_failed:weekly_refit` が鳴る。段は `gate`・`fit_b3`・`verify`・`inspect_b3`・`evaluate`・`register_b3`・`serving`・`drop`・`compose`・`inspect_composite`・`dry_run`・`record`。
+`job_runs` の `weekly_refit` に `failed` と `detail.phase`（止まった段）が残り、`monitor_jobs` の `job_failed:weekly_refit` が鳴る。段は `done`（定時の回が、その日の `ok` を引けなかった）・`gate`・`fit_b3`・`verify`・`inspect_b3`・`evaluate`・`register_b3`・`serving`・`drop`・`compose`・`inspect_composite`・`dry_run`・`record`。
 
 - **`gate`**：日次の枠が 3 時間待っても揃わなかった（`detail.missing`）。揃ってから手で起こす（`trial` を外す）。**門で待つ間は行を作らない**——諦めた時刻に行を作るので、見張りの「直近 3 時間の失敗」に入る
 - **それより後**：記録（ワークフローの要約）と `detail.error` を読み、直してから手で起こす。B3 と合成器は candidate なので、同じ日の名前で置き直せる（active・shadow の名前は置けない。契約 38）
+
+## 定時が来ないとき・遅れて来たとき（W9-13、W9 プランの所見 237）
+
+GitHub の定時は何時間も遅れ、来ないこともある（11/2 は 15:00 までに来ず、6 時間 39 分遅れて 17:09 に来た）。**15:00 になっても起動していなければ、確認を取ってから手で起こす**（`trial` を外し、`to_date` に最終学習日）。
+
+**後から来た定時の回は、その日（最終学習日）の `weekly_refit` の `ok` が `job_runs` に在れば何もしない**（`--skip-if-done`。行を作らず、記録の PR も開かず、要約に「済んでいた」と出る）。手で起こす回は付けないので、失敗の後のやり直しはできる。**`ok` を引けなかったときは進まない**（`done` の段で `failed`）——済んだかどうか分からないまま、昇格の前の候補を置き直さない。
 
 ## 試しの形（手で起こしたときの既定）
 
