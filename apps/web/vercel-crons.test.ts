@@ -13,6 +13,7 @@ import {
   ARCHIVE_WEATHER_CRON,
   COMPACT_CRON,
   INFER_CRON,
+  LOAD_WEATHER_CRON,
   ML_MAX_DURATION_S,
   REFERENCE_CRON,
   SYNC_STATIONS_CRON,
@@ -26,6 +27,10 @@ const WEATHER_PATH = "/api/jobs/archive-weather";
 const COMPACT_PATH = "/ml/compact";
 const INFER_PATH_PREFIX = "/ml/infer/";
 const REFERENCE_PATH = "/ml/reference";
+const LOAD_WEATHER_PATH = "/ml/weather";
+const MINUTES_PER_HOUR = 60;
+/** 推論の格子（分）。`jobs/infer.py` の `GRID_MINUTES` と同じ。 */
+const GRID_MINUTES = 5;
 
 type CronEntry = {
   readonly path: string;
@@ -58,6 +63,58 @@ const readCrons = (prefix: string): readonly CronEntry[] => {
 };
 
 const readCollectCrons = (): readonly CronEntry[] => readCrons(COLLECT_PATH_PREFIX);
+
+/** `a-b`・`a`・`*` を [下端, 上端] にする。**`a/n` は `a-59/n` と同じ**（Cron の慣わし）。 */
+const minuteRange = (range: string, stepped: boolean): readonly [number, number] => {
+  if (range === "*") return [0, MINUTES_PER_HOUR - 1];
+  const [low, high] = range.split("-").map(Number);
+  if (low === undefined || Number.isNaN(low)) {
+    throw new Error(`分のフィールドを読めません: ${range}`);
+  }
+  return [low, high ?? (stepped ? MINUTES_PER_HOUR - 1 : low)];
+};
+
+/**
+ * Cron 式の分のフィールドを、**その時に走る分の集合**にする（`*`・`*\/n`・`a-b/n`・`a`・`a,b`）。
+ * **式の文字列どうしを比べない**——`0-59/5` と `25` は違う文字列だが、毎時 25 分に重なる。
+ */
+const minutesOf = (schedule: string): ReadonlySet<number> => {
+  const field = schedule.split(" ")[0] ?? "";
+  const minutes = field.split(",").flatMap((part) => {
+    const [range = "", step_text] = part.split("/");
+    const step = step_text === undefined ? 1 : Number(step_text);
+    const [low, high] = minuteRange(range, step_text !== undefined);
+    return Array.from({ length: Math.floor((high - low) / step) + 1 }, (_, i) => low + i * step);
+  });
+  return new Set(minutes);
+};
+
+const overlaps = (a: ReadonlySet<number>, b: ReadonlySet<number>): boolean =>
+  [...a].some((minute) => b.has(minute));
+
+const minutesOfPath = (path: string): ReadonlySet<number> =>
+  minutesOf(readCrons(path)[0]?.schedule ?? "");
+
+const inferMinutes = (): readonly ReadonlySet<number>[] =>
+  readCrons(INFER_PATH_PREFIX).map((cron) => minutesOf(cron.schedule));
+
+describe("分の集合の読み方（下の検査が使う）", () => {
+  it("刻み・範囲・単独の分を開く", () => {
+    expect([...minutesOf("4-59/5 * * * *")]).toEqual([
+      4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59,
+    ]);
+    expect([...minutesOf("*/5 * * * *")]).toEqual([0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]);
+    expect([...minutesOf("0-59/5 * * * *")]).toEqual([...minutesOf("*/5 * * * *")]);
+    expect([...minutesOf("17 * * * *")]).toEqual([17]);
+    expect([...minutesOf("2 20 * * *")]).toEqual([2]);
+    expect([...minutesOf("7,37 * * * *")]).toEqual([7, 37]);
+  });
+
+  it("**文字列が違っても同じ分は重なりとして数える**", () => {
+    expect(overlaps(minutesOf("0-59/5 * * * *"), minutesOf("25 * * * *"))).toBe(true);
+    expect(overlaps(minutesOf("1-59/5 * * * *"), minutesOf("28 * * * *"))).toBe(false);
+  });
+});
 
 describe("vercel.json の収集 Cron", () => {
   it("システムごとにちょうど 1 本ある", () => {
@@ -173,27 +230,57 @@ describe("vercel.json の推論 Cron", () => {
   });
 
   it("2 系統が同じ分に重ならない", () => {
-    // HELLO は `4-59/5`、ドコモは `1-59/5` で 3 分ずれる。同じ分に置くと、
-    // 2 万行の UPSERT が Vercel の同時実行と DB の書き込みで重なる
-    const minutes = readCrons(INFER_PATH_PREFIX).map((cron) => cron.schedule.split(" ")[0]);
-    expect(new Set(minutes).size).toBe(minutes.length);
+    // HELLO は `0-59/5`、ドコモは `1-59/5` で 1 分ずれる。同じ分に置くと、
+    // 2 万行の UPSERT が Vercel の同時実行と DB の書き込みで重なる（**分の集合で比べる**）
+    const [first, ...rest] = inferMinutes();
+    for (const other of rest) {
+      expect(first && overlaps(first, other)).toBe(false);
+    }
   });
 
-  it("フィードの公開周期と位相が合っている", () => {
-    // HELLO は :01:34 から 5 分周期で、収集は :03:59 までに終わる。:04 なら
-    // 常に最新スナップショットの 1〜2 分後になる（開発プラン §8.1）
-    expect(INFER_CRON.hellocycling).toBe("4-59/5 * * * *");
+  it("**格子の直後に走る**（5 分毎・格子から 1 分以内に起動）", () => {
+    // 推論は基準時刻を 5 分の格子に切り下げ、格子の時刻までに取り込んだ観測だけを使う。
+    // 遅れて走るほど同じ予測を遅れて配る。2026-11-03 まで HELLO は `4-59/5` で、
+    // 毎周期 1 つ前（5 分前）の観測で予測していた（W9 プランの所見 239・W9-14）
+    for (const minutes of inferMinutes()) {
+      expect(minutes.size).toBe(MINUTES_PER_HOUR / GRID_MINUTES);
+      expect([...minutes].every((minute) => minute % GRID_MINUTES <= 1)).toBe(true);
+    }
+    expect(INFER_CRON.hellocycling).toBe("0-59/5 * * * *");
     expect(INFER_CRON["docomo-cycle"]).toBe("1-59/5 * * * *");
   });
 
   it("毎時のジョブと分が重ならない", () => {
-    const minutes = readCrons(INFER_PATH_PREFIX).map((cron) => cron.schedule.split(" ")[0]);
-    const busy = [
-      readCrons(WEATHER_PATH)[0]?.schedule.split(" ")[0],
-      readCrons(COMPACT_PATH)[0]?.schedule.split(" ")[0],
-    ];
-    for (const minute of minutes) {
-      expect(busy).not.toContain(minute);
+    const busy = [WEATHER_PATH, COMPACT_PATH, LOAD_WEATHER_PATH].map(minutesOfPath);
+    for (const minutes of inferMinutes()) {
+      for (const job of busy) {
+        expect(overlaps(minutes, job)).toBe(false);
+      }
+    }
+  });
+});
+
+describe("vercel.json の天気の取り込み Cron", () => {
+  it("ちょうど 1 本ある", () => {
+    expect(readCrons(LOAD_WEATHER_PATH)).toHaveLength(1);
+  });
+
+  it("スケジュールが共有定数と一致する", () => {
+    expect(readCrons(LOAD_WEATHER_PATH)[0]?.schedule).toBe(LOAD_WEATHER_CRON);
+  });
+
+  it("アーカイブ（毎時 17 分）の後に走る", () => {
+    // 取り込むのはアーカイブが置いた発行。同じ時の中で後ろに置く
+    const [archive] = [...minutesOfPath(WEATHER_PATH)];
+    const [load] = [...minutesOfPath(LOAD_WEATHER_PATH)];
+    expect(load).toBeGreaterThan(archive ?? MINUTES_PER_HOUR);
+  });
+
+  it("推論と Parquet 化と分が重ならない", () => {
+    // ML の仕事は同じインスタンスで重なると rss_mb が跳ねる（W6 プランの所見 212）
+    const load = minutesOfPath(LOAD_WEATHER_PATH);
+    for (const minutes of [...inferMinutes(), minutesOfPath(COMPACT_PATH)]) {
+      expect(overlaps(load, minutes)).toBe(false);
     }
   });
 });
@@ -213,10 +300,14 @@ describe("vercel.json の参照スナップショット Cron", () => {
     expect(Number(hour) * 60 + Number(minute)).toBeGreaterThan(19 * 60 + 30);
   });
 
-  it("毎時のジョブと分が重ならない", () => {
-    const minute = readCrons(REFERENCE_PATH)[0]?.schedule.split(" ")[0];
-    expect(minute).not.toBe(readCrons(WEATHER_PATH)[0]?.schedule.split(" ")[0]);
-    expect(minute).not.toBe(readCrons(COMPACT_PATH)[0]?.schedule.split(" ")[0]);
+  it("毎時のジョブと推論と分が重ならない", () => {
+    // 日に 1 回でも、HELLO の推論（0 分起点）と同じ分に置くとインスタンスで重なりうる。
+    // 2026-11-03 に 05:00 から 05:02 JST に移した（W9-14）
+    const reference = minutesOfPath(REFERENCE_PATH);
+    const busy = [WEATHER_PATH, COMPACT_PATH, LOAD_WEATHER_PATH].map(minutesOfPath);
+    for (const minutes of [...busy, ...inferMinutes()]) {
+      expect(overlaps(reference, minutes)).toBe(false);
+    }
   });
 
   it("属性同期（04:00 JST）と同じ時刻に重ならない", () => {

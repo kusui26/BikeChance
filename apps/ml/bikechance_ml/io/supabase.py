@@ -14,7 +14,7 @@ import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Final
 
 import httpx
@@ -68,6 +68,11 @@ NEIGHBOR_PAGE_SIZE: Final[int] = 10_000
 
 #: スナップショットの 1 ページ。1 行が 5,800〜14,900 要素の配列 4 本なので小さく刻む。
 SNAPSHOT_PAGE_SIZE: Final[int] = 24
+
+#: 基準の観測（`read_base_observed_at`）を遡る幅。**鮮度の判定ではない**（それは推論の
+#: `MAX_STALENESS_S`）。月のパーティションを遡り続けないための区切りで、上流が 1 日より
+#: 長く止まれば基準が無いとして飛ばす（止まっている間は新しい観測が無いので、どのみち飛ばす）。
+BASE_LOOKBACK: Final[timedelta] = timedelta(days=1)
 
 #: 予報の 1 ページ。1 行は 8 要素の配列 3 本なので、台帳と同じくらいの大きさで刻める。
 WEATHER_PAGE_SIZE: Final[int] = 5_000
@@ -335,17 +340,35 @@ class SupabaseIo:
         )
 
     # ── 推論（W3 プラン §5.10）────────────────────────────────
-    def read_base_observed_at(self, system_id: str) -> datetime | None:
-        """そのシステムの最新の観測時刻。**予測の基準**になる。"""
+    def read_base_observed_at(self, system_id: str, at: datetime) -> datetime | None:
+        """**格子の時刻 `at` までに取り込んだ最新の観測**の時刻。**予測の基準**になる。
+
+        特徴量の as-of（`features/asof.py`：`fetched_at <= t` の中で `observed_at` が最大）と
+        同じ規則。**`feed_state.last_observed_at`（いまの最新）ではない**——推論は格子に
+        切り下げた時刻までの観測しか使わないので、その後に取り込んだ観測を基準と書くと、
+        画面の「時点」と鮮度の切りが、使っていない観測を指す（W9 プランの所見 239）。
+
+        遡るのは `BASE_LOOKBACK` まで（月のパーティションを遡り続けない）。それより前に
+        しか観測が無ければ None で、推論は行を作らずに飛ばす。
+        """
         rows = self._rows(
-            "/rest/v1/feed_state",
-            {"select": "last_observed_at", "system_id": f"eq.{system_id}"},
-            "feed_state",
+            "/rest/v1/status_snapshots",
+            {
+                "select": "observed_at",
+                "system_id": f"eq.{system_id}",
+                # 2 つの列の条件を `and` にまとめる（`list_snapshots` と同じ書き方）
+                "and": (
+                    f"(fetched_at.lte.{_iso_z(at)},observed_at.gte.{_iso_z(at - BASE_LOOKBACK)})"
+                ),
+                "order": "observed_at.desc",
+                "limit": "1",
+            },
+            "status_snapshots",
         )
         if not rows:
             return None
-        value = as_dict(rows[0], "feed_state").get("last_observed_at")
-        return None if value is None else _to_datetime(as_str(value, "last_observed_at"))
+        value = as_dict(rows[0], "status_snapshots").get("observed_at")
+        return None if value is None else _to_datetime(as_str(value, "observed_at"))
 
     def list_station_status(self, system_id: str) -> tuple[StationStatusRow, ...]:
         """最新状態（1 ポート 1 行）。**`-1` は「一度も観測されていない」。**"""
