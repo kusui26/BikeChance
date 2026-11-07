@@ -1,22 +1,24 @@
-"""門を当てて「配る形」を測る（W6 の PR F、W6-09・W6-13、契約 35・37）。
+"""門を当てて「配る形」を測る（W6 の PR F、W6-09・W6-13、契約 35・37。D-33）。
 
-**v1 は LightGBM 単体では配らない。** セルごとに、LightGBM が門の相手（本番と同じ作り方の
-B3。W6-10）を **10% 以上**改善したところだけ LightGBM を、他は B3 を配る（開発プラン §7.1、
-W3-16）。この「配る形」の Brier が、v1 の本当の成績である。
+**v1 は LightGBM 単体では配らない。** 水平（system × ターゲット × 水平）ごとに、LightGBM が
+門の相手（本番と同じ作り方の B3。W6-10）を **10% 以上**改善した水平だけ LightGBM を、他は
+B3 を配る（開発プラン §7.1、D-33）。**ただし門を越えた水平の中でも、LightGBM が B3 より悪い
+セル（台数バケツ。判定の対象のもの）は B3**——総合の Brier は自明な行（3 台以上）に支配され、
+残り 0〜2 台で負けても水平では門を越えうるので、§7.1 の「判定はバケツ別」の趣旨を例外で残す。
+この「配る形」の Brier が、v1 の本当の成績である。
 
-**単位は 3 つ並べる**（M4 の文書 §1.4 ③。W6-09 で「水平単位にするかは本番の窓で比べて
-から諮る」と決めた）。
+**単位は 3 つ並べる**（M4 の文書 §1.4 ③）。配るのは `SERVED_GATE`。
 
   * 門なし … 全部 LightGBM（**上限の見当**。配らない形）
-  * 水平単位 … system × ターゲット × 水平
-  * **セル単位** … × 台数バケツ（**§7.1 の規則。配るのはこれ**）
+  * **水平単位** … system × ターゲット × 水平、と上の例外（**D-33。配るのはこれ**）
+  * セル単位 … × 台数バケツ（**W9 まで配っていた形**。比べるために並べる）
 
 **選んだ日で測ると良く見える。** 門を選んだ行と同じ行で配る形を測ると、たまたま良かった
 セルを拾ったぶんだけ甘くなる。だから「**1 日目で選び、残りの日で測る**」も並べる（W6-14）。
 
 **森を歩く行の割合は費用で重み付ける。** 森の費用は行 × 木 × 1 行 1 木の秒で、1 行 1 木の
-秒はドコモのほうが 1.35 倍高い（M4 の文書 §1.3）。**台数の多いバケツは短い水平で判定の
-対象外になり B3 に回る**ので、セル単位の門は規則を足さずに森を歩く行を減らす。
+秒はドコモのほうが 1.35 倍高い（M4 の文書 §1.3）。水平単位は、10% に届かないが森の方が良い
+セルも森で配るので、セル単位より森を歩く行が多い（W9 の 7 日で約 1.38 倍）。
 
 **ここは純粋である。** 読むのは検証の行（`Samples`）と、行ごとの確率だけ。
 """
@@ -48,10 +50,20 @@ NO_GATE: Final[str] = "none"
 HORIZON_GATE: Final[str] = "horizon"
 CELL_GATE: Final[str] = "cell"
 UNITS: Final[tuple[str, ...]] = (NO_GATE, HORIZON_GATE, CELL_GATE)
+#: **配る単位**（D-33。2026-11-06 にセル単位から直した）。門の表はこの単位で組み、候補の比べと
+#: 意思決定の指標・カードの「配る形」もこの単位で測る。
+SERVED_GATE: Final[str] = HORIZON_GATE
+#: 単位の短い名前（**見出しと文に使う**）。表の欄には `UNIT_LABELS` を使う。
+UNIT_NAMES: Final[Mapping[str, str]] = {
+    NO_GATE: "門なし",
+    HORIZON_GATE: "水平単位",
+    CELL_GATE: "セル単位",
+}
+#: 単位の名前と注記（**表の欄に使う**）。
 UNIT_LABELS: Final[Mapping[str, str]] = {
     NO_GATE: "門なし（全部 LightGBM）",
-    HORIZON_GATE: "水平単位",
-    CELL_GATE: "セル単位（§7.1。配るのはこれ）",
+    HORIZON_GATE: "水平単位（D-33。配るのはこれ）",
+    CELL_GATE: "セル単位（W9 まで配っていた形）",
 }
 
 #: 門の理由。**判定の対象外**と**10% に届かない**は、どちらも B3 を配る（契約 35）。
@@ -141,6 +153,24 @@ class Judged:
         """判定の対象になった切り口（B0 の Brier が下限以上）。"""
         scored = self.cells if unit == CELL_GATE else self.horizons
         return tuple(one for one in scored if one.reason != EXCLUDED)
+
+    def exceptions(self) -> tuple[Scored, ...]:
+        """**門を越えた水平の中で、LightGBM が B3 より悪いので B3 に回すセル**（D-33）。"""
+        passing = {_horizon_key(one) for one in self.passing(HORIZON_GATE)}
+        return tuple(one for one in worse_cells(self.cells) if _horizon_key(one) in passing)
+
+
+def worse_cells(cells: Sequence[Scored]) -> tuple[Scored, ...]:
+    """**判定の対象で、LightGBM の Brier が B3 より大きいセル**（水平単位の門の例外。D-33）。"""
+    return tuple(
+        one
+        for one in cells
+        if one.bucket is not None and one.b0 >= JUDGEABLE_BRIER and one.model > one.b3
+    )
+
+
+def _horizon_key(one: Scored) -> tuple[str, str, int]:
+    return (one.system, one.target, one.h_min)
 
 
 #: ターゲット名 → モデル名 → 検証の行の確率（`harness.TargetFit.probability` の形）。
@@ -280,7 +310,11 @@ def decode(key: int, unit: str) -> tuple[int, int, int | None]:
 def routed(
     samples: Samples, probability: Probabilities, model: str, unit: str, chosen_on: Bools
 ) -> dict[str, Bools]:
-    """ターゲットごとに、**森を歩く行**（`chosen_on` の行で門を決め、全部の行に当てる）。"""
+    """ターゲットごとに、**森を歩く行**（`chosen_on` の行で門を決め、全部の行に当てる）。
+
+    水平単位は、門を越えた水平の行から、**LightGBM が B3 より悪いセル**（`worse_cells`。同じ
+    `chosen_on` の行で測る）の行を除く（D-33）。
+    """
     if unit == NO_GATE:
         return {one.name: np.ones(len(samples), dtype=np.bool_) for one in TARGETS}
     passing = [
@@ -288,7 +322,29 @@ def routed(
         for one in score_units(samples, probability, model, unit, chosen_on)
         if one.reason == PASSED
     ]
-    return {target.name: _walks(samples, target, unit, passing) for target in TARGETS}
+    walks = {target.name: _walks(samples, target, unit, passing) for target in TARGETS}
+    return (
+        walks
+        if unit != HORIZON_GATE
+        else _without_worse(samples, probability, model, walks, chosen_on)
+    )
+
+
+def _without_worse(
+    samples: Samples,
+    probability: Probabilities,
+    model: str,
+    walks: Mapping[str, Bools],
+    chosen_on: Bools,
+) -> dict[str, Bools]:
+    """水平単位の行き先から、**LightGBM が B3 より悪いセル**の行を除く（D-33 の例外）。"""
+    worse = worse_cells(score_units(samples, probability, model, CELL_GATE, chosen_on))
+    return {
+        target.name: np.asarray(
+            walks[target.name] & ~_walks(samples, target, CELL_GATE, worse), dtype=np.bool_
+        )
+        for target in TARGETS
+    }
 
 
 def _walks(samples: Samples, target: Target, unit: str, passing: Sequence[Scored]) -> Bools:

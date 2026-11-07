@@ -137,23 +137,120 @@ def _judged(*cells: judging.Scored) -> judging.Judged:
     ],
 )
 def test_the_route_follows_the_judgement(scored: judging.Scored, route: str, reason: str) -> None:
-    """**10% 以上なら LightGBM、届かないか判定の対象外なら B3**（契約 35）。"""
-    table = gates.from_judged(_judged(scored), VERSION, FOREST_SHA256, ["2026-10-07"])
+    """セル単位では、**10% 以上なら LightGBM、届かないか判定の対象外なら B3**（契約 35）。"""
+    table = gates.from_judged(
+        _judged(scored), VERSION, FOREST_SHA256, ["2026-10-07"], unit=judging.CELL_GATE
+    )
     (cell,) = table.cells
     assert (cell.route, cell.reason) == (route, reason)
     assert (cell.b0, cell.b3, cell.lgbm, cell.n) == (scored.b0, scored.b3, scored.model, 50)
 
 
 def test_the_rule_is_burned_in_from_the_judging_side() -> None:
-    """**規則の数字は `eval/gates.py` の 1 か所から**（表の側で書き直さない）。"""
+    """**規則の数字は `eval/gates.py` の 1 か所から**（表で書き直さない）。**既定は配る単位**。"""
     table = gates.from_judged(_judged(), VERSION, FOREST_SHA256, ["2026-10-07"])
     assert table.rule == {
-        "unit": judging.CELL_GATE,
+        "unit": judging.SERVED_GATE,
         "reference": judging.REFERENCE,
         "min_improvement": judging.MIN_IMPROVEMENT,
         "judgeable_brier": judging.JUDGEABLE_BRIER,
     }
     assert gates.from_bytes(gates.to_bytes(table)) == table
+
+
+def test_the_served_unit_is_the_horizon() -> None:
+    """**配る単位は水平**（D-33。2026-11-06 にセル単位から直した）。"""
+    assert judging.SERVED_GATE == judging.HORIZON_GATE
+    assert "配るのはこれ" in judging.UNIT_LABELS[judging.HORIZON_GATE]
+    assert "配るのはこれ" not in judging.UNIT_LABELS[judging.CELL_GATE]
+
+
+def test_no_gate_is_not_a_table() -> None:
+    """**門なしは表にしない**（全部 LightGBM は配らない形）。"""
+    with pytest.raises(gates.GateTableError, match="表を組めない単位"):
+        gates.from_judged(_judged(), VERSION, FOREST_SHA256, ["2026-10-07"], unit=judging.NO_GATE)
+
+
+# ── 水平単位の表（D-33）─────────────────────────────────────────
+def _horizon(*, b0: float, b3: float, model: float) -> judging.Scored:
+    return _scored(b0=b0, b3=b3, model=model, bucket=None)
+
+
+def _horizon_judged(horizon: judging.Scored, *cells: judging.Scored) -> judging.Judged:
+    return judging.Judged(model="LGBM", cells=cells, horizons=(horizon,), served={}, holdout={})
+
+
+def _horizon_table(horizon: judging.Scored, *cells: judging.Scored) -> gates.GateTable:
+    judged = _horizon_judged(horizon, *cells)
+    return gates.from_judged(judged, VERSION, FOREST_SHA256, ["2026-10-07"], judging.HORIZON_GATE)
+
+
+def _by_bucket(table: gates.GateTable) -> dict[str, gates.GateCell]:
+    return {one.bucket: one for one in table.cells}
+
+
+def test_a_passing_horizon_spreads_over_its_six_buckets() -> None:
+    """**門を越えた水平は 6 つのバケツすべてが LightGBM**——10% に届かないセルも、行の無いセルも。"""
+    short = _scored(b0=0.2, b3=0.10, model=0.095, bucket="1")  # +5%：セル単位なら B3
+    table = _horizon_table(_horizon(b0=0.2, b3=0.10, model=0.08), short)
+    cells = _by_bucket(table)
+    assert set(cells) == set(BUCKET_LABELS)  # 表は鍵の順に並ぶ（`build`）
+    assert all((one.route, one.reason) == (gates.TO_LIGHTGBM, gates.PASSED) for one in table.cells)
+    assert table.rule["unit"] == judging.HORIZON_GATE
+    assert len(table.lightgbm_cells()) == len(BUCKET_LABELS)
+
+
+def test_the_numbers_are_the_cells_own() -> None:
+    """**数字はセルのもの**（行の無いセルは n = 0・Brier 0・改善 None）。理由は水平の判定。"""
+    short = _scored(b0=0.2, b3=0.10, model=0.095, bucket="1")
+    cells = _by_bucket(_horizon_table(_horizon(b0=0.2, b3=0.10, model=0.08), short))
+    assert (cells["1"].n, cells["1"].b3, cells["1"].lgbm) == (50, 0.10, 0.095)
+    assert cells["1"].improvement == pytest.approx(0.05)
+    assert (cells["0"].n, cells["0"].b0, cells["0"].b3, cells["0"].lgbm) == (0, 0.0, 0.0, 0.0)
+    assert cells["0"].improvement is None
+
+
+def test_a_worse_cell_in_a_passing_horizon_goes_to_b3() -> None:
+    """**門を越えた水平でも、LightGBM が B3 より悪いセルは `below`・B3**（D-33 の例外）。"""
+    worse = _scored(b0=0.2, b3=0.10, model=0.11, bucket="2")
+    cells = _by_bucket(_horizon_table(_horizon(b0=0.2, b3=0.10, model=0.08), worse))
+    assert (cells["2"].route, cells["2"].reason) == (gates.TO_B3, judging.BELOW)
+    others = [one for label, one in cells.items() if label != "2"]
+    assert all(one.route == gates.TO_LIGHTGBM for one in others)
+
+
+def test_an_unjudgeable_cell_follows_its_horizon_even_if_worse() -> None:
+    """**判定の対象外のセル（B0 < 0.001）は例外にしない**（Brier がほぼ 0 の差を追わない）。"""
+    tiny = _scored(b0=0.0005, b3=0.0004, model=0.0006, bucket="11+")
+    cells = _by_bucket(_horizon_table(_horizon(b0=0.2, b3=0.10, model=0.08), tiny))
+    assert (cells["11+"].route, cells["11+"].reason) == (gates.TO_LIGHTGBM, gates.PASSED)
+
+
+@pytest.mark.parametrize(
+    ("horizon", "reason"),
+    [
+        (_horizon(b0=0.2, b3=0.10, model=0.095), judging.BELOW),
+        (_horizon(b0=0.0005, b3=0.10, model=0.01), judging.EXCLUDED),
+    ],
+)
+def test_a_horizon_that_does_not_pass_sends_every_bucket_to_b3(
+    horizon: judging.Scored, reason: str
+) -> None:
+    """**門を越えない水平は 6 セルとも B3**——そのセルだけなら 10% を越えていても。"""
+    good = _scored(b0=0.2, b3=0.10, model=0.05, bucket="0")  # +50%
+    table = _horizon_table(horizon, good)
+    assert all((one.route, one.reason) == (gates.TO_B3, reason) for one in table.cells)
+    assert table.lightgbm_cells() == frozenset()
+
+
+def test_a_horizon_table_reads_back_unchanged() -> None:
+    """**読み口は単位を問わない**（書式は変えない。行き先と理由の照合もそのまま通る）。"""
+    worse = _scored(b0=0.2, b3=0.10, model=0.11, bucket="2")
+    table = _horizon_table(_horizon(b0=0.2, b3=0.10, model=0.08), worse)
+    again = gates.from_bytes(gates.to_bytes(table))
+    assert again == table
+    assert ("hellocycling", "bike", 30, "2") not in again.lightgbm_cells()
+    assert len(again.lightgbm_cells()) == len(BUCKET_LABELS) - 1
 
 
 def test_a_horizon_unit_is_not_a_cell() -> None:
