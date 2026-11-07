@@ -44,6 +44,7 @@ import pyarrow.parquet as pq
 from bikechance_ml.baselines import artifact as baseline_artifact
 from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import border
+from bikechance_ml.eval import gates as judging
 from bikechance_ml.eval.dataset import BUCKET_LABELS, TARGETS
 from bikechance_ml.features.constants import HORIZONS_MIN
 from bikechance_ml.features.grid import JST, features_path
@@ -362,7 +363,7 @@ def _card_parts(artifact: composite.CompositeArtifact) -> str:
 
 def _card_cells(artifact: composite.CompositeArtifact) -> str:
     rows = [
-        "## 門（セル単位。W6-09、契約 35）",
+        f"## 門（{unit_name(artifact.gates.rule)}。W6-09・D-33、契約 35）",
         "",
         "| 系統/ターゲット | 森 | 表のセル |",
         "|---|---:|---:|",
@@ -379,6 +380,14 @@ def _card_cells(artifact: composite.CompositeArtifact) -> str:
     dropped = [" ".join(str(part) for part in one) for one in artifact.dropped]
     rows.append("shadow で削ったセル（W6-12）：" + ("、".join(dropped) if dropped else "なし"))
     return "\n".join(rows)
+
+
+def unit_name(rule: Mapping[str, object]) -> str:
+    """門の表の `rule.unit` を名前にする（**表が決めた単位を書く**。決め打ちしない）。"""
+    unit = rule.get("unit")
+    if not isinstance(unit, str):
+        return "単位が無い表"
+    return judging.UNIT_NAMES.get(unit, f"単位 {unit}")
 
 
 def _card_border(measured: border.Border | None) -> str:
@@ -426,8 +435,10 @@ def describe(made: Made) -> str:
     ]
     if made.border is not None:
         walked = made.border.walked
-        median, largest = _number(walked.p50), _number(walked.largest)
-        lines.append(f"境目の差（森の行 {walked.rows:,}）：中央 {median}・最大 {largest}")
+        median, top, largest = _number(walked.p50), _number(walked.p99), _number(walked.largest)
+        lines.append(
+            f"境目の差（森の行 {walked.rows:,}）：中央 {median}・99% {top}・最大 {largest}"
+        )
     return "\n".join(lines)
 
 

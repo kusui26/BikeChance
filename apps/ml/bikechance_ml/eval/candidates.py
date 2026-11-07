@@ -211,9 +211,9 @@ def _group_ece(evaluated: Samples, p: Float64, target: Target, inside: Bools) ->
 def decision_groups(
     evaluated: Samples, probability: gates.Probabilities, model: str
 ) -> tuple[GroupDecision, ...]:
-    """⑥ system × ターゲットごとに、**いまの B3 と、セル単位の門で配る形**の意思決定の指標。"""
+    """⑥ system × ターゲットごとに、**いまの B3 と、配る単位の門で配る形**の意思決定の指標。"""
     every = np.ones(len(evaluated), dtype=np.bool_)
-    walks = gates.routed(evaluated, probability, model, gates.CELL_GATE, every)
+    walks = gates.routed(evaluated, probability, model, gates.SERVED_GATE, every)
     mixed = gates.served_probability(probability, model, walks)
     return tuple(
         _group_decision(evaluated, probability[target.name][gates.REFERENCE], mixed, target, system)
@@ -293,9 +293,9 @@ class Budget:
 
 
 def budget_basis(summary: Summary) -> gates.Served:
-    """比べる値：**1 日目で選び、残りの日で測った**セル単位の配る形（無ければ検証日ぜんぶ）。"""
-    held = summary.judged.holdout.get(gates.CELL_GATE)
-    return held if held is not None else summary.judged.served[gates.CELL_GATE]
+    """比べる値：**1 日目で選び、残りの日で測った**配る単位の形（無ければ検証日ぜんぶ）。"""
+    held = summary.judged.holdout.get(gates.SERVED_GATE)
+    return held if held is not None else summary.judged.served[gates.SERVED_GATE]
 
 
 def tree_budget(summaries: Sequence[Summary]) -> tuple[Budget, ...]:
