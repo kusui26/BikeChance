@@ -1,14 +1,10 @@
-import {
-  ATTRIBUTIONS,
-  CREDIT_PREFACE,
-  DATA_SOURCES,
-  FORECAST_DISCLAIMER,
-  formatCredit,
-} from "@bikechance/shared";
+import { DataCredits } from "@/app/_components/data-credits";
+import { SiteLinks } from "@/app/_components/site-links";
+import { MAIN_STYLE, TITLE_STYLE } from "@/app/_components/styles";
 
 const Home = () => (
-  <main style={{ maxWidth: 720, margin: "0 auto", padding: "3rem 1.25rem" }}>
-    <h1 style={{ fontSize: "1.75rem", marginBottom: "0.5rem" }}>BikeChance</h1>
+  <main style={MAIN_STYLE}>
+    <h1 style={TITLE_STYLE}>BikeChance</h1>
     <p style={{ marginTop: 0, fontSize: "1.05rem" }}>
       シェアサイクルのポートに着いたとき、自転車を借りられる／返せる確率を表示します。
     </p>
@@ -16,23 +12,8 @@ const Home = () => (
       現在は開発中です。スマートフォン向け Web 版はこの場所に公開予定で、まずは iPhone
       アプリを先行して開発しています。
     </p>
-
-    <h2 style={{ fontSize: "1.1rem", marginTop: "2.5rem" }}>データについて</h2>
-    <p style={{ color: "#555", fontSize: "0.9rem" }}>{CREDIT_PREFACE}</p>
-    <ul style={{ color: "#555", fontSize: "0.9rem", paddingLeft: "1.2rem" }}>
-      {ATTRIBUTIONS.map((attribution) => (
-        <li key={attribution.system_id}>{formatCredit(attribution)}</li>
-      ))}
-    </ul>
-    <h3 style={{ fontSize: "0.95rem", marginTop: "1.5rem" }}>そのほかの出典</h3>
-    <ul style={{ color: "#555", fontSize: "0.9rem", paddingLeft: "1.2rem" }}>
-      {DATA_SOURCES.map((source) => (
-        <li key={source.id}>
-          {source.text}（<a href={source.url}>{source.link_label}</a>）
-        </li>
-      ))}
-    </ul>
-    <p style={{ color: "#555", fontSize: "0.9rem" }}>{FORECAST_DISCLAIMER}</p>
+    <DataCredits />
+    <SiteLinks />
   </main>
 );
 
