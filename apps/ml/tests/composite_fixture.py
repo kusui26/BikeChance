@@ -84,7 +84,7 @@ def gates_body(
         artifact_sha256=composite.sha256_of(forest_body),
         cells=cells,
         evaluate_days=EVALUATE_DAYS,
-        rule=gate_tables.rule(),
+        rule=gate_tables.rule(judging.CELL_GATE),  # W6 からのセル単位の表
     )
     return gate_tables.to_bytes(table)
 

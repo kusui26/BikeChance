@@ -33,9 +33,9 @@ import pytest
 
 from bikechance_ml.baselines import climatology
 from bikechance_ml.baselines.climatology import FromSamples
-from bikechance_ml.eval import candidates, harness
+from bikechance_ml.eval import candidates, gates, harness
 from bikechance_ml.eval.candidates import Candidate, ForestFacts, Importance
-from bikechance_ml.eval.dataset import TARGETS, Samples, to_samples
+from bikechance_ml.eval.dataset import BUCKET_LABELS, TARGETS, Samples, to_samples
 from bikechance_ml.eval.split import DaySplit, mask_of
 from bikechance_ml.features import coverage
 from bikechance_ml.features.arrays import Float32
@@ -358,11 +358,15 @@ def test_the_gate_table_is_bound_to_the_forest_it_was_decided_for() -> None:
 
 
 def test_the_gate_table_follows_the_judgement_of_the_chosen_candidate() -> None:
-    """**門の表のセルは、選んだ候補を検証日で測った結果そのもの**（契約 35）。"""
+    """**門の表は、選んだ候補を検証日で測った結果から配る単位で組む**（契約 35・D-33）。
+
+    水平単位なので、行のあった水平ごとに 6 つのバケツのセルが載る。
+    """
     fitted = _fitted(1.0, 1.0, 1.0)
     table = _chosen(fitted).gates
     judged = fitted.summary_of(CANDIDATE).judged
-    assert len(table.cells) == len(judged.cells)
+    assert table.rule["unit"] == gates.SERVED_GATE == gates.HORIZON_GATE
+    assert len(table.cells) == len(BUCKET_LABELS) * len(judged.horizons)
     passed = {cell.key for cell in table.cells if cell.reason == gate_tables.PASSED}
     assert passed == table.lightgbm_cells()
 
@@ -821,7 +825,8 @@ def test_the_card_carries_the_data_hash_and_the_gates() -> None:
     for day, one in PRINTS.items():
         assert f"| {day} | " in text
         assert f"`{one.sha256}`" in text, "SHA-256 を縮めずに出していません"
-    assert "## 門（セル単位" in text
+    assert f"## 門（{gates.UNIT_NAMES[gates.SERVED_GATE]}。" in text
+    assert "- **例外のセル**" in text
     assert f"lightgbm/{VERSION}.gates.json.gz" in text
     assert "## 意思決定の指標" in text
     assert "precision@0.9" in text

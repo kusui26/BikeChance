@@ -1968,6 +1968,26 @@ def test_a_composite_can_be_dry_run() -> None:
     assert to_detail(summary)["composite"] == summary.composite
 
 
+def test_a_composite_shadow_with_a_profile_walks_its_gates() -> None:
+    """**shadow に置いた合成器は、active にしたときと同じ確率を出す**——門のとおりに森を歩く。
+
+    W10 で初めて合成器を shadow に置く（新しい森と水平単位の門。D-33）。プロファイルの在る周期に、
+    shadow の予測ログが「その合成器を active にした周期の配った確率」と一致することを留める。
+    """
+    port = put_profile(ready_port(), _yesterday())
+    shadow = composite_port(status="candidate").candidate
+    assert shadow is not None
+    port.shadow = replace(shadow, status="shadow")
+    port.model_bodies.update(composite_port().model_bodies)
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.shadow is not None and summary.shadow.status == "ok"
+    as_active = put_profile(composite_port(), _yesterday())
+    served = run_inference(as_active, "hellocycling", NOW)
+    assert served.composite is not None and served.composite["route"] == "gated"
+    shadow_bikes = _logged_bikes(port, shadow.model_version)
+    assert shadow_bikes == {row["station_id"]: row["p_bike_x1000"] for row in as_active.written}
+
+
 def test_a_composite_shadow_without_a_profile_walks_as_b3() -> None:
     """shadow の合成器も、**プロファイルの無い周期は全セル B3 で歩く**（止めない。契約 33）。"""
     port = ready_port()

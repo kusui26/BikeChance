@@ -20,8 +20,9 @@ LARGE: Final[Candidate] = Candidate(300, 0.05)
 SHA: Final[str] = "0123456789abcdef" * 4
 
 
-def _cell(h_min: int, bucket: str, *, b0: float, model: float) -> gates.Scored:
-    """HELLO の bike の 1 セル。**B3 は 0.10 に固定**し、候補の Brier で理由を決める。"""
+def _cell(h_min: int, bucket: str | None, *, b0: float, model: float) -> gates.Scored:
+    """HELLO の bike の 1 セル（`bucket` が None なら水平）。**B3 は 0.10 に固定**し、候補の
+    Brier で理由を決める。"""
     return gates.Scored(
         system="hellocycling",
         target="bike",
@@ -35,11 +36,17 @@ def _cell(h_min: int, bucket: str, *, b0: float, model: float) -> gates.Scored:
     )
 
 
-#: 越える（+20%）・届かない（+5%）・判定の対象外（B0 がほぼ 0）の 3 セル。
+#: 越える（+20%）・届かない（+5%）・B3 より悪い（−10%）・判定の対象外（B0 がほぼ 0）の 4 セル。
 CELLS: Final[tuple[gates.Scored, ...]] = (
     _cell(30, "0", b0=0.2, model=0.08),
     _cell(30, "1", b0=0.2, model=0.095),
+    _cell(30, "2", b0=0.2, model=0.11),
     _cell(5, "11+", b0=0.0005, model=0.01),
+)
+#: 水平：30 分は門を越え（+12.5%）、5 分は判定の対象外。**30 分のバケツ 2 は例外**（D-33）。
+HORIZONS: Final[tuple[gates.Scored, ...]] = (
+    _cell(5, None, b0=0.0005, model=0.01),
+    _cell(30, None, b0=0.2, model=0.0875),
 )
 
 BANDS: Final[tuple[metrics.BandScore, ...]] = (
@@ -58,7 +65,7 @@ def _summary(candidate: Candidate, *, holdout: float | None, ece: float = 0.02) 
         else {unit: gates.Served(improvement=holdout, forest_share=0.55) for unit in gates.UNITS}
     )
     judged = gates.Judged(
-        model=candidate.name, cells=CELLS, horizons=(), served=served, holdout=held
+        model=candidate.name, cells=CELLS, horizons=HORIZONS, served=served, holdout=held
     )
     group = candidates.GroupDecision("hellocycling", "bike", DECISION, DECISION)
     summary_ece = candidates.EceSummary(
@@ -123,15 +130,21 @@ def test_without_a_choice_it_says_so() -> None:
 
 # ── ① ② 門 ───────────────────────────────────────────────────
 def test_the_gate_counts_are_per_candidate() -> None:
-    """**越えた 1 / 判定の対象 2 / 全部 3**（対象外は判定に数えない）。"""
-    assert f"| {SMALL.name} | 1 | 2 | 3 | 0 | 0 | 0 |" in _render(*BOTH)
+    """**水平：越えた 1 / 判定の対象 1 / 全部 2、例外 1、セル：越えた 1 / 対象 3 / 全部 4**。"""
+    assert f"| {SMALL.name} | 1 | 1 | 2 | 1 | 1 | 3 | 4 |" in _render(*BOTH)
 
 
 def test_the_gate_table_marks_what_goes_to_lightgbm() -> None:
-    """**太字が LightGBM を配るセル**、— は判定の対象外、空欄は行の無いセル。"""
+    """**水平で門を越えたら、届かないセル（+5%）も太字**。B3 より悪いセル（−10%）は例外で太字に
+    しない。— は判定の対象外、空欄は行の無いセル。"""
     text = _render(*BOTH)
-    assert "| 30 分 | **+20.00%** | +5.00% |  |  |  |  |" in text
-    assert "| 5 分 |  |  |  |  |  | — |" in text
+    assert "| 30 分 | **+12.50%** | **+20.00%** | **+5.00%** | -10.00% |  |  |  |" in text
+    assert "| 5 分 | — |  |  |  |  |  | — |" in text
+
+
+def test_the_gate_table_names_the_served_unit() -> None:
+    """**見出しは配る単位**（D-33 で水平単位）。"""
+    assert f"### 12.2 ② 門の表（{gates.UNIT_NAMES[gates.SERVED_GATE]}、" in _render(*BOTH)
 
 
 # ── ③ ④ 配る形 ───────────────────────────────────────────────

@@ -4,6 +4,11 @@
 バケツ）ごとに、LightGBM を配るか B3 を配るかを、**検証日で測った結果から**決めて表にする。
 合成器はこの表をそのまま成果物に焼き付ける（W6-08）。
 
+**表はいつもセルの並び**だが、**決める単位は `rule.unit`**（D-33 で `horizon` に直した）。水平単位の
+表は、水平の判定をその水平の 6 つのバケツのセルに広げる——行き先と理由は水平の判定（門を越えた
+水平でも LightGBM が B3 より悪いセルは `below`・B3）、数字はセルのもの。**読み口は単位を問わない**
+（`lightgbm_cells` はセルの行き先を読むだけ）ので、表の書式は変えない。
+
 **形はここ 1 か所で決める。** 書く側（`jobs/fit_lightgbm.py`）と読む側（合成器の組み立て）が
 同じ `to_bytes` と `from_bytes` を通るので、**片方だけ形を変える道が無い。**
 
@@ -11,7 +16,9 @@
 台数バケツの境目が**いまのコードと同じでなければ使わない**——境目が 1 つずれると、同じ名前の
 セルが別の行を指し、**例外を出さずに別のところで LightGBM を配る。**
 
-**表に無いセルは B3 を配る。** 検証日に 1 行も無かったセルは判定できないので、載せない。
+**表に無いセルは B3 を配る。** セル単位では、検証日に 1 行も無かったセルは判定できないので
+載せない。水平単位では、行のあった水平の 6 セルをすべて載せる（行の無いセルは `n` が 0 で、水平の
+判定に従う——門を越えた水平の中で、そのバケツだけ B3 に落とす段を作らない）。
 
 **表は、決めたときの森と組でしか使わない。** 版の名前だけでは組が決まらない——candidate の
 名前は置き直せるので（W6-19）、森だけ置き直して表の置き直しが落ちると、**同じ名前の下で
@@ -116,10 +123,14 @@ def gates_path(model_version: str) -> str:
     return f"lightgbm/{model_version}.gates.json.gz"
 
 
-def rule() -> dict[str, object]:
+#: 表を組める単位（門なしは表にしない）。
+TABLE_UNITS: Final[frozenset[str]] = frozenset({judging.HORIZON_GATE, judging.CELL_GATE})
+
+
+def rule(unit: str = judging.SERVED_GATE) -> dict[str, object]:
     """表に焼き付ける判定の規則。**値の正は `eval/gates.py`**（ここで数字を書かない）。"""
     return {
-        "unit": judging.CELL_GATE,
+        "unit": unit,
         "reference": judging.REFERENCE,
         "min_improvement": judging.MIN_IMPROVEMENT,
         "judgeable_brier": judging.JUDGEABLE_BRIER,
@@ -131,10 +142,66 @@ def from_judged(
     model_version: str,
     artifact_sha256: str,
     evaluate_days: Sequence[str],
+    unit: str = judging.SERVED_GATE,
 ) -> GateTable:
-    """門を当てた結果（**セル単位**、検証日ぜんぶで決めたもの）から表を組む。"""
-    cells = [cell_of(one) for one in judged.cells]
-    return build(model_version, artifact_sha256, cells, evaluate_days, rule())
+    """門を当てた結果（検証日ぜんぶで決めたもの）から表を組む。**単位の既定は配る単位**（D-33）。"""
+    if unit not in TABLE_UNITS:
+        raise GateTableError(f"表を組めない単位です: {unit}")
+    cells = (
+        horizon_cells(judged)
+        if unit == judging.HORIZON_GATE
+        else [cell_of(one) for one in judged.cells]
+    )
+    return build(model_version, artifact_sha256, cells, evaluate_days, rule(unit))
+
+
+def horizon_cells(judged: judging.Judged) -> list[GateCell]:
+    """**水平の判定を、その水平の 6 つのバケツのセルに広げる**（D-33）。
+
+    行き先と理由は水平の判定、**数字はセルのもの**（検証日に行が無いセルは `n` が 0・Brier 0・
+    改善 None）。門を越えた水平でも LightGBM が B3 より悪いセルは `below`・B3
+    （`Judged.exceptions`）。
+    """
+    by_cell = {_scored_key(one): one for one in judged.cells}
+    worse = frozenset(_scored_key(one) for one in judged.exceptions())
+    return [
+        _expanded(horizon, bucket, by_cell.get(_key_in(horizon, bucket)), worse)
+        for horizon in judged.horizons
+        for bucket in BUCKET_LABELS
+    ]
+
+
+def _expanded(
+    horizon: judging.Scored,
+    bucket: str,
+    cell: judging.Scored | None,
+    worse: frozenset[CellKey],
+) -> GateCell:
+    """1 つの水平の 1 つのバケツ。**例外のセルは理由を `below` にして B3 に回す**。"""
+    reason = judging.BELOW if _key_in(horizon, bucket) in worse else horizon.reason
+    return GateCell(
+        system=horizon.system,
+        target=horizon.target,
+        h_min=horizon.h_min,
+        bucket=bucket,
+        route=TO_LIGHTGBM if reason == PASSED else TO_B3,
+        reason=reason,
+        n=0 if cell is None else cell.n,
+        b0=0.0 if cell is None else cell.b0,
+        b3=0.0 if cell is None else cell.b3,
+        lgbm=0.0 if cell is None else cell.model,
+        improvement=None if cell is None else cell.improvement,
+    )
+
+
+def _key_in(horizon: judging.Scored, bucket: str) -> CellKey:
+    return (horizon.system, horizon.target, horizon.h_min, bucket)
+
+
+def _scored_key(one: judging.Scored) -> CellKey:
+    if one.bucket is None:
+        raise GateTableError(f"セル単位でない切り口です: {one.system} {one.target} {one.h_min}")
+    return (one.system, one.target, one.h_min, one.bucket)
 
 
 def cell_of(one: judging.Scored) -> GateCell:

@@ -187,6 +187,64 @@ def test_the_served_form_uses_the_model_only_in_passing_cells() -> None:
     assert mixed["bike"].tolist() == [0.72, 0.72, 0.7, 0.7]
 
 
+def _one_horizon_two_buckets(*, b0_bucket_1: float) -> tuple[Samples, gates.Probabilities]:
+    """1 つの水平（HELLO・30 分）に、バケツ 0 が 4 行・バケツ 1 が 2 行。
+
+    バケツ 0 は候補 0.8（Brier 0.04）、**バケツ 1 は候補 0.65**（Brier 0.1225。B3 の 0.09 より
+    悪い）。
+    水平でまとめると候補 0.0675 対 B3 0.09 で **25% 改善し、門を越える**。返却（docks 5）は
+    バケツ「3-5」の 1 セルだけ。
+    """
+    samples = _samples(_rows(4, bikes=0) + _rows(2, bikes=1))
+    one = {
+        gates.PERSISTENCE: np.array([0.0] * 4 + [b0_bucket_1] * 2),
+        gates.REFERENCE: np.full(6, 0.7),
+        MODEL: np.array([0.8] * 4 + [0.65] * 2),
+    }
+    return samples, {"bike": one, "dock": one}
+
+
+def test_the_horizon_unit_sends_a_worse_cell_back_to_b3() -> None:
+    """**門を越えた水平でも、候補が B3 より悪いセルの行は B3**（D-33 の例外）。"""
+    samples, probability = _one_horizon_two_buckets(b0_bucket_1=0.0)
+    every = np.ones(6, dtype=np.bool_)
+    walks = gates.routed(samples, probability, MODEL, gates.HORIZON_GATE, every)
+    assert walks["bike"].tolist() == [True] * 4 + [False] * 2
+    assert walks["dock"].tolist() == [True] * 6
+    mixed = gates.served_probability(probability, MODEL, walks)
+    assert mixed["bike"].tolist() == [0.8] * 4 + [0.7] * 2
+
+
+def test_an_unjudgeable_worse_cell_follows_its_horizon() -> None:
+    """**B0 がほぼ当たっているセル（判定の対象外）は例外にしない**——悪くても水平に従う。"""
+    samples, probability = _one_horizon_two_buckets(b0_bucket_1=1.0)
+    every = np.ones(6, dtype=np.bool_)
+    walks = gates.routed(samples, probability, MODEL, gates.HORIZON_GATE, every)
+    assert walks["bike"].tolist() == [True] * 6
+
+
+def test_the_judged_candidate_names_its_exceptions() -> None:
+    """**例外は、門を越えた水平の中の悪いセルだけ**（`Judged.exceptions`）。"""
+    samples, probability = _one_horizon_two_buckets(b0_bucket_1=0.0)
+    judged = gates.judge(samples, probability, MODEL, (DAY,))
+    assert [(one.target, one.h_min) for one in judged.passing(gates.HORIZON_GATE)] == [
+        ("bike", 30),
+        ("dock", 30),
+    ]
+    assert [(one.target, one.bucket) for one in judged.exceptions()] == [("bike", "1")]
+    whole = judged.served[gates.HORIZON_GATE]
+    assert whole.forest_share == pytest.approx(10 / 12)  # 2 ターゲット × 6 行のうち 10 行
+
+
+def test_a_failing_horizon_has_no_exceptions() -> None:
+    """**門を越えない水平の悪いセルは例外に数えない**（そもそも B3 を配る）。"""
+    samples = _samples(_rows(2, bikes=1))
+    probability = _probability(2, b0=0.0, b3=0.7, model=0.65)
+    judged = gates.judge(samples, probability, MODEL, (DAY,))
+    assert judged.passing(gates.HORIZON_GATE) == ()
+    assert judged.exceptions() == ()
+
+
 def test_no_gate_walks_every_row() -> None:
     samples = _samples(_rows(3))
     every = np.ones(3, dtype=np.bool_)

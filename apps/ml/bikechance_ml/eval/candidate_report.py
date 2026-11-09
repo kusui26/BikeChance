@@ -29,6 +29,8 @@ SYSTEM_LABELS: Final[Mapping[str, str]] = {"hellocycling": "HELLO", "docomo-cycl
 
 _CELL: Final[str] = gates.CELL_GATE
 _HORIZON: Final[str] = gates.HORIZON_GATE
+#: 配る単位の名前（D-33。報告書の見出しと説明に出す）。
+_SERVED_NAME: Final[str] = gates.UNIT_NAMES[gates.SERVED_GATE]
 
 
 def render(
@@ -59,9 +61,10 @@ def _intro(chosen: Candidate | None) -> list[str]:
     return [
         "## 12. 候補の比較（W6 の PR F、①〜⑩）",
         "",
-        "**v1 は LightGBM 単体では配らない**（契約 33）。セル（system × ターゲット × 水平 × "
-        "台数バケツ）ごとに、LightGBM が門の相手（**本番と同じ作り方の B3**。W6-10、契約 36）を"
-        " 10% 以上改善したところだけ LightGBM、他は B3 を配る（開発プラン §7.1、契約 35）。"
+        "**v1 は LightGBM 単体では配らない**（契約 33）。水平（system × ターゲット × 水平）"
+        "ごとに、LightGBM が門の相手（**本番と同じ作り方の B3**。W6-10、契約 36）を 10% 以上"
+        "改善した水平だけ LightGBM、他は B3 を配る。**門を越えた水平でも、LightGBM が B3 より"
+        "悪いセル（台数バケツ）は B3**（開発プラン §7.1・D-33、契約 35）。"
         "**§3〜§11 の LightGBM の列は門を当てる前の単体**で、配る形の成績はここにある。",
         "",
         "**候補はすべて同じ検証の行の上で測った。** 本数と学習率は組で決める（契約 37）。",
@@ -77,10 +80,20 @@ def _gate_counts(summaries: Sequence[Summary]) -> list[str]:
         "### 12.1 ① 門を越えた数",
         "",
         "**判定の対象**は B0 の Brier が 0.001 以上の切り口（W3-16）。**越えた**のは門の相手"
-        "（B3）を 10% 以上改善したもの。全部は検証日に行があった切り口の数。",
+        "（B3）を 10% 以上改善したもの。全部は検証日に行があった切り口の数。**例外**は、門を"
+        "越えた水平の中で LightGBM が B3 より悪いので B3 に回すセル（D-33）。",
         "",
-        _row("候補", "セル：越えた", "判定の対象", "全部", "水平：越えた", "判定の対象", "全部"),
-        "|---|---:|---:|---:|---:|---:|---:|",
+        _row(
+            "候補",
+            "水平：越えた",
+            "判定の対象",
+            "全部",
+            "例外のセル",
+            "セル：越えた",
+            "判定の対象",
+            "全部",
+        ),
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
         *[_count_row(one) for one in summaries],
         "",
     ]
@@ -89,12 +102,13 @@ def _gate_counts(summaries: Sequence[Summary]) -> list[str]:
 def _count_row(one: Summary) -> str:
     judged = one.judged
     counts = (
-        judged.passing(_CELL),
-        judged.judgeable(_CELL),
-        judged.cells,
         judged.passing(_HORIZON),
         judged.judgeable(_HORIZON),
         judged.horizons,
+        judged.exceptions(),
+        judged.passing(_CELL),
+        judged.judgeable(_CELL),
+        judged.cells,
     )
     return _row(one.candidate.name, *[str(len(part)) for part in counts])
 
@@ -102,54 +116,88 @@ def _count_row(one: Summary) -> str:
 # ── ② 門の表 ─────────────────────────────────────────────────
 def _gate_tables(summaries: Sequence[Summary], chosen: Candidate | None) -> list[str]:
     return [
-        "### 12.2 ② 門の表（セル単位、検証日ぜんぶで決めたもの）",
+        f"### 12.2 ② 門の表（{_SERVED_NAME}、検証日ぜんぶで決めたもの）",
         "",
-        "値は B3 に対する相対改善。**太字が LightGBM を配るセル**、— は判定の対象外、空欄は"
-        "検証日に行が無いセル（どちらも B3 を配る）。**選んだ候補の表は JSON にも書く**"
-        "（置く回は `lightgbm/<版>.gates.json.gz`）。",
+        "値は B3 に対する相対改善。「水平で」はその水平の台数バケツをまとめた値で、**太字は門を"
+        "越えた水平**。バケツの欄の**太字が LightGBM を配るセル**、— は判定の対象外、空欄は"
+        "検証日に行が無いセル。門を越えた水平では、判定の対象外のセルと行の無いセルも LightGBM を"
+        "配り、**太字でない数字のセルは B3 より悪いので B3 に回す例外**（D-33）。**選んだ候補の表は"
+        " JSON にも書く**（置く回は `lightgbm/<版>.gates.json.gz`）。",
         "",
         *[line for one in summaries for line in _gate_table(one, opened=one.candidate == chosen)],
     ]
 
 
+#: 門の表の欄の鍵（`system, ターゲット, 水平, バケツ`。水平の欄はバケツが None）。
+type _Key = tuple[str, str, int, str | None]
+
+
 def _gate_table(one: Summary, *, opened: bool) -> list[str]:
-    cells = {(cell.system, cell.target, cell.h_min, cell.bucket): cell for cell in one.judged.cells}
-    groups = sorted({(cell.system, cell.target) for cell in one.judged.cells})
+    judged = one.judged
+    scored = {_key_of(cell): cell for cell in (*judged.cells, *judged.horizons)}
+    served = _served_cells(judged)
+    groups = sorted({(cell.system, cell.target) for cell in judged.cells})
     return [
         f"<details{' open' if opened else ''}><summary>{one.candidate.name}</summary>",
         "",
-        *[line for system, target in groups for line in _matrix(cells, system, target)],
+        *[line for system, target in groups for line in _matrix(scored, served, system, target)],
         "</details>",
         "",
     ]
 
 
+def _served_cells(judged: gates.Judged) -> frozenset[_Key]:
+    """**配る単位で LightGBM を配るセル**（太字にする）。水平単位は、門を越えた水平の例外を除く。"""
+    if gates.SERVED_GATE == gates.CELL_GATE:
+        return frozenset(_key_of(one) for one in judged.passing(_CELL))
+    worse = frozenset(_key_of(one) for one in judged.exceptions())
+    return frozenset(
+        key
+        for horizon in judged.passing(_HORIZON)
+        for label in BUCKET_LABELS
+        if (key := (horizon.system, horizon.target, horizon.h_min, label)) not in worse
+    )
+
+
 def _matrix(
-    cells: Mapping[tuple[str, str, int, str | None], gates.Scored], system: str, target: str
+    scored: Mapping[_Key, gates.Scored], served: frozenset[_Key], system: str, target: str
 ) -> list[str]:
     return [
         f"**{system} / {target}**",
         "",
-        _row("水平", *BUCKET_LABELS),
-        "|---:|" + "---:|" * len(BUCKET_LABELS),
-        *[
-            _row(
-                f"{h_min} 分",
-                *[_mark(cells.get((system, target, h_min, label))) for label in BUCKET_LABELS],
-            )
-            for h_min in HORIZONS_MIN
-        ],
+        _row("水平", "水平で", *BUCKET_LABELS),
+        "|---:|---:|" + "---:|" * len(BUCKET_LABELS),
+        *[_matrix_row(scored, served, (system, target, h_min)) for h_min in HORIZONS_MIN],
         "",
     ]
 
 
-def _mark(one: gates.Scored | None) -> str:
+def _matrix_row(
+    scored: Mapping[_Key, gates.Scored], served: frozenset[_Key], where: tuple[str, str, int]
+) -> str:
+    system, target, h_min = where
+    cells = [(system, target, h_min, label) for label in BUCKET_LABELS]
+    return _row(
+        f"{h_min} 分",
+        _mark(scored.get((system, target, h_min, None)), passed=_passed(scored, where)),
+        *[_mark(scored.get(key), passed=key in served) for key in cells],
+    )
+
+
+def _passed(scored: Mapping[_Key, gates.Scored], where: tuple[str, str, int]) -> bool:
+    horizon = scored.get((*where, None))
+    return horizon is not None and horizon.reason == gates.PASSED
+
+
+def _mark(one: gates.Scored | None, *, passed: bool) -> str:
     if one is None:
         return ""
-    if one.reason == gates.EXCLUDED:
-        return "—"
-    text = _percent(one.improvement)
-    return f"**{text}**" if one.reason == gates.PASSED else text
+    text = "—" if one.reason == gates.EXCLUDED else _percent(one.improvement)
+    return f"**{text}**" if passed else text
+
+
+def _key_of(one: gates.Scored) -> _Key:
+    return (one.system, one.target, one.h_min, one.bucket)
 
 
 # ── ③ 配る形の改善 ・ ④ 森を歩く行 ─────────────────────────────
@@ -237,7 +285,7 @@ def _decisions(summaries: Sequence[Summary]) -> list[str]:
         "",
         "**アプリの約束がどれだけ実現するか。** `precision@0.9` は 0.9 以上と出した行の実現率、"
         "`coverage@0.9` は 0.9 以上と出せた割合。3 段階は**割合 / 実現率**（重み付き）。"
-        "**配る形はセル単位の門**（検証日ぜんぶで決めた門）で出した確率。",
+        f"**配る形は{_SERVED_NAME}の門**（検証日ぜんぶで決めた門）で出した確率。",
         "",
         *[line for one in summaries for line in decision_table(one)],
     ]
@@ -392,7 +440,8 @@ def _budget(summaries: Sequence[Summary]) -> list[str]:
     return [
         "### 12.9 ⑩ 本数の判定（D-32 の (c)）",
         "",
-        "**上限の本数（費用の式から出す）と 300 本を並べ、配る形（セル単位）の改善の差が "
+        "**上限の本数（費用の式から出す）と 300 本を並べ、配る形"
+        f"（{_SERVED_NAME}）の改善の差が "
         f"{candidates.BUDGET_TOLERANCE_PP:g} ポイント以内なら、上限の本数で配る。** 超えたら"
         "利用者に諮る（上限を上げるか、`iad1` に移すか）。比べるのは「1 日目で選び、残りの日で"
         "測った」値（検証が 1 日なら検証日ぜんぶ）。",
@@ -406,7 +455,7 @@ def _budget(summaries: Sequence[Summary]) -> list[str]:
 
 
 def _budget_row(one: candidates.Budget, summary: Summary) -> str:
-    held = gates.CELL_GATE in summary.judged.holdout
+    held = gates.SERVED_GATE in summary.judged.holdout
     verdict = "—" if one.within is None else ("以内" if one.within else "**超える**")
     return _row(
         one.candidate.name,
