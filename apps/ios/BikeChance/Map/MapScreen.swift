@@ -52,6 +52,15 @@ struct MapScreen: View {
         span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
     )
 
+    /// 地図に重ねる案内とボタンの字の上限（iOS-6、W10 プランの所見 240）。
+    ///
+    /// 上下の案内は `.safeAreaInset` で地図の安全域を狭め、地図は**最初の範囲をその安全域に
+    /// 収めようとして引く**。AX5 では案内が画面のほとんどを覆い、残った細い帯に 0.02 度を
+    /// 収めるために範囲が広がりすぎて、「地図を拡大すると…」になりポートが 1 つも出なかった。
+    /// AX1 までは崩れない（XS・標準・XXXL・AX1 で撮って確かめた）ので、そこで止める。
+    /// 止めたぶん育たないアイコンのボタンは、長押しの拡大表示で読めるようにする。
+    static let overlayTypeSizeLimit = DynamicTypeSize.accessibility1
+
     /// 「N 分前の観測」を進め、頃合いなら取り直すための刻み。**Combine を持ち込まない**
     /// ために `Task.sleep` で回す（`.task` は画面が消えれば自動で止まる）。
     ///
@@ -122,6 +131,7 @@ struct MapScreen: View {
         .onMapCameraChange(frequency: .onEnd) { context in
             model.viewportChanged(to: Bbox(region: context.region))
         }
+        // **上下の案内の字は AX1 で止める**（`overlayTypeSizeLimit`。地図の安全域を残す）
         .safeAreaInset(edge: .top) {
             VStack(spacing: 8) {
                 StatusBanner(state: model.state, now: now)
@@ -134,8 +144,12 @@ struct MapScreen: View {
                     favoritesButton
                 }
             }
+            .dynamicTypeSize(...Self.overlayTypeSizeLimit)
         }
-        .safeAreaInset(edge: .bottom) { CreditFooter(showsCredits: $showsCredits) }
+        .safeAreaInset(edge: .bottom) {
+            CreditFooter(showsCredits: $showsCredits)
+                .dynamicTypeSize(...Self.overlayTypeSizeLimit)
+        }
         .sheet(isPresented: $showsCredits) { CreditsScreen() }
         .sheet(isPresented: $showsFavorites) { FavoritesScreen(model: favorites) }
         .onChange(of: tapped) { _, group in open(group) }
@@ -187,6 +201,10 @@ struct MapScreen: View {
             .background(.regularMaterial, in: Capsule())
         }
         .accessibilityLabel("現在地へ移動")
+        // 字の上限で育たないアイコンなので、長押しで大きく見せる（`overlayTypeSizeLimit`）
+        .accessibilityShowsLargeContentViewer {
+            Label("現在地へ移動", systemImage: "location")
+        }
     }
 
     /// 許可を求めること・現在地を取りに行くことは `LocationAuthorizer` が行う。ここは案内だけ。
@@ -234,6 +252,9 @@ struct MapScreen: View {
         }
         .padding(.trailing, 12)
         .accessibilityLabel("お気に入り \(favorites.favorites.count) 件")
+        .accessibilityShowsLargeContentViewer {
+            Label("お気に入り \(favorites.favorites.count) 件", systemImage: "star.fill")
+        }
     }
 
     /// 1 つの印。**まとめた印は灰色に数**（どれか 1 つの色にしない。W8-11）、1 つなら今までどおり。
