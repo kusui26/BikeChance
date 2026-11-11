@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
 export const metadata: Metadata = {
-  title: "BikeChance",
+  // 下の頁（`/privacy`・`/support`）は「プライバシーポリシー | BikeChance」のように出る
+  title: { default: "BikeChance", template: "%s | BikeChance" },
   description: "シェアサイクルのポートに着いたとき、借りられる／返せる確率を表示します。",
 };
 

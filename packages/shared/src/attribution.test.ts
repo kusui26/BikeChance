@@ -6,6 +6,7 @@ import {
   CREDIT_TEXT,
   CC_BY_4_0_URL,
   DATA_SOURCES,
+  ODPT_NOTICE_LINES,
   OPEN_METEO_URL,
   buildOdptNotice,
   formatCredit,
@@ -51,6 +52,11 @@ describe("attribution", () => {
     expect(notice).toContain("公共交通オープンデータセンター");
     expect(notice).toContain("直接の問合せは行わないでください");
     expect(notice).toContain("support@example.com");
+  });
+
+  it("通知文は本文の行と問い合わせ先の 1 行（Web の頁は本文の行を並べて、問い合わせ先をリンクにする）", () => {
+    const lines = buildOdptNotice("support@example.com").split("\n");
+    expect(lines).toEqual([...ODPT_NOTICE_LINES, "support@example.com"]);
   });
 
   it("ヘッダ用の値にトークンなど機密を含まない", () => {
