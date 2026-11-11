@@ -2,13 +2,17 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   プライバシーマニフェスト（W6 プランの PR K・W6-33、W7 プランの W7-07・開発プランの D-43）。
-  追跡しない・理由の要る API を使わない。**収集するのは「おおよその位置」だけ**。
+  追跡しない・理由の要る API を使わない。**収集するのは「おおよその位置」と「製品の操作」の 2 つ**。
 
   * おおよその位置：地図に表示している範囲を 0.01 度（約 1 km）の格子に丸めて `/v1` に送る。
     現在地の座標そのものは送らない。丸めた範囲は Vercel のランタイムログに最長 30 日残るので、
     「収集しない」とは言えない（W6 プランの所見 218）。ユーザーに連結しない（アカウントも
     端末の識別子も送らない）・トラッキングに使わない・目的はアプリの機能。
     App Store Connect のプライバシーの回答も同じにする
+  * 製品の操作（2026-11-08 に足した。W10 プランの所見 242、開発プランの D-43）：詳細を開いたポートと
+    お気に入りのポートの識別子、行程をチェックした内容（出発・到着のポート、出発の時刻、所要）、
+    選んだ到着の時刻も `/v1` のクエリで送り、同じ記録に残る。連結しない・トラッキングに使わない・
+    目的はアプリの機能。**送るものを変えたら、Web の `/privacy` の文と App Store Connect の回答も合わせる**
   * 理由の要る API：お気に入りは JSON のファイルに置いていて、UserDefaults もファイルの日時も読まない。
     **UserDefaults を使い始めたら、NSPrivacyAccessedAPITypes に CA92.1 を足す**
 -->
@@ -23,6 +27,18 @@
 		<dict>
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeCoarseLocation</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeProductInteraction</string>
 			<key>NSPrivacyCollectedDataTypeLinked</key>
 			<false/>
 			<key>NSPrivacyCollectedDataTypeTracking</key>

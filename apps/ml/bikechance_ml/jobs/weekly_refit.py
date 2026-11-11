@@ -5,6 +5,7 @@
 
 | 段（`phase`） | すること | 使うもの |
 |---|---|---|
+| `done` | その日の `ok` が在れば何もしない（`--skip-if-done` の回だけ。W9-13） | `job_runs` |
 | `gate` | 最終学習日の 3 つの `ok` を待つ（3 時間まで） | `refit_gate` |
 | `fit_b3` | B3 を 7 日で当てはめて置く | `fit_baseline` の CLI そのもの |
 | `verify` | 置いたバイト列が手元と同じか | Storage |
@@ -21,6 +22,12 @@
 包み、`job_runs` の `weekly_refit` に `failed`（`detail.phase`）で残す——`monitor_jobs` の
 `job_failed:` が鳴り（W8-05）、止まった段から手で続けられる。**門で待つ間は記録を始めない**
 （`refit_gate` の冒頭）。
+
+**定時の回は 1 日 1 度だけ**（`--skip-if-done`。W9-13、W9 プランの所見 237）：その日（最終学習日）
+の `weekly_refit` の `ok` が `job_runs` に在れば、**門より前で何もせずに終わる**（行も作らない）。
+GitHub の定時は何時間も遅れて来ることがあり、手で起こして済ませた後に来た回が昇格の前の候補を
+置き直すと、**人が読んだ記録と実物が黙って食い違う**。手で起こす回は付けない（失敗の後のやり直し
+に要る）。
 
 **試しの形**（`--trial`）は**何も書かない**：置かず・登録せず・`job_runs` にも残さない。合成器は
 手元に集めた部品で組み、試し打ちは今の shadow で叩く（候補は登録していないので本番の口で
@@ -151,6 +158,8 @@ class Options:
     repo: Path
     gate_wait_s: int
     gate_poll_s: int
+    #: その日の `ok` が在れば何もしない（**定時の回だけ**が付ける。W9-13）
+    skip_if_done: bool = False
 
 
 @dataclass(frozen=True)
@@ -491,6 +500,13 @@ def write_record(env: Env, made: refit_record.RefitReport) -> Written:
 def execute(env: Env) -> int:
     """門・段・記録の順に回す。**失敗は段の名前で `job_runs` に残す**（試しの形は残さない）。"""
     try:
+        done_at = phase("done", lambda: done_before(env))
+    except PhaseError as error:
+        record_failure(env, None, error)
+        return 1
+    if done_at is not None:
+        return skip(env, done_at)
+    try:
         gate = phase("gate", lambda: wait_gate(env))
     except PhaseError as error:
         record_failure(env, None, error)
@@ -504,6 +520,27 @@ def execute(env: Env) -> int:
         record_failure(env, run_id, error)
         return 1
     finish(env, run_id, made, written)
+    return 0
+
+
+#: 何もしなかった回が書く印。**ワークフローはこれを見て、記録の PR を開く段を飛ばす**
+SKIPPED_NAME: Final[str] = "skipped.json"
+
+
+def done_before(env: Env) -> datetime | None:
+    """その日の `ok` の始まり。**`--skip-if-done` の回だけが引く**（ほかは None）。"""
+    if not env.options.skip_if_done:
+        return None
+    return env.port.latest_ok_run(JOB_NAME, "date", env.options.day)
+
+
+def skip(env: Env, done_at: datetime) -> int:
+    """**何もせずに終わる。** `job_runs` に行を作らない——見張りは `ok` の行を見るので鳴らない。"""
+    body = {"skipped": True, "date": env.options.day.isoformat(), "done_at": done_at.isoformat()}
+    text = json.dumps(body, ensure_ascii=False)
+    (env.options.out / SKIPPED_NAME).write_text(text + "\n", encoding="utf-8")
+    started = f"{done_at.astimezone(UTC):%m-%d %H:%M} UTC"
+    print(f"{env.options.day} の当てはめ直しは済んでいました（ok の始まり {started}）")
     return 0
 
 
@@ -568,6 +605,11 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--trial", action="store_true", help="試しの形：置かず・登録せず・記録しない"
     )
+    parser.add_argument(
+        "--skip-if-done",
+        action="store_true",
+        help="その日の ok が job_runs に在れば何もしない（定時の回だけ。W9-13）",
+    )
     parser.add_argument("--out", required=True, help="報告書・本文・記録の書き出し先")
     parser.add_argument("--origin", required=True, help="本番の口（試し打ちの宛先）")
     parser.add_argument(
@@ -593,6 +635,7 @@ def options_of(arguments: argparse.Namespace, now: datetime) -> Options:
         repo=repo,
         gate_wait_s=arguments.gate_wait_s,
         gate_poll_s=arguments.gate_poll_s,
+        skip_if_done=arguments.skip_if_done,
     )
 
 

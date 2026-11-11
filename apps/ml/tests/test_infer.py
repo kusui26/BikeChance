@@ -48,6 +48,7 @@ from bikechance_ml.jobs.build_profiles import profile_bytes
 from bikechance_ml.jobs.fit_baseline import build_artifact
 from bikechance_ml.jobs.infer import (
     IN_COLUMNS,
+    NO_OBSERVATION,
     PROFILE_FALLBACK_DAYS,
     SHADOW_NO_PROFILE,
     Forecast,
@@ -290,13 +291,16 @@ class FakePort:
     model_downloads: list[str] = field(default_factory=list)
     #: 書いた順（`upsert` と `log`）。**shadow は配って記録してから**を見る（契約 34）
     events: list[str] = field(default_factory=list)
+    #: 基準の観測を読んだ時刻（`read_base_observed_at` の `at`）。**格子の時刻で読む**（W9-14）
+    base_reads: list[datetime] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # **新しい口は新しい世界。** 参照のキャッシュは日付で引くので、同じ日付で中身の違う版を
         # 持つ口を 1 つの検査に並べると、前の口の参照が出る（本番では版の中身は日付で決まる）
         forget_references()
 
-    def read_base_observed_at(self, system_id: str) -> datetime | None:
+    def read_base_observed_at(self, system_id: str, at: datetime) -> datetime | None:
+        self.base_reads.append(at)
         return self.base
 
     def list_stations(self, system_id: str) -> tuple[StationRow, ...]:
@@ -434,7 +438,39 @@ def test_no_observation_yet_is_skipped_without_claiming() -> None:
     port = FakePort(base=None, body=to_bytes(ARTIFACT))
     summary = run_inference(port, "hellocycling", NOW)
     assert summary.status == "skipped"
+    assert summary.error == NO_OBSERVATION
     assert port.claims == []
+
+
+def test_the_base_is_read_as_of_the_grid_time() -> None:
+    """**基準の観測は、格子の時刻までに取り込んだ最新のもの**（W9-14、所見 239）。
+
+    推論は基準時刻を格子に切り下げ、特徴量はその時刻までに取り込んだ観測だけを使う。
+    基準をいまの最新（実行の時点の `feed_state`）で読むと、**使っていない観測**を
+    「予測が基づく観測」として書く——HELLO は 11/2 の 288 周期すべてでそうなっていた。
+    """
+    port = ready_port()
+    summary = run_inference(port, "hellocycling", NOW)
+    assert port.base_reads == [AT]
+    assert NOW > AT, "実行の時刻ではなく、切り下げた格子の時刻で読む"
+    assert port.claims == [("hellocycling", BASE)]
+    assert summary.base_observed_at == BASE
+    assert {row["base_observed_at"] for row in port.written} == {BASE.isoformat()}
+
+
+def test_a_dry_run_reads_the_base_as_of_the_grid_time_too() -> None:
+    """試し打ちも同じ時刻で読む（確度 1 の判定 `at − base` が本番と同じになる）。"""
+    port = ready_port()
+    port.candidate = Registered(
+        model_version="baseline-candidate",
+        kind="baseline",
+        feature_set=ARTIFACT.feature_set,
+        artifact_path=artifact_path("baseline-candidate"),
+        status="candidate",
+    )
+    summary = run_inference(port, "hellocycling", NOW, "baseline-candidate")
+    assert summary.status == "dry_run"
+    assert port.base_reads == [AT]
 
 
 def test_a_missing_artifact_is_recorded_as_failed() -> None:
@@ -1930,6 +1966,26 @@ def test_a_composite_can_be_dry_run() -> None:
     assert (summary.status, summary.n_predicted, port.written) == ("dry_run", len(STATIONS), [])
     assert summary.composite == {"route": "gated", "forest_rows": {"bike": 1, "dock": 0}}
     assert to_detail(summary)["composite"] == summary.composite
+
+
+def test_a_composite_shadow_with_a_profile_walks_its_gates() -> None:
+    """**shadow に置いた合成器は、active にしたときと同じ確率を出す**——門のとおりに森を歩く。
+
+    W10 で初めて合成器を shadow に置く（新しい森と水平単位の門。D-33）。プロファイルの在る周期に、
+    shadow の予測ログが「その合成器を active にした周期の配った確率」と一致することを留める。
+    """
+    port = put_profile(ready_port(), _yesterday())
+    shadow = composite_port(status="candidate").candidate
+    assert shadow is not None
+    port.shadow = replace(shadow, status="shadow")
+    port.model_bodies.update(composite_port().model_bodies)
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.shadow is not None and summary.shadow.status == "ok"
+    as_active = put_profile(composite_port(), _yesterday())
+    served = run_inference(as_active, "hellocycling", NOW)
+    assert served.composite is not None and served.composite["route"] == "gated"
+    shadow_bikes = _logged_bikes(port, shadow.model_version)
+    assert shadow_bikes == {row["station_id"]: row["p_bike_x1000"] for row in as_active.written}
 
 
 def test_a_composite_shadow_without_a_profile_walks_as_b3() -> None:

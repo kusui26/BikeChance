@@ -32,8 +32,8 @@ B3 は `prof_*` を読まないので、配る確率は変わらない。**`prof
 のは人である（`promote_model_version()`・`retire_model_version()`。契約 39）。
 
 **前日の参照スナップショットは、組み立てた形で使い回す**（W6 の PR G の⑤、W6-20）。版は
-1 日 1 回（05:00 JST）しか変わらないのに、5 分毎に読んで組み立て直していた。**読む版の
-決め方は変えない**——新しい版から順に確かめるので、05:00 に版が置かれた次の周期から移る。
+1 日 1 回（05:02 JST）しか変わらないのに、5 分毎に読んで組み立て直していた。**読む版の
+決め方は変えない**——新しい版から順に確かめるので、05:02 に版が置かれた次の周期から移る。
 **段ごとの所要**（参照・観測・`build_now`）を `detail` に出す。
 """
 
@@ -84,6 +84,10 @@ UPSERT_BATCH: Final[int] = 4_000
 MS_PER_S: Final[int] = 1000
 NS_PER_MS: Final[int] = 1_000_000
 
+#: 基準の観測が無いときの理由（`inference_log` には何も書かない）。遡る幅は
+#: `io/supabase.py` の `BASE_LOOKBACK`（1 日）。
+NO_OBSERVATION: Final[str] = "格子の時刻までの 1 日に取り込んだ観測がありません"
+
 #: `getrusage` の `ru_maxrss` の単位。**本番（Linux）は KiB、macOS はバイト。**
 RSS_UNIT_B: Final[int] = 1 if sys.platform == "darwin" else 1024
 BYTES_PER_MB: Final[int] = 1024 * 1024
@@ -92,7 +96,7 @@ BYTES_PER_MB: Final[int] = 1024 * 1024
 class InferPort(Protocol):
     """入出力の口。テストはここだけを置き換える。"""
 
-    def read_base_observed_at(self, system_id: str) -> datetime | None: ...
+    def read_base_observed_at(self, system_id: str, at: datetime) -> datetime | None: ...
     def list_stations(self, system_id: str) -> tuple[StationRow, ...]: ...
     def list_snapshots(
         self, system_id: str, start: datetime, end: datetime
@@ -184,7 +188,7 @@ class Stages:
 class Features:
     """推論 1 回ぶんの特徴量と、**材料の版**（どちらも記録に出す）。
 
-    参照スナップショットの日付を持つのは、00:00〜05:00 JST に 1 つ古い版を使うことがあるため
+    参照スナップショットの日付を持つのは、00:00〜05:02 JST に 1 つ古い版を使うことがあるため
     （`reference_for`）。プロファイルも同じく、朝の穴では 1 つ古い版になる。
     """
 
@@ -334,7 +338,7 @@ def _refuse_without_profile(predictor: Predictor, read: ProfileRead) -> None:
 
 
 #: 参照スナップショットを何日前までさかのぼって探すか。
-#: **前日の版は 05:00 JST に書かれる**ので、00:00〜05:00 の推論はまだ読めない。
+#: **前日の版は 05:02 JST に書かれる**ので、00:00〜05:02 の推論はまだ読めない。
 REFERENCE_FALLBACK_DAYS: Final[int] = 2
 
 
@@ -348,7 +352,7 @@ class BuiltReference:
 
 
 #: 組み立てた参照（版の日付 → 中身）。**持つのは最後に組み立てた 1 版だけ**（W6 の PR G の⑤）。
-#: 版は 1 日 1 回（05:00 JST）しか変わらないのに、5 分毎に読んで組み立て直していた
+#: 版は 1 日 1 回（05:02 JST）しか変わらないのに、5 分毎に読んで組み立て直していた
 #: （W6 プラン §13.4）。**冷えれば消えるだけで、正しさに影響しない。**
 _REFERENCES: dict[date, BuiltReference] = {}
 
@@ -366,13 +370,13 @@ def forget_references() -> None:
 def reference_for(port: InferPort, day: date) -> tuple[BuiltReference, bool]:
     """読める中でいちばん新しい参照を、組み立てた形で返す。**2 つ目は使い回せたか。**
 
-    規則は学習と同じ「**前日の版**」だが、その版が置かれるのは **05:00 JST**
-    （`/ml/reference`）である。つまり **00:00〜05:00 JST の推論は前日の版をまだ読めない**
-    ので、そのあいだは 1 つ古い版を使う（W4 プラン §12 の 118）。**黙って古い版を使わない。**
-    使った日付は `inference_log.detail.reference_date` に残る。
+    規則は学習と同じ「**前日の版**」だが、その版が置かれるのは **05:02 JST**
+    （`/ml/reference`。D-48 までは 05:00）である。つまり **00:00〜05:02 JST の推論は
+    前日の版をまだ読めない**ので、そのあいだは 1 つ古い版を使う（W4 プラン §12 の 118）。
+    **黙って古い版を使わない。** 使った日付は `inference_log.detail.reference_date` に残る。
 
     **新しい版から順に確かめる**（使い回す前と同じ順・同じ往復）。持っているのが前々日の
-    版でも、前日の版が置かれていないかを毎周期確かめるので、05:00 に置かれた次の周期から
+    版でも、前日の版が置かれていないかを毎周期確かめるので、05:02 に置かれた次の周期から
     新しい版に移る。**読む版の決め方は、使い回す前と変わらない。**
     """
     for back in range(1, REFERENCE_FALLBACK_DAYS + 1):
@@ -486,7 +490,7 @@ class InferSummary:
     build_ms: int = 0
     #: 除外の内訳（理由 → ポート数）。**なぜ出せなかったかが分かる**
     excluded: Mapping[str, int] = field(default_factory=dict)
-    #: 使った参照スナップショットの日付。**00:00〜05:00 JST は 1 つ古い版になる**
+    #: 使った参照スナップショットの日付。**00:00〜05:02 JST は 1 つ古い版になる**
     reference_date: str | None = None
     #: 使えた予報の発行数。**0 なら天気の 4 列は全部 NULL**（W4 プラン §6.4）
     weather_issues: int = 0
@@ -674,20 +678,24 @@ def run_inference(
     started = datetime.now(UTC)
     cpu_started = time.process_time_ns()
     chosen = registry.active(port) if model_version is None else registry.named(port, model_version)
+    # **基準時刻は 5 分格子に落とす。** 水平の起点は `generated_at` なので、
+    # 書き込む `generated_at` も同じ時刻にする（W4 プラン §12 の 114）
+    at = grid_time(now)
     if chosen.status != "active":
-        return _dry_run(port, system_id, chosen, now, started, cpu_started)
-    base = port.read_base_observed_at(system_id)
+        return _dry_run(port, system_id, chosen, at, started, cpu_started)
+    # **基準の観測は、格子の時刻までに取り込んだ最新のもの**（特徴量の as-of と同じ規則）。
+    # いまの最新（`feed_state`）を書くと、使っていない観測を「予測が基づく観測」と名乗る
+    # （W9 プランの所見 239・W9-14）
+    base = port.read_base_observed_at(system_id, at)
     if base is None:
-        return _skipped(
-            system_id, chosen.model_version, None, started, cpu_started, "観測がまだありません"
-        )
+        return _skipped(system_id, chosen.model_version, None, started, cpu_started, NO_OBSERVATION)
 
     run_id = port.begin_inference(system_id, base, chosen.model_version)
     if run_id is None:
         return _skipped(system_id, chosen.model_version, base, started, cpu_started, None)
 
     try:
-        summary = _produce(port, system_id, chosen, now, base, started, cpu_started)
+        summary = _produce(port, system_id, chosen, at, base, started, cpu_started)
     except Exception as cause:
         elapsed = _elapsed_ms(started)
         port.finish_inference(run_id, "failed", 0, elapsed, type(cause).__name__)
@@ -715,7 +723,7 @@ def _dry_run(
     port: InferPort,
     system_id: str,
     chosen: registry.Registered,
-    now: datetime,
+    at: datetime,
     started: datetime,
     cpu_started: int,
 ) -> InferSummary:
@@ -726,7 +734,6 @@ def _dry_run(
     （`to_payload` → `batches` → `upsert_forecasts`）。
     """
     predictor, model_load_ms = _load(port, chosen)
-    at = grid_time(now)
     features_started = time.monotonic_ns()
     features = read_features(port, system_id, at, frozenset(port.list_holidays()))
     features_ms = _ms_since(features_started)
@@ -734,7 +741,7 @@ def _dry_run(
     predictor = registry.for_cycle(predictor, features.profile.edition is not None)
     # **試し打ちでも止める。** プロファイル無しの `prof_*` で出した確率は、見ても意味が無い
     _refuse_without_profile(predictor, features.profile)
-    base = port.read_base_observed_at(system_id)
+    base = port.read_base_observed_at(system_id, at)
     stale = base is None or (at - base).total_seconds() > MAX_STALENESS_S
     forecasts = predict(predictor, system_id, at, features.ready.table, stale)
     done = Done(started, cpu_started, features_ms, model_load_ms)
@@ -823,7 +830,7 @@ def _produce(
     port: InferPort,
     system_id: str,
     chosen: registry.Registered,
-    now: datetime,
+    at: datetime,
     base: datetime,
     started: datetime,
     cpu_started: int,
@@ -832,9 +839,6 @@ def _produce(
     found = _find_shadow(port)
     _retain_serving(chosen.model_version, found)
     predictor, model_load_ms = _load(port, chosen)
-    # **基準時刻は 5 分格子に落とす。** 水平の起点は `generated_at` なので、
-    # 書き込む `generated_at` も同じ時刻にする（W4 プラン §12 の 114）
-    at = grid_time(now)
     features_started = time.monotonic_ns()
     features = read_features(port, system_id, at, frozenset(port.list_holidays()))
     features_ms = _ms_since(features_started)
@@ -860,7 +864,7 @@ class Cycle:
     system_id: str
     #: 5 分格子に落とした基準時刻（`generated_at`）
     at: datetime
-    #: 最後に取れた観測の時刻（`base_observed_at`）
+    #: 格子の時刻までに取り込んだ最新の観測の時刻（`base_observed_at`。**特徴量が使った観測**）
     base: datetime
     stale: bool
 
@@ -1099,7 +1103,7 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
         # 遅くなったときに読み込みなのか組み立てなのかが分からない
         "features_ms": summary.features_ms,
         # **その内訳**（W6 の PR G、W6-20）。参照は使い回せた周期（`hit`）はほぼ 0 で、
-        # 05:00 JST に新しい版が置かれた次の周期と、インスタンスが替わった最初の周期が `miss`
+        # 05:02 JST に新しい版が置かれた次の周期と、インスタンスが替わった最初の周期が `miss`
         "reference_ms": summary.reference_ms,
         "reference_cache": summary.reference_cache,
         "observations_ms": summary.observations_ms,

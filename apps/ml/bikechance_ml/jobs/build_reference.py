@@ -57,7 +57,7 @@ from bikechance_ml.jobs.build_features import SYSTEM_IDS, to_parquet_bytes
 from bikechance_ml.jobs.snapshot_table import has_current_schema, parquet_path
 from bikechance_ml.jobs.snapshot_table import read_table as read_snapshot_table
 
-#: `job_runs` と `monitored_jobs` に載る名前。**毎日 1 回**（05:00 JST）。
+#: `job_runs` と `monitored_jobs` に載る名前。**毎日 1 回**（05:02 JST。D-48 までは 05:00）。
 JOB_NAME: Final[str] = "build_reference"
 
 
@@ -222,7 +222,7 @@ def build_and_upload(source: ReferencePort, day: date, now: datetime) -> dict[st
 
 def run(argv: Sequence[str] | None = None) -> int:
     options = _arguments(argv)
-    # **既定は前日ぶん。** 05:00 JST に走らせるので、その日の観測は揃っている
+    # **既定は前日ぶん。** 05:02 JST に走らせるので、その日の観測は揃っている
     day = date.fromisoformat(options.date) if options.date else jst_yesterday(datetime.now(UTC))
     with open_storage(read_storage_config()) as source:
         if options.upload:

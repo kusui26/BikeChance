@@ -8,6 +8,7 @@
   * 置いた回は、B3 → 確かめ → 登録 → 合成器を置いて登録 → 試し打ち → 記録 の順
   * **試しの形**：置かず・登録せず・`job_runs` も書かず、試し打ちは今の shadow で叩く
   * 記録には版の名前を差し込んだ昇格の SQL が入り、**差し込み口は残らない**
+  * **定時の回はその日の `ok` が在れば何もしない**（W9-13）。手で起こす回はやり直せる
 
 合成器は**本物の `build_composite`** で組む（部品は `tests/composite_fixture.py`）。当てはめ・
 評価・点検は、それぞれの検査が別にあるので、ここでは差し替える。
@@ -75,6 +76,10 @@ class FakePort:
     metrics: tuple[drop_cells.DailyMetric, ...] = ()
     arrive: datetime = START
     clock: FakeClock | None = None
+    #: その日の `weekly_refit` の `ok` の始まり（W9-13）。None なら済んでいない
+    refit_done: datetime | None = None
+    #: `weekly_refit` の `ok` を引くと落ちる（引く口の不調）
+    refit_lookup_fails: bool = False
 
     def download(self, bucket: str, path: str) -> bytes | None:
         return self.objects.get((bucket, path))
@@ -101,6 +106,11 @@ class FakePort:
         return datetime(2026, 9, 3, 1, 32, tzinfo=UTC)
 
     def latest_ok_run(self, job_name: str, date_key: str, day: date) -> datetime | None:
+        """**仕事の名前で分ける**：当てはめ直し自身（W9-13）と、門が待つ 3 つ。"""
+        if job_name == job.JOB_NAME:
+            if self.refit_lookup_fails:
+                raise RuntimeError("PostgREST に届かない")
+            return self.refit_done if day == DAY else None
         now = START if self.clock is None else self.clock.now()
         return self.arrive if self.arrive <= now and day == DAY else None
 
@@ -177,7 +187,12 @@ def _repo(tmp_path: Path) -> Path:
 
 
 def _env(
-    tmp_path: Path, port: FakePort, *, trial: bool = False, infer: FakeInfer | None = None
+    tmp_path: Path,
+    port: FakePort,
+    *,
+    trial: bool = False,
+    infer: FakeInfer | None = None,
+    skip_if_done: bool = False,
 ) -> job.Env:
     clock = FakeClock(START)
     port.clock = clock
@@ -188,6 +203,7 @@ def _env(
         repo=_repo(tmp_path),
         gate_wait_s=refit_gate.WAIT_S,
         gate_poll_s=refit_gate.POLL_S,
+        skip_if_done=skip_if_done,
     )
     options.out.mkdir(parents=True)
     return job.Env(port=port, infer=infer or FakeInfer(), clock=clock, options=options)
@@ -310,6 +326,111 @@ def test_the_summary_is_left_in_job_runs(tmp_path: Path, monkeypatch: pytest.Mon
     assert port.finished[-1][1] == "ok"
     detail = _last_detail(port)
     assert (detail["b3"], detail["composite"], detail["dropped"]) == (NEW_B3, NEW_COMPOSITE, 1)
+
+
+def test_the_record_shows_the_bss_from_b0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**評価の表に B0 と B3 の BSS**（W9-13。昇格の目安「BSS +10% 前後」を記録から読む）。
+
+    仕込みの評価は小さな表で、B0 の Brier が 0（完全に当てる）なので、BSS は書けずに「—」になる。
+    """
+    port = _port()
+    _stub(monkeypatch, port)
+    env = _env(tmp_path, port)
+    assert job.execute(env) == 0
+    record = (env.options.repo / "docs" / "refits" / f"{DAY}.md").read_text()
+    assert "| 系統/ターゲット | B0 | B1 | B3 | B3 の BSS |" in record
+    facts = register_body.eval_facts(test_eval_harness.OUTCOME, DAY)
+    key = sorted(facts.brier_b3)[0]
+    row = f"| {key} | 0.00000 | {facts.brier_b1[key]:.5f} | {facts.brier_b3[key]:.5f} | — |"
+    assert row in record
+
+
+def test_the_bss_column_is_the_improvement_from_b0() -> None:
+    facts = register_body.EvalFacts(
+        DAY,
+        "分割",
+        10,
+        {"hellocycling/bike": 0.09},
+        {"hellocycling/bike": 0.095},
+        {"hellocycling/bike": 0.10},
+        (),
+        40,
+    )
+    rows = refit_record._brier_rows(facts)
+    assert rows[-1] == "| hellocycling/bike | 0.10000 | 0.09500 | 0.09000 | +10.0% |"
+
+
+def test_a_zero_reference_brier_writes_no_ratio() -> None:
+    assert refit_record._bss(0.01, 0.0) == "—"
+    assert refit_record._bss(0.09, 0.10) == "+10.0%"
+    assert refit_record._bss(0.11, 0.10) == "-10.0%"
+
+
+# ── 1 日 1 度だけ（W9-13）────────────────────────────────────
+def test_a_scheduled_run_does_nothing_when_the_day_is_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**門より前で何もせずに終わる**：当てはめず・置かず・行も作らず、印だけを書く。"""
+    port = _port()
+    fitted = _stub(monkeypatch, port)
+    port.refit_done = START + timedelta(hours=4)
+    env = _env(tmp_path, port, skip_if_done=True)
+    assert job.execute(env) == 0
+    assert fitted == [], "当てはめない"
+    assert port.events == [], "置かず・登録せず・行も作らない"
+    marker = json.loads((env.options.out / job.SKIPPED_NAME).read_text())
+    assert marker == {"skipped": True, "date": str(DAY), "done_at": port.refit_done.isoformat()}
+    assert not (env.options.out / "record.md").exists()
+    assert not (env.options.out / "pr.json").exists(), "記録の PR を開かない"
+
+
+def test_a_scheduled_run_goes_on_when_the_day_is_not_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    port = _port()
+    _stub(monkeypatch, port)
+    env = _env(tmp_path, port, skip_if_done=True)
+    assert job.execute(env) == 0
+    assert port.events[0] == "started weekly_refit"
+    assert not (env.options.out / job.SKIPPED_NAME).exists()
+    assert (env.options.out / "pr.json").exists()
+
+
+def test_a_manual_run_redoes_a_day_that_is_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**手で起こす回は見ない**（失敗や確認の後のやり直しに要る。`docs/refits/README.md`）。"""
+    port = _port()
+    _stub(monkeypatch, port)
+    port.refit_done = START
+    env = _env(tmp_path, port)
+    assert job.execute(env) == 0
+    assert f"register {NEW_B3}" in port.events
+    assert not (env.options.out / job.SKIPPED_NAME).exists()
+
+
+def test_a_failed_done_lookup_is_recorded_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**済んだか分からないなら進まない**（置き直す危うさを取らない）。`done` の段で `failed`。"""
+    port = _port()
+    fitted = _stub(monkeypatch, port)
+    port.refit_lookup_fails = True
+    assert job.execute(_env(tmp_path, port, skip_if_done=True)) == 1
+    assert fitted == []
+    assert port.events == ["started weekly_refit", "finished failed"]
+    detail = _last_detail(port)
+    assert (detail["phase"], detail["error"]) == ("done", "done: RuntimeError")
+
+
+def test_the_cli_flag_reaches_the_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _repo(tmp_path)
+    monkeypatch.chdir(repo)
+    base = ["--out", str(tmp_path / "out"), "--origin", "https://example.test"]
+    now = datetime(2026, 11, 2, 1, 30, tzinfo=UTC)
+    plain = job.options_of(job._arguments(base), now)
+    flagged = job.options_of(job._arguments([*base, "--skip-if-done"]), now)
+    assert (plain.skip_if_done, flagged.skip_if_done) == (False, True)
 
 
 # ── 試しの形 ──────────────────────────────────────────────────

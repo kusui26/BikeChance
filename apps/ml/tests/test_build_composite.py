@@ -283,6 +283,29 @@ def test_nothing_is_placed_without_upload() -> None:
     assert not [one for one in port.events if one.startswith(("upload", "register"))]
 
 
+@pytest.mark.parametrize(
+    ("rule", "name"),
+    [
+        ({"unit": "horizon"}, "水平単位"),
+        ({"unit": "cell"}, "セル単位"),
+        ({"unit": "weekly"}, "単位 weekly"),
+        ({}, "単位が無い表"),
+    ],
+)
+def test_the_card_names_the_unit_the_table_was_decided_in(
+    rule: dict[str, object], name: str
+) -> None:
+    """**カードの見出しは表の `rule.unit` から**（決め打ちしない。D-33 で水平に直した）。"""
+    assert job.unit_name(rule) == name
+
+
+def test_the_summary_carries_the_99th_percentile_of_the_border() -> None:
+    """**記録（要約）にも境目の差の 99%**（W8 の宿題。いままでカードにだけあった）。"""
+    text = job.describe(job.make(storage(), request(), NOW))
+    assert "境目の差（森の行" in text
+    assert "・99% " in text
+
+
 def test_the_card_tells_the_parts_cells_border_and_serving() -> None:
     made = job.make(storage(), request(), NOW)
     card = job.render_card(made)

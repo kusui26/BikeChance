@@ -89,12 +89,26 @@ def test_exactly_the_limit_does_not_pass() -> None:
 
 
 # ── D-32 の (c) ────────────────────────────────────────────────
+def test_the_budget_reads_the_served_unit_not_the_cell() -> None:
+    """**本数の比べはセル単位でなく配る単位（水平。D-33）の形で行う**。"""
+    served = {
+        gates.CELL_GATE: gates.Served(improvement=0.50, forest_share=0.5),
+        gates.SERVED_GATE: gates.Served(improvement=0.12, forest_share=0.8),
+    }
+    judged = gates.Judged(model="LGBM", cells=(), horizons=(), served=served, holdout=served)
+    summary = candidates.Summary(
+        Candidate(50, 0.15), judged, candidates.EceSummary(0.0, "—", {}, 0.0, "—"), ()
+    )
+    assert candidates.budget_basis(summary).improvement == pytest.approx(0.12)
+
+
 def _summary(
     trees: int, rate: float, *, holdout: float | None, served: float
 ) -> candidates.Summary:
     """配る形の改善だけを持つまとめ（**ほかの欄は見ない**）。"""
-    cell = {gates.CELL_GATE: gates.Served(improvement=served, forest_share=0.5)}
-    held = {} if holdout is None else {gates.CELL_GATE: gates.Served(holdout, forest_share=0.5)}
+    # **比べるのは配る単位の形**（D-33 で水平単位）。ほかの単位の値は比べに使わない
+    cell = {gates.SERVED_GATE: gates.Served(improvement=served, forest_share=0.5)}
+    held = {} if holdout is None else {gates.SERVED_GATE: gates.Served(holdout, forest_share=0.5)}
     judged = gates.Judged(
         model=Candidate(trees, rate).name, cells=(), horizons=(), served=cell, holdout=held
     )

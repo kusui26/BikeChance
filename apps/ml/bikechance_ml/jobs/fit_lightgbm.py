@@ -656,6 +656,7 @@ def _to_gate_rows(summary: Summary, chosen: Chosen) -> dict[str, object]:
         "rule": dict(chosen.gates.rule),
         "cells": _counts(judged, gates.CELL_GATE),
         "horizons": _counts(judged, gates.HORIZON_GATE),
+        "exceptions": len(judged.exceptions()),
     }
 
 
@@ -693,7 +694,7 @@ def _to_ece_rows(ece: EceSummary) -> dict[str, object]:
 
 
 def _to_decision_rows(decisions: Sequence[candidates.GroupDecision]) -> dict[str, object]:
-    """意思決定の指標（W6-16）。**いまの B3 と、セル単位の門で配る形**を並べる。"""
+    """意思決定の指標（W6-16）。**いまの B3 と、配る単位の門で配る形**を並べる。"""
     return {
         f"{one.system}/{one.target}": {
             "b3": _decision_json(one.reference),
@@ -1155,23 +1156,41 @@ def _verification_lines(checks: Mapping[str, Checked]) -> list[str]:
 
 def _card_gates(summary: Summary, chosen: Chosen) -> list[str]:
     judged = summary.judged
-    whole = judged.served[gates.CELL_GATE]
-    held = judged.holdout.get(gates.CELL_GATE)
+    whole = judged.served[gates.SERVED_GATE]
+    held = judged.holdout.get(gates.SERVED_GATE)
     return [
-        "## 門（セル単位。開発プラン §7.1、契約 35）",
+        f"## 門（{gates.UNIT_NAMES[gates.SERVED_GATE]}。開発プラン §7.1・D-33、契約 35）",
         "",
-        "**LightGBM を配るのは、門の相手（B3）を 10% 以上改善したセルだけ**で、判定の対象外"
-        "（B0 の Brier が 0.001 未満）と届かないセルは B3 を配る。門は検証日ぜんぶで決め、"
+        "**LightGBM を配るのは、門の相手（B3）を 10% 以上改善した水平だけ**で、判定の対象外"
+        "（B0 の Brier が 0.001 未満）と届かない水平は B3 を配る。**門を越えた水平でも、"
+        "LightGBM が B3 より悪いセル（台数バケツ）は B3**（D-33）。門は検証日ぜんぶで決め、"
         "表は森の隣に置いた（合成器がそのまま焼き付ける）。",
         "",
-        f"- **越えたセル**：{len(judged.passing(gates.CELL_GATE))}"
-        f"（判定の対象 {len(judged.judgeable(gates.CELL_GATE))} / 全 {len(judged.cells)}）",
+        *_crossed_lines(judged),
         f"- **配る形の改善**（B3 比、4 組の平均）：検証日ぜんぶで {whole.improvement:+.2%}"
         f"・1 日目で選び残りで測ると {'—' if held is None else f'{held.improvement:+.2%}'}",
         f"- **森を歩く行**（費用の重み付き）：{whole.forest_share:.1%}",
         f"- **門の表**：`{gate_tables.gates_path(chosen.gates.model_version)}`"
         f"（LightGBM に回すセル {len(chosen.gates.lightgbm_cells())}）",
         "",
+    ]
+
+
+def _crossed_lines(judged: gates.Judged) -> list[str]:
+    """越えた数。**配る単位（水平）と例外のセル**、比べるためのセル単位の数も並べる。"""
+    exceptions = "・".join(
+        f"{one.system} {one.target} {one.h_min} 分 {one.bucket}（{one.improvement:+.2%}）"
+        if one.improvement is not None
+        else f"{one.system} {one.target} {one.h_min} 分 {one.bucket}"
+        for one in judged.exceptions()
+    )
+    return [
+        f"- **越えた水平**：{len(judged.passing(gates.HORIZON_GATE))}"
+        f"（判定の対象 {len(judged.judgeable(gates.HORIZON_GATE))} / 全 {len(judged.horizons)}）",
+        f"- **例外のセル**（門を越えた水平で B3 に回す）：{len(judged.exceptions())}"
+        + (f"——{exceptions}" if exceptions else ""),
+        f"- セル単位で越えたセル（比べるため）：{len(judged.passing(gates.CELL_GATE))}"
+        f"（判定の対象 {len(judged.judgeable(gates.CELL_GATE))} / 全 {len(judged.cells)}）",
     ]
 
 
@@ -1196,7 +1215,7 @@ def _card_decisions(summary: Summary) -> list[str]:
     return [
         "## 意思決定の指標（W6-16、開発プラン §7.3）",
         "",
-        "**アプリの約束がどれだけ実現するか。** いまの B3 と、セル単位の門で配る形を並べる"
+        "**アプリの約束がどれだけ実現するか。** いまの B3 と、配る単位の門で配る形を並べる"
         "（3 段階は**割合 / 実現率**、重み付き）。",
         "",
         *candidate_report.decision_table(summary),

@@ -189,6 +189,46 @@ def test_snapshot_select_asks_for_fetched_at() -> None:
     assert "fetched_at" in seen[0].url.params["select"]
 
 
+# ── 推論の基準の観測（W9-14、W9 プランの所見 239）──────────────────
+def test_the_base_is_the_latest_observation_fetched_by_the_grid_time() -> None:
+    """**`fetched_at <= at` の中で `observed_at` が最大の 1 行**（特徴量の as-of と同じ規則）。
+
+    `feed_state.last_observed_at`（いまの最新）を読んでいたときは、格子の時刻の後に
+    取り込んだ観測を基準と書いていた。遡るのは 1 日まで。
+    """
+    at = datetime(2026, 11, 3, 0, 0, tzinfo=UTC)
+    io, seen = io_with(
+        lambda request: json_response([{"observed_at": "2026-11-02T23:55:47+00:00"}])
+    )
+    base = io.read_base_observed_at("hellocycling", at)
+    assert base == datetime(2026, 11, 2, 23, 55, 47, tzinfo=UTC)
+    request = seen[0]
+    assert request.url.path == "/rest/v1/status_snapshots"
+    params = request.url.params
+    assert params["select"] == "observed_at"
+    assert params["system_id"] == "eq.hellocycling"
+    assert (
+        params["and"]
+        == "(fetched_at.lte.2026-11-03T00:00:00Z,observed_at.gte.2026-11-02T00:00:00Z)"
+    )
+    assert params["order"] == "observed_at.desc"
+    assert params["limit"] == "1"
+
+
+def test_the_base_read_converts_the_grid_time_to_utc() -> None:
+    """JST の格子の時刻を渡されても 9 時間ずれない。"""
+    jst = timezone(timedelta(hours=9))
+    io, seen = io_with(lambda request: json_response([]))
+    io.read_base_observed_at("docomo-cycle", datetime(2026, 11, 3, 9, 0, tzinfo=jst))
+    assert seen[0].url.params["and"].startswith("(fetched_at.lte.2026-11-03T00:00:00Z,")
+
+
+def test_no_observation_by_the_grid_time_is_none() -> None:
+    """1 日のうちに取り込んだ観測が無ければ None（推論は行を作らずに飛ばす）。"""
+    io, _ = io_with(lambda request: json_response([]))
+    assert io.read_base_observed_at("hellocycling", START) is None
+
+
 def test_snapshot_without_fetched_at_is_a_parse_failure() -> None:
     """列が返ってこなければ**止まる**。null で埋めて先に進まない。
 

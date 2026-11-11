@@ -65,14 +65,19 @@ jobs:
           manifest="$app/PrivacyInfo.xcprivacy"
           plutil -lint "$manifest"
           test "$(plutil -extract NSPrivacyTracking raw "$manifest")" = "false"
-          # 集めるのは「おおよその位置」1 種類だけ・連結なし・トラッキングなし・目的はアプリの機能
-          # （W7 の W7-07、開発プランの D-43。App Store Connect のプライバシーの回答と揃える）
-          test "$(plutil -extract NSPrivacyCollectedDataTypes raw "$manifest")" = "1"
+          # 集めるのは「おおよその位置」と「製品の操作」の 2 種類・どちらも連結なし・トラッキングなし・
+          # 目的はアプリの機能（W7 の W7-07、開発プランの D-43。製品の操作は 2026-11-08、W10 プランの
+          # 所見 242。App Store Connect のプライバシーの回答と揃える）
+          test "$(plutil -extract NSPrivacyCollectedDataTypes raw "$manifest")" = "2"
           test "$(plutil -extract NSPrivacyCollectedDataTypes.0.NSPrivacyCollectedDataType raw "$manifest")" = "NSPrivacyCollectedDataTypeCoarseLocation"
-          test "$(plutil -extract NSPrivacyCollectedDataTypes.0.NSPrivacyCollectedDataTypeLinked raw "$manifest")" = "false"
-          test "$(plutil -extract NSPrivacyCollectedDataTypes.0.NSPrivacyCollectedDataTypeTracking raw "$manifest")" = "false"
-          test "$(plutil -extract NSPrivacyCollectedDataTypes.0.NSPrivacyCollectedDataTypePurposes.0 raw "$manifest")" = "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+          test "$(plutil -extract NSPrivacyCollectedDataTypes.1.NSPrivacyCollectedDataType raw "$manifest")" = "NSPrivacyCollectedDataTypeProductInteraction"
+          for i in 0 1; do
+            test "$(plutil -extract NSPrivacyCollectedDataTypes.$i.NSPrivacyCollectedDataTypeLinked raw "$manifest")" = "false"
+            test "$(plutil -extract NSPrivacyCollectedDataTypes.$i.NSPrivacyCollectedDataTypeTracking raw "$manifest")" = "false"
+            test "$(plutil -extract NSPrivacyCollectedDataTypes.$i.NSPrivacyCollectedDataTypePurposes raw "$manifest")" = "1"
+            test "$(plutil -extract NSPrivacyCollectedDataTypes.$i.NSPrivacyCollectedDataTypePurposes.0 raw "$manifest")" = "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+          done
           test "$(plutil -extract ITSAppUsesNonExemptEncryption raw "$app/Info.plist")" = "false"
           # 位置の利用目的の文がある（許可を求める画面に出る。無いと許可を求められない）
           plutil -extract NSLocationWhenInUseUsageDescription raw "$app/Info.plist" | grep -q "約 1 km"
-          echo "OK: マニフェスト（おおよその位置）・利用目的の文・暗号化の申告が $app に入っている"
+          echo "OK: マニフェスト（おおよその位置・製品の操作）・利用目的の文・暗号化の申告が $app に入っている"
