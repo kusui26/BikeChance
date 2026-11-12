@@ -63,6 +63,7 @@ xcrun simctl launch booted app.bikechance.BikeChance
 | **予測値には予測時刻、実測値には観測時刻を添える** | CLAUDE.md §2 の 7（W6 の契約 43）。文言は 1 か所で作る | `ForecastDisplay.basisText`・`StationCurrent.currentLine` |
 | **ポート詳細の予測は、到着時刻ごとの点で出す。線でつながない** | 曲線は補間していない生の 10 点で、水平の境目では森と B3 が切り替わって段が立つ（W7 プラン §10.2 の 7・§10.3）。線にすると段が「動き」に見えるので、点のあいだは予測していないと添える。**縦軸は 0〜100% に固定**（自動の目盛りは 5% の差を崖に見せる）。過ぎた到着の点は出さない | `ForecastTimeline`（Core）・`ForecastTimelineChart` |
 | **直近 24 時間は、観測の無い時間を穴のまま描く** | サーバーは観測の無い時間の行を作らない（migration 0046）。0 で埋めない・棒をつながない。横軸はサーバーが切った 24 時間で、**集計を待っている最後の 1 時間だけは穴にしない**（毎時 :12 の集計の前に開くと無い）。**上限なしのポートの空き枠は数を出さない**（W7-05） | `RecentHistory`（Core）・`RecentHistoryChart` |
+| **ふだんの傾向は「予測」と書かず、版の日付を添える** | 過去 4 週の統計で、いまの台数を見ない（開発プランの D-47、W9-06）。見出しは「ふだんの傾向」、注記に版の日付と「予測ではありません」。**色の段と丸めは地図と同じ**（読み方を 1 つにする）。**出せない時間は灰色**（0% と読ませない）、今日の過ぎた時間は薄く。**時刻は JST で数える**（端末の時間帯で読み替えると別の時間の色になる）。`trend` の無い応答（W9 の PR B より前のサーバー）も読め、欄は「まだ出せません」。**字が大きいときは日付の欄を広げ、アクセシビリティの大きな字では日付をマスの上に置く**（左のままだと 1 字ずつ折り返す）。読み上げは行ごとに、帯ごとの時間の範囲を言う | `TrendHeatmap`（Core）・`TrendHeatmapView` |
 
 ## 契約テスト
 
@@ -74,8 +75,9 @@ xcrun simctl launch booted app.bikechance.BikeChance
 - `stations_preface.json`（2026-10-14）… いまのポート応答（`139.76,35.68,139.77,35.69`、9 ポート）。**クレジットの前置き `attribution_preface` つき**（W6 の PR J）
 - `stations_unbounded.json`（2026-10-22）… ポート応答（`139.62,35.47,139.64,35.49`、42 ポート）。**上限なしの印 `capacity_unbounded` つき**——横浜の HELLO の 20110・20111（宣言の容量 1000）だけが true（W7 の PR C、W7-05）
 - `stations_cells.json`（2026-09-27）… **セル応答**（`139.76,35.67,139.85,35.70`、9 格子。`stations` が無い）
-- `station_detail*.json`（2026-09-13。`_unbounded` を除く）… ポート詳細（予測の曲線あり・なし）
+- `station_detail*.json`（2026-09-13。`_unbounded`・`_trend` を除く）… ポート詳細（予測の曲線あり・なし）。**`trend` を足す前**の形
 - `station_detail_unbounded.json`（2026-10-22）… ポート詳細（ドコモの 4161。空き枠 32767・容量なし・`capacity_unbounded` true）
+- `station_detail_trend.json`（2026-11-12）… いまのポート詳細（ドコモの 7569）。**ふだんの傾向 `trend` つき**——版は 11-11、今日から 7 日。土曜の行が丸ごと、日曜の 0〜4 時が null（データを集めている時間。W9 の PR B）
 - `trip_check*.json`（2026-09-13。`_unbounded` を除く）… 行程チェック
 - `trip_check_unbounded.json`（2026-10-22）… 行程チェック（HELLO の 13499 → 20110。到着と、代わりの候補の 20111 が `capacity_unbounded` true）
 - `meta.json`（2026-09-09）… `/v1/meta`。**前置きと出典を足す前**の形（いまの iOS も読めることを確かめる）

@@ -332,6 +332,42 @@ public struct RecentHour: Decodable, Equatable, Sendable {
     }
 }
 
+/// ふだんの傾向の 1 日（`trend.days[]`。W9-05、開発プランの D-47）。**予測ではない。**
+///
+/// **日付は JST の暦日の文字列のまま持つ**（`Date` にしない）。時刻ではなく「その日」で、
+/// 端末の時間帯で読み替えると別の日になる。**曜日種別も列挙にしない**——知らない値が来たときに
+/// 詳細の応答ごと読めなくなるので、読み方は `TrendHeatmap` が決める。
+public struct TrendDay: Decodable, Equatable, Sendable {
+    /// JST の暦日（`YYYY-MM-DD`）。
+    public let date: String
+    /// サーバーが暦（祝日）で決めた曜日種別：`sat`・`sun_holiday`・`weekday`。
+    public let dowType: String
+    /// 借りられる確率（0〜1。**0〜23 時の 24 個**）。nil は出せない時間。
+    public let bike: [Double?]
+    /// 返せる確率。
+    public let dock: [Double?]
+
+    private enum CodingKeys: String, CodingKey {
+        case date
+        case dowType = "dow_type"
+        case bike = "p_bike"
+        case dock = "p_dock"
+    }
+}
+
+/// ポートの「ふだんの傾向」（今日から 7 日 × 24 時間）。**いまの台数を見ない、過去 4 週の統計。**
+public struct StationTrend: Decodable, Equatable, Sendable {
+    /// どの日までの 4 週の観測から作ったか（JST の暦日。**画面に版の日付として出す**）。
+    public let profileDate: String
+    /// 今日（JST）から 7 日。
+    public let days: [TrendDay]
+
+    private enum CodingKeys: String, CodingKey {
+        case profileDate = "profile_date"
+        case days
+    }
+}
+
 /// `/v1/stations/{system}/{station_id}` の応答（W5 の PR F）。
 ///
 /// **`at` を送らない。** 曲線が返るので到着時刻が要らず、送ると同じポートの URL が
@@ -345,6 +381,9 @@ public struct StationDetailResponse: Decodable, Equatable, Sendable {
     public let forecastCurve: ForecastCurve?
     /// 直近 24 時間（**最大 24 件**。観測の無い時間帯は入らない）。
     public let recent: [RecentHour]
+    /// ふだんの傾向（W9-05）。**まだ写していない・版が古いポートは nil**。
+    /// **W9 の PR B より前のサーバーは返さない**ので省略可にする（返らなければ欄に「まだ出せない」）。
+    public let trend: StationTrend?
     /// **そのポートのシステムだけ。** 地図と違い 1 系統しか関係しない。
     public let feeds: [FeedStatus]
     /// CC BY 4.0「改変して利用する場合」の前置き（開発プラン §3.7）。**クレジットの前に出す。**
@@ -359,6 +398,7 @@ public struct StationDetailResponse: Decodable, Equatable, Sendable {
         case station
         case forecastCurve = "forecast_curve"
         case recent
+        case trend
         case feeds
         case attributionPreface = "attribution_preface"
         case attribution
