@@ -10,6 +10,8 @@ import SwiftUI
 /// **選んだ到着の予測は、地図で到着時刻を選んだときだけ出す**（W4 の PR B）。
 /// **到着時刻ごとの予測（10 水平）と直近 24 時間は、開いたときに詳細の応答から出す**（iOS-3。
 /// 判断は `ForecastTimeline` と `RecentHistory`）。台数と鮮度は地図の行のまま（ピンと同じ値）。
+/// **ふだんの傾向（7 日 × 24 時間）も同じ応答から**（iOS-5。判断は `TrendHeatmap`）。予測ではないので、
+/// 見出しと注記でそう言う（W9-06）。
 ///
 /// **予測と現在値を混ぜない。** 欄を分け、予測が出せなくても台数は出す。
 struct StationDetailScreen: View {
@@ -46,6 +48,9 @@ struct StationDetailScreen: View {
             forecastSection
             timelineSection
             availabilitySection
+            // **予測のタイムライン → 傾向 → 直近 24 時間**（開発プラン §9.2 の順）。いまの台数は
+            // 傾向より上に残す（開いた人がまず知りたいのは、いまと 3 時間先）
+            trendSection
             recentSection
             tripSection
             factsSection
@@ -225,6 +230,39 @@ struct StationDetailScreen: View {
         ProgressView()
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
+    }
+
+    // MARK: - ふだんの傾向（iOS-5）
+
+    /// ふだんの傾向（7 日 × 24 時間）。**予測ではない**ので、見出しを「ふだんの傾向」にし、注記に版の
+    /// 日付と「予測ではありません」を必ず添える（W9-06、CLAUDE.md §2 の 7）。取れていなければ出さない
+    /// （読み込み中と失敗は上の予測の欄が言う）。
+    @ViewBuilder
+    private var trendSection: some View {
+        if case .loaded(let response) = loader.state {
+            trendSection(TrendHeatmapState.make(detail: response, intent: intent, now: now))
+        }
+    }
+
+    /// **出せないときも欄は出す**（何が出せないのかを言う。ほかの欄と同じ）。
+    @ViewBuilder
+    private func trendSection(_ state: TrendHeatmapState) -> some View {
+        switch state {
+        case .unavailable(let message):
+            Section(TrendHeatmap.header(for: intent)) {
+                Label(message, systemImage: "calendar.badge.clock")
+                    .foregroundStyle(.secondary)
+                    .font(.subheadline)
+            }
+        case .available(let heatmap):
+            Section {
+                TrendHeatmapView(heatmap: heatmap)
+            } header: {
+                Text(heatmap.title)
+            } footer: {
+                Text(heatmap.footnote)
+            }
+        }
     }
 
     // MARK: - 直近 24 時間（iOS-3）

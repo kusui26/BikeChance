@@ -672,4 +672,70 @@ struct ContractTests {
         #expect(plan.to.count.value == StationDetail.unboundedValue)
         #expect(plan.from.count.value != StationDetail.unboundedValue)
     }
+
+    // ────────────────────────────────────────────────────────────
+    // ふだんの傾向（W9 の PR B・iOS-5。2026-11-12 のデプロイの後に本番から取った。ドコモの 7569）
+    // ────────────────────────────────────────────────────────────
+    @Test("**傾向の実応答**：今日（JST）から 7 日 × 24 時間、確率は 0〜1、曜日種別は 3 つ")
+    func decodesTheTrendInTheRealResponse() throws {
+        let response = try Self.decode(StationDetailResponse.self, "station_detail_trend")
+        let trend = try #require(response.trend)
+        #expect(trend.profileDate == "2026-11-11", "前日までの観測で作った版")
+        #expect(trend.days.map(\.date) == (12...18).map { "2026-11-\($0)" })
+        #expect(trend.days.first?.date == TrendHeatmap.dateKey(response.generatedAt), "今日は JST")
+        #expect(trend.days.allSatisfy { $0.bike.count == 24 && $0.dock.count == 24 })
+        #expect(Set(trend.days.map(\.dowType)) == ["weekday", "sat", "sun_holiday"])
+        let values = trend.days.flatMap { $0.bike + $0.dock }.compactMap { $0 }
+        #expect(values.allSatisfy { (0...1).contains($0) })
+        // 傾向を足しても、ほかの欄はそのまま届く
+        #expect(response.forecastCurve != nil)
+        #expect(response.recent.isEmpty == false)
+    }
+
+    @Test("**同じ曜日種別の日は同じ値**（曜日 × 時間の表。来週の木曜も今日と同じ＝予測ではない）")
+    func daysOfTheSameTypeCarryTheSameValues() throws {
+        let trend = try #require(
+            try Self.decode(StationDetailResponse.self, "station_detail_trend").trend)
+        let byType = Dictionary(grouping: trend.days, by: \.dowType)
+        #expect(byType["weekday"]?.count == 5)
+        for (type, days) in byType {
+            let first = days[0]
+            #expect(days.allSatisfy { $0.bike == first.bike && $0.dock == first.dock }, "\(type)")
+        }
+    }
+
+    @Test("**出せない時間は実応答でも null で届き、灰色になる**（土曜は丸ごと、日曜は 0〜4 時。0% にしない）")
+    func realGapsStayGray() throws {
+        let response = try Self.decode(StationDetailResponse.self, "station_detail_trend")
+        let trend = try #require(response.trend)
+        #expect(trend.days[2].bike.allSatisfy { $0 == nil })
+        #expect(trend.days[2].dock.allSatisfy { $0 == nil })
+        let sundayGaps = trend.days[3].bike.enumerated().filter { $0.element == nil }.map(\.offset)
+        #expect(sundayGaps == [0, 1, 2, 3, 4])
+        let state = TrendHeatmapState.make(
+            detail: response, intent: .borrow, now: response.generatedAt)
+        let heatmap = try #require(state.heatmap, "土曜が丸ごと欠けても、ほかの日があれば欄は出す")
+        #expect(heatmap.rows[2].cells.allSatisfy { $0.percent == nil && $0.band == nil })
+        #expect(heatmap.rows[2].accessibilitySummary == "11月14日（土）、データを集めています 0〜23時台")
+        #expect(heatmap.rows[3].cells.filter { $0.percent == nil }.map(\.hour) == Array(0..<5))
+    }
+
+    @Test("**実応答から欄を組み立てる**：今日は木曜、いまの時間（9 時台）を指し、注記は版の日付と「予測ではない」")
+    func buildsTheHeatmapFromTheRealResponse() throws {
+        let response = try Self.decode(StationDetailResponse.self, "station_detail_trend")
+        // 取った時刻（2026-11-12 09:16 JST）に開いた形
+        let state = TrendHeatmapState.make(
+            detail: response, intent: .borrow, now: response.generatedAt)
+        let heatmap = try #require(state.heatmap)
+        let dates = ["今日", "明日", "11/14", "11/15", "11/16", "11/17", "11/18"]
+        #expect(heatmap.rows.map(\.dateText) == dates)
+        #expect(heatmap.rows.map(\.weekdayText) == ["木", "金", "土", "日", "月", "火", "水"])
+        let current = try #require(heatmap.current)
+        #expect(current == TrendHeatmap.CellID(date: "2026-11-12", hour: 9))
+        #expect(heatmap.cell(current)?.text == "11月12日（木）9時台　借りられる 40%（別の手を）")
+        #expect(heatmap.rows[0].cells.filter(\.isPast).map(\.hour) == Array(0..<9))
+        #expect(heatmap.footnote.contains("11月11日までの 4 週の観測"))
+        #expect(heatmap.footnote.contains("予測ではありません"))
+        #expect(!heatmap.title.contains("予測"))
+    }
 }
