@@ -6,8 +6,26 @@ export const HORIZONS_MIN = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180] as const;
 /** 学習・推論の時間グリッド（分）。 */
 export const GRID_INTERVAL_MIN = 5;
 
-/** 長期プロファイルモデルが出力する時間数（7 日 × 24 時間）。 */
-export const PROFILE_HOURS = 168;
+/**
+ * ふだんの傾向（`/v1/stations/{system}/{station_id}` の `trend`。W9-05、開発プランの D-47）を
+ * **今日から何日ぶん**返すか。1 日は JST の 0〜23 時の `TREND_HOURS_PER_DAY` 個。
+ *
+ * **168 時間を書き置かない。** DB に在るのはポートごとの「曜日種別 × 24 時間」の 72 個
+ * （`station_trend`）だけで、この 7 日 × 24 時間は読む側が暦で組む（D-08 を直した）。
+ */
+export const TREND_DAYS = 7;
+
+/** 傾向の 1 日の時間の数（JST の 0〜23 時）。 */
+export const TREND_HOURS_PER_DAY = 24;
+
+/**
+ * これより古い版（`profile_date` から JST の今日までの日数）の傾向は出さない。
+ *
+ * ふだんは 1〜2 日（前日のプロファイルを未明に写す）。**28 日の統計なので数日の古さでは
+ * ほとんど動かない**が、1 週間止まったまま出し続けると「ふだん」の窓が 1/4 ずれる。止まれば
+ * `monitored_jobs` の `build_trend` が 30 時間で鳴る。
+ */
+export const TREND_MAX_AGE_DAYS = 7;
 
 /** 確率の表示帯。境界値は §9.3 の表に対応する。 */
 export const PROBABILITY_BAND_THRESHOLDS = {

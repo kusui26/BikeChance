@@ -196,6 +196,15 @@ export const toProbabilityList = (values_x1000: readonly number[]): readonly num
   values_x1000.map(toProbability);
 
 /**
+ * 同じ直し方で、**欠けた要素（null）を null のまま**残す。ふだんの傾向（`station_trend`。
+ * D-47）は出せない時間を NULL で持つ。**0 に写さない**——0% は「借りられない」と読める。
+ */
+export const toNullableProbabilityList = (
+  values_x1000: readonly (number | null)[],
+): readonly (number | null)[] =>
+  values_x1000.map((value) => (value === null ? null : toProbability(value)));
+
+/**
  * `horizon_min` を挟む 2 点から線形に補間する。呼ぶのは両端の外を除いたあとだけ。
  *
  * 水平が重複していれば割れない。**0 除算で NaN を作らず、手前の値を使う**。

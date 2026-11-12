@@ -180,7 +180,9 @@ create function pg_temp.rest_called() returns text[] language sql immutable as $
     -- 低ズームの格子集約（apps/web の /v1/stations。0049）
     'v1_station_cells',
     -- 実運用の日次評価（apps/ml の /ml/evaluate。0050）
-    'upsert_model_daily_metrics'
+    'upsert_model_daily_metrics',
+    -- ふだんの傾向（apps/ml の build_trend。0059）
+    'upsert_station_trend'
   ];
 $$;
 

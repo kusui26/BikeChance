@@ -18,6 +18,8 @@ import {
   CELLS_FUNCTION,
   FEEDS_VIEW,
   FEED_COLUMNS,
+  HOLIDAYS_VIEW,
+  HOLIDAY_COLUMNS,
   HOURLY_COLUMNS,
   HOURLY_VIEW,
   NEIGHBORS_VIEW,
@@ -25,8 +27,12 @@ import {
   STATIONS_VIEW,
   STATION_COLUMNS,
   STATION_ORDER,
+  TREND_COLUMNS,
+  TREND_VIEW,
   bboxFilters,
   feedRowSchema,
+  holidayFilters,
+  holidayRowSchema,
   hourlyFilters,
   cellRowSchema,
   hourlyRowSchema,
@@ -36,15 +42,17 @@ import {
   stationIdFilters,
   stationRowSchema,
   systemFilters,
+  trendRowSchema,
   type CellRow,
   type FeedRow,
   type Filter,
   type HourlyRow,
   type NeighborRow,
   type StationRow,
+  type TrendRow,
 } from "./view-query";
 
-export type { CellRow, FeedRow, HourlyRow, NeighborRow, StationRow } from "./view-query";
+export type { CellRow, FeedRow, HourlyRow, NeighborRow, StationRow, TrendRow } from "./view-query";
 
 export type StationsPage = {
   readonly rows: readonly StationRow[];
@@ -106,6 +114,19 @@ export type ReadPort = {
     readonly station_id: string;
     readonly since: Date;
   }) => Promise<readonly HourlyRow[]>;
+  /**
+   * ふだんの傾向の 1 行（0059、D-47）。**無ければ null**（まだ写していないポート）。
+   * 版の古さは呼ぶ側が見る（`TREND_MAX_AGE_DAYS`）。
+   */
+  readonly findTrend: (params: {
+    readonly system_id: SystemId;
+    readonly station_id: string;
+  }) => Promise<TrendRow | null>;
+  /** 祝日（**両端を含む** JST の暦日 `YYYY-MM-DD`）。**昇順**で返す。 */
+  readonly listHolidays: (params: {
+    readonly from: string;
+    readonly to: string;
+  }) => Promise<readonly string[]>;
 };
 
 /** DB に届かなかった／応答の形が違った。上位はこれを 503 に写す。 */
@@ -121,7 +142,7 @@ type Filterable<T> = {
   // 時刻の下限も同じメソッドに写る。**分けているのは組み立てる側の型だけ**で、
   // 数と時刻を取り違えたまま通ることを `Filter` の側で止めている
   readonly gte: (column: string, value: number | string) => T;
-  readonly lte: (column: string, value: number) => T;
+  readonly lte: (column: string, value: number | string) => T;
   readonly eq: (column: string, value: string) => T;
   readonly is: (column: string, value: boolean) => T;
   readonly in: (column: string, values: readonly string[]) => T;
@@ -134,6 +155,7 @@ const applyFilters = <T extends Filterable<T>>(builder: T, filters: readonly Fil
       case "gte_text":
         return acc.gte(filter.column, filter.value);
       case "lte":
+      case "lte_text":
         return acc.lte(filter.column, filter.value);
       case "eq":
         return acc.eq(filter.column, filter.value);
@@ -255,6 +277,33 @@ export const createSupabaseReadPort = (client: SupabaseClient): ReadPort => ({
       throw toReadError(HOURLY_VIEW, error);
     }
     return parseRows(HOURLY_VIEW, hourlyRowSchema, data);
+  },
+
+  findTrend: async ({ system_id, station_id }) => {
+    const selected = client.from(TREND_VIEW).select(TREND_COLUMNS);
+    const { data, error } = await applyFilters(
+      selected,
+      oneStationFilters({ system_id, station_id }),
+    )
+      // 1 ポート 1 行（主鍵）。`findStation` と同じく、万一のときに応答を膨らませない
+      .limit(2)
+      .abortSignal(AbortSignal.timeout(V1_QUERY_TIMEOUT_MS));
+    if (error !== null) {
+      throw toReadError(TREND_VIEW, error);
+    }
+    const rows = parseRows(TREND_VIEW, trendRowSchema, data);
+    return rows[0] ?? null;
+  },
+
+  listHolidays: async ({ from, to }) => {
+    const selected = client.from(HOLIDAYS_VIEW).select(HOLIDAY_COLUMNS);
+    const { data, error } = await applyFilters(selected, holidayFilters({ from, to }))
+      .order("holiday_date", { ascending: true })
+      .abortSignal(AbortSignal.timeout(V1_QUERY_TIMEOUT_MS));
+    if (error !== null) {
+      throw toReadError(HOLIDAYS_VIEW, error);
+    }
+    return parseRows(HOLIDAYS_VIEW, holidayRowSchema, data).map((row) => row.holiday_date);
   },
 
   listNeighbors: async ({ system_id, station_ids, radius_m }) => {

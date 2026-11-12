@@ -1,0 +1,14 @@
+{
+  "description": "ふだんの傾向の 72 個の並び（station_trend。開発プランの D-47）。書く側（Python の features/trend.py）と読む側（TypeScript の apps/web/lib/api/station-trend.ts）が同じ添字を使うことを、両方の検査がこのファイルで固定する。添字 = dow_type_order の番号 × hours_per_day + 時。",
+  "hours_per_day": 24,
+  "dow_type_order": ["sat", "sun_holiday", "weekday"],
+  "cells": [
+    { "dow_type": "sat", "hour": 0, "index": 0 },
+    { "dow_type": "sat", "hour": 23, "index": 23 },
+    { "dow_type": "sun_holiday", "hour": 0, "index": 24 },
+    { "dow_type": "sun_holiday", "hour": 8, "index": 32 },
+    { "dow_type": "weekday", "hour": 0, "index": 48 },
+    { "dow_type": "weekday", "hour": 17, "index": 65 },
+    { "dow_type": "weekday", "hour": 23, "index": 71 }
+  ]
+}

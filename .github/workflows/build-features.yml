@@ -1,7 +1,8 @@
 name: 学習サンプルとプロファイル（日次）
 
 # 前日ぶんの**学習サンプル**（`features/date=YYYY-MM-DD/part.parquet`）と
-# **ポートプロファイル**（`profiles/date=YYYY-MM-DD/`）を作って Storage に置く。
+# **ポートプロファイル**（`profiles/date=YYYY-MM-DD/`）を作って Storage に置き、
+# プロファイルから**ふだんの傾向**（`station_trend`。W9 の PR B、開発プランの D-47）を DB に写す。
 # W4 プラン §6.8 の PR J ＋ W5 プラン §6.2 の PR B。
 #
 # **ファイル名は `build-features.yml` のままにしてある。** GitHub は `schedule` を
@@ -24,6 +25,8 @@ name: 学習サンプルとプロファイル（日次）
 #     読むので（W6 の契約 32）、**朝の穴（前日の版がまだ無く、1 つ古い版で配る時間）を縮める**。
 #     プロファイルに要るのは前日いっぱいの毎時 Parquet だけで、最後の 1 時間は 00:07 JST の
 #     `/ml/compact` が置く。**学習サンプルは作らない**——ラベルに当日 03:00 JST までの観測が要る
+#
+# **ふだんの傾向は 2 回とも試し、写し終えた日は飛ばす**（下の段の注記）。
 #
 # **2 つ目の回はプロファイルを置き直さない**（`--skip-if-exists`）。同じ中身を置き直しても
 # 壊れはしないが、推論が読んでいる最中のファイルを差し替える理由が無い。置き直さない回は
@@ -136,6 +139,7 @@ jobs:
       # **定時の回は、在れば作らない**（`--skip-if-exists`）。**手で起動した回は必ず作り直す**
       # ——欠けた日を埋める・作り直すために起動するのだから、在っても置き直す。
       - name: プロファイルを作って置く
+        id: profiles
         if: always()
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -174,3 +178,39 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: uv run python -m bikechance_ml.jobs.build_profiles --prune
+
+      # **ふだんの傾向を写す**（W9 の PR B、開発プランの D-47）。前日のプロファイルの日次
+      # （`daily.parquet` の 43 日ぶん、約 100 MB）から、校正した「曜日種別 × 24 時間」を
+      # `station_trend` に写す。**プロファイルの段が通ったときだけ**（入力がそれ）。学習サンプルの
+      # 段・古いプロファイルを消す段の成否には依らない（`if:` に状態の関数を書いたので
+      # `success()` は付かない）。
+      #
+      # **定時の 2 回とも試し、写し終えていれば飛ばす**（`--skip-if-current`：`job_runs` に
+      # その日の `ok` が在る）。00:40 の回が来なかった・落ちた日は 06:00 の回が写す（所見 203。
+      # `schedule` は遅れ、ときに来ない）。**手で起動した回は、日付が空のときだけ写し直す**——
+      # 日付を渡すのは欠けた学習サンプルを埋めるためで、古い版を写しても DB の側が新しい行を
+      # 残す（0059 の `upsert_station_trend`）ので無駄になるだけである。
+      #
+      # **3 回まで試す**（Storage と PostgREST の一過性の失敗。上の 2 段と同じ）。
+      - name: ふだんの傾向を写す
+        if: ${{ !cancelled() && steps.profiles.outcome == 'success' && (github.event_name == 'schedule' || inputs.date == '') }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          args=(--write)
+          if [ "${EVENT_NAME}" = "schedule" ]; then
+            args+=(--skip-if-current)
+          fi
+          for attempt in 1 2 3; do
+            if uv run python -m bikechance_ml.jobs.build_trend "${args[@]}"; then
+              exit 0
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "::warning::${attempt} 回目が失敗しました。120 秒待って試し直します"
+              sleep 120
+            fi
+          done
+          echo "::error::3 回とも失敗しました。job_runs の build_trend を見てください"
+          exit 1
