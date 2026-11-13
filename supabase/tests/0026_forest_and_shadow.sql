@@ -107,7 +107,7 @@ select is(
 );
 select is(
   (select value from public.app_config where key = 'forest_stale_days'),
-  '42', '森の閾値は 42 日（学習の窓 35 日 ＋ 1 週）'
+  '49', '森の閾値はいま一時的に 49 日（0060。0058 の 42 日 ＋ 1 週。W11 の昇格の後に 42 日へ戻す）'
 );
 select is(
   (select value from public.app_config where key = 'shadow_fail_cycles'),
@@ -133,6 +133,9 @@ select is(public.check_forest_freshness() -> 'alerts', '0'::jsonb,
 -- ────────────────────────────────────────────────────────────────
 -- 森：境目（41 日は鳴らない・42 日で鳴る）
 -- ────────────────────────────────────────────────────────────────
+-- **境目は 0058 の 42 日で試す。** 0060 の 49 日は W11 までの一時的な値で、仕組みは同じ
+-- （閾値を app_config から読むことは、下の「閾値は app_config から読む」で試す）
+update public.app_config set value = '42' where key = 'forest_stale_days';
 delete from public.alert_state;
 select pg_temp.composite(pg_temp.forest(68, 41));
 select is(public.check_forest_freshness() -> 'age_days', '41'::jsonb, '森の最終学習日は 41 日前');
