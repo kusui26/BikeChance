@@ -57,7 +57,7 @@
     },
     {
       "path": "/ml/compact",
-      "schedule": "7 * * * *"
+      "schedule": "9 * * * *"
     },
     {
       "path": "/ml/infer/hellocycling",
@@ -65,11 +65,11 @@
     },
     {
       "path": "/ml/infer/docomo-cycle",
-      "schedule": "1-59/5 * * * *"
+      "schedule": "2-59/5 * * * *"
     },
     {
       "path": "/ml/reference",
-      "schedule": "2 20 * * *"
+      "schedule": "3 20 * * *"
     }
   ]
 }
