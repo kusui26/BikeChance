@@ -1,9 +1,10 @@
 """Supabase への読み書き（`bikechance_ml/io/supabase.py`）。
 
-`httpx.MockTransport` で本物の Supabase 無しに要求と応答を検査する。守りたいのは 3 つ。
+`httpx.MockTransport` で本物の Supabase 無しに要求と応答を検査する。守りたいのは 4 つ。
   * **キーは URL に載らない**（ヘッダにだけ載る。CLAUDE.md §5）
   * **例外の文言に秘密と URL が残らない**（`redact()` を必ず通す）
   * ページ送りと半開区間の指定が正しい（1 ページ目だけ読んで終わる事故を防ぐ）
+  * **読むだけの要求だけを、一時的な不調のときに 1 度だけ取り直す**（W11 の PR S、所見 245）
 """
 
 import json
@@ -16,12 +17,19 @@ import pytest
 from bikechance_ml.config import Config
 from bikechance_ml.io.range_file import Piece
 from bikechance_ml.io.supabase import (
+    CONNECT_TIMEOUT_S,
     FORECAST_LOG_BUCKET,
     PARQUET_BUCKET,
     PARQUET_CONTENT_TYPE,
+    REQUEST_TIMEOUT_S,
+    RETRY_CONNECT_TIMEOUT_S,
+    RETRY_READ_TIMEOUT_S,
+    RETRY_WAIT_S,
     STATION_PAGE_SIZE,
     SupabaseError,
+    SupabaseFailure,
     SupabaseIo,
+    error_label,
     is_missing_object,
 )
 from bikechance_ml.json_shape import ShapeError
@@ -38,14 +46,40 @@ Handler = Callable[[httpx.Request], httpx.Response]
 
 def io_with(handler: Handler) -> tuple[SupabaseIo, list[httpx.Request]]:
     """記録付きのクライアントを組み立てる。送った要求は `seen` に貯まる。"""
+    io, seen, _ = io_with_sleeps(handler)
+    return io, seen
+
+
+def io_with_sleeps(
+    handler: Handler,
+) -> tuple[SupabaseIo, list[httpx.Request], list[float]]:
+    """`io_with` に、**取り直す前の待ち**の記録を足したもの（本物の時間は使わない）。
+
+    時間切れは本番と同じ値（`open_supabase`）にしておく——取り直す回だけ短くなるのを見るため。
+    """
     seen: list[httpx.Request] = []
+    slept: list[float] = []
 
     def record(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return handler(request)
 
-    client = httpx.Client(transport=httpx.MockTransport(record))
-    return SupabaseIo(CONFIG, client), seen
+    timeout = httpx.Timeout(REQUEST_TIMEOUT_S, connect=CONNECT_TIMEOUT_S)
+    client = httpx.Client(transport=httpx.MockTransport(record), timeout=timeout)
+    return SupabaseIo(CONFIG, client, sleep=slept.append), seen, slept
+
+
+def answers(*steps: int | type[httpx.TransportError]) -> Handler:
+    """**順に答える**応答役。数は状態コード（2xx は空の配列）、例外の型はその回の通信の例外。"""
+    queue = list(steps)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        step = queue.pop(0)
+        if isinstance(step, int):
+            return json_response([]) if step < 300 else httpx.Response(step, text=f"down {URL}")
+        raise step(f"failed: {request.url}", request=request)
+
+    return handler
 
 
 def json_response(payload: object) -> httpx.Response:
@@ -470,6 +504,123 @@ def test_a_range_transport_error_hides_the_host() -> None:
         io.download_range(PARQUET_BUCKET, PROFILE, "bytes=-65536")
     assert URL not in caught.value.failure.message
     assert caught.value.failure.error_name == "ConnectError"
+
+
+# ── 一時的な不調の取り直し（W11 の PR S、W11 プランの所見 245）────────
+def test_a_read_is_retried_once_after_a_server_error() -> None:
+    """**5xx の読み込みは、待ってから 1 度だけ取り直す**。取り直したことは `retries` に残る。"""
+    io, seen, slept = io_with_sleeps(answers(503, 200))
+    assert io.list_active_systems() == ()
+    assert len(seen) == 2
+    assert slept == [RETRY_WAIT_S]
+    assert io.retries() == ("rest/HttpStatus 503",)
+
+
+def test_a_read_is_retried_once_after_a_transport_error() -> None:
+    """**切断・時間切れ（通信の例外）も取り直す**（11/14 03:21 のドコモは 280 ms で切れた）。"""
+    io, seen, _ = io_with_sleeps(answers(httpx.ConnectError, 200))
+    assert io.list_active_systems() == ()
+    assert len(seen) == 2
+    assert io.retries() == ("rest/ConnectError",)
+
+
+def test_only_the_retry_has_a_shorter_timeout() -> None:
+    """**1 度目は時間切れを縮めない**（遅くても読めた周期がある）。取り直す回だけ短くする。"""
+    io, seen, _ = io_with_sleeps(answers(httpx.ReadTimeout, 200))
+    io.list_active_systems()
+    first, second = (request.extensions["timeout"] for request in seen)
+    assert (first["read"], first["connect"]) == (REQUEST_TIMEOUT_S, CONNECT_TIMEOUT_S)
+    assert (second["read"], second["connect"]) == (RETRY_READ_TIMEOUT_S, RETRY_CONNECT_TIMEOUT_S)
+
+
+def test_a_read_that_fails_twice_raises_the_second_failure() -> None:
+    """**2 度目も失敗すれば今までどおり `SupabaseError`**（状態は 2 度目のもの）。3 度目は無い。"""
+    io, seen, _ = io_with_sleeps(answers(503, 502))
+    with pytest.raises(SupabaseError) as caught:
+        io.list_active_systems()
+    assert len(seen) == 2
+    assert caught.value.failure.status == 502
+    assert io.retries() == ("rest/HttpStatus 503",)
+
+
+def test_a_second_transport_error_still_hides_the_host() -> None:
+    io, _, _ = io_with_sleeps(answers(httpx.ReadTimeout, httpx.ReadTimeout))
+    with pytest.raises(SupabaseError) as caught:
+        io.list_active_systems()
+    assert caught.value.failure.error_name == "ReadTimeout"
+    assert URL not in caught.value.failure.message
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 416])
+def test_client_errors_are_not_retried(status: int) -> None:
+    """**4xx は取り直さない**（要求の誤り・権限・無い。もう一度送っても同じ答えになる）。"""
+    io, seen, slept = io_with_sleeps(answers(status))
+    with pytest.raises(SupabaseError):
+        io.list_active_systems()
+    assert (len(seen), slept, io.retries()) == (1, [], ())
+
+
+def test_writes_are_not_retried() -> None:
+    """**書く要求は取り直さない**——同じものを 2 度書く道を作らない（RPC は POST）。"""
+    io, seen, slept = io_with_sleeps(answers(503, 200))
+    with pytest.raises(SupabaseError):
+        io.upsert_forecasts([{"station_id": "x"}])
+    assert (len(seen), slept, io.retries()) == (1, [], ())
+
+
+def test_a_range_read_is_retried_with_the_same_range() -> None:
+    """**Storage の範囲の読み込みも取り直す**（プロファイルの読み込み。11/13 03:05 の HELLO）。"""
+    piece = httpx.Response(
+        206, content=b"PAR1", headers={"content-range": "bytes 96-99/100", "etag": '"e1"'}
+    )
+    steps: list[httpx.Response | None] = [None, piece]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        step = steps.pop(0)
+        if step is None:
+            raise httpx.ReadTimeout("timed out", request=request)
+        return step
+
+    io, seen, _ = io_with_sleeps(handler)
+    assert io.download_range(PARQUET_BUCKET, PROFILE, "bytes=-4") == Piece(
+        start=96, body=b"PAR1", size=100, etag='"e1"'
+    )
+    assert [request.headers["range"] for request in seen] == ["bytes=-4", "bytes=-4"]
+    assert io.retries() == ("storage/ReadTimeout",)
+
+
+def test_a_whole_download_is_retried_once() -> None:
+    steps = [httpx.Response(500, text="busy"), httpx.Response(200, content=b"whole")]
+    io, seen, _ = io_with_sleeps(lambda request: steps.pop(0))
+    assert io.download(PARQUET_BUCKET, PROFILE) == b"whole"
+    assert (len(seen), io.retries()) == (2, ("storage/HttpStatus 500",))
+
+
+def test_a_missing_object_is_not_retried() -> None:
+    """**「無い」は正常系**（朝の穴の確かめ）。取り直さずに None。"""
+    body = (
+        '{"statusCode":"404","error":"not_found","message":"Object not found","code":"NoSuchKey"}'
+    )
+    io, seen, slept = io_with_sleeps(lambda request: httpx.Response(400, text=body))
+    assert io.download_range(PARQUET_BUCKET, PROFILE, "bytes=-65536") is None
+    assert (len(seen), slept, io.retries()) == (1, [], ())
+
+
+def test_retry_names_carry_neither_url_nor_key() -> None:
+    io, _, _ = io_with_sleeps(answers(httpx.ConnectError, 200, 503, 200))
+    io.list_active_systems()
+    io.list_active_systems()
+    assert io.retries() == ("rest/ConnectError", "rest/HttpStatus 503")
+    assert all(URL not in one and KEY not in one for one in io.retries())
+
+
+def test_the_error_label_names_the_phase_cause_and_status() -> None:
+    """**記録の名前は段・例外の名前・状態だけ**（本文は入れない。所見 245）。"""
+    with_status = SupabaseError(SupabaseFailure("storage", 503, "HttpStatus", f"down {URL}"))
+    timed_out = SupabaseError(SupabaseFailure("rest", None, "ReadTimeout", f"read {KEY}"))
+    assert error_label(with_status) == "SupabaseError(storage/HttpStatus 503)"
+    assert error_label(timed_out) == "SupabaseError(rest/ReadTimeout)"
+    assert error_label(ValueError("x")) == "ValueError"
 
 
 # ── Storage の「無い」の読み方（W3 プラン §12 の 84 と同じ癖）──

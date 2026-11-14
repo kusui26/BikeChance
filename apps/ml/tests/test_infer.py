@@ -293,6 +293,10 @@ class FakePort:
     events: list[str] = field(default_factory=list)
     #: 基準の観測を読んだ時刻（`read_base_observed_at` の `at`）。**格子の時刻で読む**（W9-14）
     base_reads: list[datetime] = field(default_factory=list)
+    #: 記録した失敗の文（`finish_inference` の `error`）。**段と例外の名前が残る**（所見 245）
+    errors: list[str | None] = field(default_factory=list)
+    #: 口が取り直した読み込み（`SupabaseIo.retries`）。**既定は無い**
+    retried: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # **新しい口は新しい世界。** 参照のキャッシュは日付で引くので、同じ日付で中身の違う版を
@@ -377,6 +381,7 @@ class FakePort:
     ) -> None:
         self.finished.append((run_id, status, n_rows))
         self.details.append(detail)
+        self.errors.append(error)
 
     def upsert_forecasts(self, rows: Sequence[Mapping[str, object]]) -> int:
         self.events.append("upsert")
@@ -388,6 +393,9 @@ class FakePort:
         if self.fail_forecast_log:
             raise TimeoutError("storage が応答しない")
         self.logs[path] = body
+
+    def retries(self) -> tuple[str, ...]:
+        return self.retried
 
 
 def ready_port(rows: Sequence[tuple[str, int, int, int]] = STATIONS) -> FakePort:
@@ -1400,7 +1408,51 @@ def test_a_storage_failure_is_recorded_not_fatal() -> None:
     summary = run_inference(port, "hellocycling", NOW)
     assert summary.status == "ok"
     assert len(port.written) == len(STATIONS)
-    assert _recorded(port)["profile_reason"] == "failed:SupabaseError"
+    # 段・例外の名前・状態まで残る（W11 の PR S、所見 245。以前は `failed:SupabaseError` だけ）
+    assert _recorded(port)["profile_reason"] == "failed:SupabaseError(storage/HttpStatus 503)"
+
+
+@dataclass
+class DownPort(FakePort):
+    """観測の読み込みが時間切れで落ちる口（Supabase の一時的な不調。所見 245）。"""
+
+    def list_snapshots(
+        self, system_id: str, start: datetime, end: datetime
+    ) -> tuple[Snapshot, ...]:
+        raise SupabaseError(SupabaseFailure("rest", None, "ReadTimeout", "timed out (***)"))
+
+
+def test_a_failed_cycle_records_where_supabase_failed() -> None:
+    """**落ちた周期の記録に、段・例外の名前が残る**（W11 の PR S、所見 245）。本文は残さない。
+
+    以前は `SupabaseError` だけで、切断か時間切れか 5xx かを記録から言えなかった。
+    """
+    port = DownPort(body=to_bytes(ARTIFACT))
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.status == "failed"
+    assert summary.error == "SupabaseError(rest/ReadTimeout)"
+    assert port.errors == ["SupabaseError(rest/ReadTimeout)"]
+    assert port.details == [None], "取り直しが無ければ、落ちた周期の detail は今までどおり null"
+
+
+def test_a_failed_cycle_keeps_the_retries_it_made() -> None:
+    """**取り直しても落ちた周期は、取り直したことも残す**（2 度目も落ちたと分かる）。"""
+    port = DownPort(body=to_bytes(ARTIFACT), retried=("rest/ReadTimeout",))
+    summary = run_inference(port, "hellocycling", NOW)
+    assert summary.supabase_retries == ("rest/ReadTimeout",)
+    assert port.details == [{"supabase_retries": ["rest/ReadTimeout"]}]
+
+
+def test_retries_are_recorded_only_in_cycles_that_had_them() -> None:
+    """**取り直した周期だけ `detail.supabase_retries` が出る**（いつもの周期の記録は同じ）。"""
+    quiet = ready_port()
+    run_inference(quiet, "hellocycling", NOW)
+    assert "supabase_retries" not in _recorded(quiet)
+    retried = ready_port()
+    retried.retried = ("storage/ReadTimeout", "rest/HttpStatus 503")
+    summary = run_inference(retried, "hellocycling", NOW)
+    assert summary.status == "ok"
+    assert _recorded(retried)["supabase_retries"] == ["storage/ReadTimeout", "rest/HttpStatus 503"]
 
 
 def test_an_unknown_failure_is_recorded_not_fatal() -> None:
@@ -1773,7 +1825,7 @@ def test_a_shadow_lookup_failure_leaves_the_active_as_it_is() -> None:
     assert (port.written, port.logs) == (alone.written, alone.logs)
     assert _shadow_detail(port) == {
         "model_version": None,
-        "status": "failed:SupabaseError",
+        "status": "failed:SupabaseError(rest/HttpStatus 503)",
         "forecast_log": "",
         "model_load_ms": 0,
         "predict_ms": 0,
