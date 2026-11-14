@@ -94,7 +94,7 @@ class Snapshot:
 def hour_window(at: datetime) -> tuple[datetime, datetime]:
     """`at` の**直前の 1 時間**を半開区間 `[開始, 終わり)` で返す（UTC）。
 
-    毎時 7 分に動かすので、`at` が 05:07 なら 04:00〜05:00 を畳む。境界の観測が
+    毎時 9 分に動かすので、`at` が 05:09 なら 04:00〜05:00 を畳む。境界の観測が
     どちらに入るかで迷わないよう、区間は必ず半開で扱う（W2 プラン §4 の 9）。
     """
     end = at.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
