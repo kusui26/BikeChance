@@ -7,11 +7,16 @@ PostgREST と Storage の REST を httpx で直に叩く。**psycopg を入れ�
   * キーは**ヘッダにだけ**載せる。URL とクエリには決して入れない
   * 例外の文言は必ず `redact()` を通す。httpx の例外は要求 URL を抱えている
   * 失敗は `SupabaseError` に詰め替えて上げる。素の例外のままだと文脈が消える
+
+**読むだけの要求（GET）は、一時的な不調のときに 1 度だけ取り直す**（W11 の PR S、W11 プランの
+所見 245）。通信の例外（切断・時間切れ）と 5xx だけで、4xx（要求の誤り・権限・無い）は取り直さない。
+**書く要求（POST の RPC・UPSERT・置く）は取り直さない**——同じものを 2 度書く道を作らない。
 """
 
 import json
 import re
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -103,6 +108,19 @@ STORAGE_NOT_FOUND_CODES: Final[frozenset[str]] = frozenset({"NoSuchKey", "NotFou
 REQUEST_TIMEOUT_S: Final[float] = 30.0
 CONNECT_TIMEOUT_S: Final[float] = 10.0
 
+#: 取り直す前の待ち（秒）。切れた直後にすぐ叩くと、同じ不調に当たりやすい。
+RETRY_WAIT_S: Final[float] = 1.0
+
+#: **取り直す回だけ**時間切れを短くする（秒）。1 度目は縮めない——本番では遅くても読めた周期が
+#: ある（2026-11-08 17:25 の HELLO は観測 20.8 秒・プロファイル 33.0 秒で ok）。1 度目で応えなかった
+#: 相手を、もう 30 秒は待たない：1 要求の最長は 30 + 1 + 15 = 46 秒で、周期（300 秒）と
+#: maxDuration（240 秒）の内に収まる。
+RETRY_READ_TIMEOUT_S: Final[float] = 15.0
+RETRY_CONNECT_TIMEOUT_S: Final[float] = 5.0
+
+#: これ以上の状態コードは相手の一時的な不調とみて取り直す（5xx）。
+HTTP_SERVER_ERROR: Final[int] = 500
+
 #: Parquet の取得は数 MB になるので長めに取る（分析用。Cron の経路では使わない）。
 DOWNLOAD_TIMEOUT_S: Final[float] = 120.0
 
@@ -119,11 +137,26 @@ class SupabaseFailure:
     def describe(self) -> str:
         return f"{self.phase}/{self.error_name}: {self.message}"
 
+    def label(self) -> str:
+        """記録に残す短い名前（`段/例外の名前`、状態があれば添える）。**本文は入れない。**"""
+        status = "" if self.status is None else f" {self.status}"
+        return f"{self.phase}/{self.error_name}{status}"
+
 
 class SupabaseError(RuntimeError):
     def __init__(self, failure: SupabaseFailure) -> None:
         self.failure = failure
         super().__init__(failure.describe())
+
+
+def error_label(cause: BaseException) -> str:
+    """失敗の記録の名前。**`SupabaseError` は段・例外の名前・状態を括弧に入れる**（所見 245）。
+
+    例外の名前だけでは、切断か時間切れか 5xx かを記録から言えない。本文（応答・例外の文言）は
+    入れない——伏せ字にしてあっても、記録の欄に長い文を置く理由が無い。
+    """
+    name = type(cause).__name__
+    return f"{name}({cause.failure.label()})" if isinstance(cause, SupabaseError) else name
 
 
 def is_missing_object(http_status: int, body: str) -> bool:
@@ -164,10 +197,19 @@ def _iso_z(at: datetime) -> str:
 class SupabaseIo:
     """PostgREST と Storage の入り口。呼ぶ側は `httpx` を知らなくてよい。"""
 
-    def __init__(self, config: Config, client: httpx.Client) -> None:
+    def __init__(
+        self, config: Config, client: httpx.Client, sleep: Callable[[float], None] = time.sleep
+    ) -> None:
         self._config = config
         self._client = client
         self._secrets = (config.supabase_secret_key, config.cron_secret, config.supabase_url)
+        self._sleep = sleep
+        #: 取り直した要求（`段/理由`）。**並行に呼ばれる**（`io/fanout`）ので `append` だけで足す
+        self._retried: list[str] = []
+
+    def retries(self) -> tuple[str, ...]:
+        """この口で取り直した要求（`段/理由`。古い順）。**1 回の推論ぶん**——口は要求ごとに作る。"""
+        return tuple(self._retried)
 
     # ── 低レベル ────────────────────────────────────────────────
     def _headers(self) -> dict[str, str]:
@@ -176,6 +218,25 @@ class SupabaseIo:
 
     def _mask(self, text: str) -> str:
         return redact(text, self._secrets)[:MAX_ERROR_CHARS]
+
+    def _get(
+        self, url: str, phase: str, headers: Mapping[str, str], params: Mapping[str, str] | None
+    ) -> httpx.Response:
+        """読むだけの要求。**通信の例外と 5xx のときだけ、待ってから 1 度だけ取り直す。**
+
+        2 度目の失敗（例外も 5xx も）は、呼ぶ側が今までどおり `SupabaseError` に詰め替える。
+        """
+        try:
+            response = self._client.request("GET", url, params=params, headers=headers)
+        except httpx.TransportError as cause:
+            self._retried.append(f"{phase}/{type(cause).__name__}")
+        else:
+            if response.status_code < HTTP_SERVER_ERROR:
+                return response
+            self._retried.append(f"{phase}/HttpStatus {response.status_code}")
+        self._sleep(RETRY_WAIT_S)
+        timeout = httpx.Timeout(RETRY_READ_TIMEOUT_S, connect=RETRY_CONNECT_TIMEOUT_S)
+        return self._client.request("GET", url, params=params, headers=headers, timeout=timeout)
 
     def _request(
         self,
@@ -189,15 +250,14 @@ class SupabaseIo:
         headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         merged = {**self._headers(), **(headers or {})}
+        url = f"{self._config.supabase_url}{path}"
         try:
-            response = self._client.request(
-                method,
-                f"{self._config.supabase_url}{path}",
-                params=params,
-                json=json,
-                content=content,
-                headers=merged,
-            )
+            if method == "GET":
+                response = self._get(url, phase, merged, params)
+            else:
+                response = self._client.request(
+                    method, url, params=params, json=json, content=content, headers=merged
+                )
         except httpx.HTTPError as cause:
             # 例外の文言は要求 URL を含む。再送出せず、伏せ字にしてから詰め替える
             raise SupabaseError(
@@ -733,7 +793,7 @@ class SupabaseIo:
         """
         headers = {**self._headers(), "Range": byte_range}
         try:
-            response = self._client.request("GET", self._object_url(bucket, path), headers=headers)
+            response = self._get(self._object_url(bucket, path), "storage", headers, None)
         except httpx.HTTPError as cause:
             raise SupabaseError(
                 SupabaseFailure("storage", None, type(cause).__name__, self._mask(str(cause)))
@@ -758,9 +818,7 @@ class SupabaseIo:
         単に存在しないので、「無い」は正常系として扱えたほうがよい。
         """
         try:
-            response = self._client.request(
-                "GET", self._object_url(bucket, path), headers=self._headers()
-            )
+            response = self._get(self._object_url(bucket, path), "storage", self._headers(), None)
         except httpx.HTTPError as cause:
             raise SupabaseError(
                 SupabaseFailure("storage", None, type(cause).__name__, self._mask(str(cause)))

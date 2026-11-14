@@ -60,7 +60,7 @@ from bikechance_ml.features.constants import (
 from bikechance_ml.features.grid import from_epoch_ms, jst_date, profile_path, to_epoch_ms
 from bikechance_ml.features.weather import WeatherRow
 from bikechance_ml.io import range_file
-from bikechance_ml.io.supabase import PARQUET_BUCKET
+from bikechance_ml.io.supabase import PARQUET_BUCKET, error_label
 from bikechance_ml.jobs import forecast_log
 from bikechance_ml.jobs.build_features import (
     SYSTEM_IDS,
@@ -124,6 +124,7 @@ class InferPort(Protocol):
     ) -> None: ...
     def upsert_forecasts(self, rows: Sequence[Mapping[str, object]]) -> int: ...
     def upload_forecast_log(self, path: str, body: bytes) -> None: ...
+    def retries(self) -> tuple[str, ...]: ...
 
 
 def grid_time(now: datetime) -> datetime:
@@ -264,7 +265,7 @@ def read_profile_edition(port: InferPort, at: datetime, holidays: frozenset[date
         cells = profile.serving_cells(at, holidays)
         edition = _first_edition(counted, _edition_days(at), cells)
     except Exception as cause:
-        reason: str | None = f"failed:{type(cause).__name__}"
+        reason: str | None = f"failed:{error_label(cause)}"
         edition = None
     else:
         reason = None if edition is not None else "missing"
@@ -531,6 +532,9 @@ class InferSummary:
     #: 合成器を配った周期の行き先と、森を歩いた行の数（W6 の PR H。`registry.cycle_detail`）。
     #: **合成器でなければ None で、`detail` に欄を出さない**
     composite: Mapping[str, object] | None = None
+    #: 一時的な不調で取り直した読み込み（`段/理由`。W11 の PR S、所見 245）。**無ければ空で、
+    #: `detail` に欄を出さない**——取り直しが起きた周期だけ記録から引ける
+    supabase_retries: tuple[str, ...] = ()
     error: str | None = None
 
     @property
@@ -698,8 +702,9 @@ def run_inference(
         summary = _produce(port, system_id, chosen, at, base, started, cpu_started)
     except Exception as cause:
         elapsed = _elapsed_ms(started)
-        port.finish_inference(run_id, "failed", 0, elapsed, type(cause).__name__)
-        _log(f"推論に失敗しました: {system_id} / {type(cause).__name__}")
+        error, retries = error_label(cause), port.retries()
+        port.finish_inference(run_id, "failed", 0, elapsed, error, _retry_detail(retries))
+        _log(f"推論に失敗しました: {system_id} / {error}")
         return InferSummary(
             system_id=system_id,
             status="failed",
@@ -711,12 +716,19 @@ def run_inference(
             n_rows=0,
             duration_ms=elapsed,
             cpu_ms=_cpu_ms(cpu_started),
-            error=type(cause).__name__,
+            supabase_retries=retries,
+            error=error,
         )
+    summary = replace(summary, supabase_retries=port.retries())
     port.finish_inference(
         run_id, "ok", summary.n_rows, summary.duration_ms, None, to_record(summary)
     )
     return summary
+
+
+def _retry_detail(retries: tuple[str, ...]) -> Mapping[str, object] | None:
+    """落ちた周期の `detail`。**取り直しが無ければ今までどおり null**（欄を足さない）。"""
+    return {"supabase_retries": list(retries)} if retries else None
 
 
 def _dry_run(
@@ -916,8 +928,8 @@ def _find_shadow(port: InferPort) -> ShadowFound:
     try:
         return ShadowFound(row=port.shadow_model())
     except Exception as cause:
-        _log(f"shadow の行を引けませんでした: {type(cause).__name__}")
-        return ShadowFound(row=None, failure=f"failed:{type(cause).__name__}")
+        _log(f"shadow の行を引けませんでした: {error_label(cause)}")
+        return ShadowFound(row=None, failure=f"failed:{error_label(cause)}")
 
 
 def _retain_serving(active_version: str, found: ShadowFound) -> None:
@@ -947,8 +959,8 @@ def _walk_shadow(
     try:
         return _shadow_once(port, found.row, features, cycle, active)
     except Exception as cause:
-        _log(f"shadow に失敗しました: {cycle.system_id} / {type(cause).__name__}")
-        return ShadowRun(found.row.model_version, f"failed:{type(cause).__name__}")
+        _log(f"shadow に失敗しました: {cycle.system_id} / {error_label(cause)}")
+        return ShadowRun(found.row.model_version, f"failed:{error_label(cause)}")
 
 
 def _shadow_once(
@@ -1023,8 +1035,8 @@ def _record_forecasts(
         )
         port.upload_forecast_log(file.path, file.body)
     except Exception as cause:
-        _log(f"予測ログを置けませんでした: {system_id} / {type(cause).__name__}")
-        return f"failed:{type(cause).__name__}"
+        _log(f"予測ログを置けませんでした: {system_id} / {error_label(cause)}")
+        return f"failed:{error_label(cause)}"
     return "ok"
 
 
@@ -1146,6 +1158,10 @@ def to_detail(summary: InferSummary) -> dict[str, object]:
             {"predicted": summary.n_predicted, "sample": dict(summary.sample)}
             if summary.status == "dry_run"
             else {}
+        ),
+        # **一時的な不調で取り直した読み込み**（W11 の PR S、所見 245）。無い周期は欄を出さない
+        **(
+            {"supabase_retries": list(summary.supabase_retries)} if summary.supabase_retries else {}
         ),
         "error": summary.error,
     }
