@@ -4,12 +4,19 @@
 **active でない版なら掴まず、どこにも書かずに要約だけ返す**（`jobs/infer.py` の `_dry_run`）。
 確かめるのは「本番の関数のメモリと時間で、この成果物を開いて予測まで作れるか」である。
 
-**本番の周期と重ねない。** 推論は HELLO が毎 5 分の 0 分（周期の頭）、ドコモが 1 分に始まる
-（`vercel.json`。2026-11-03 までは HELLO が 4 分だった。W9-14）。同じインスタンスで重なると、
-成果物を 2 つ開いた山でメモリが足りなくなりうる。試し打ちはその合間に入れる：**HELLO は
-2 分 20 秒、ドコモは 3 分 00 秒**から。窓（`SLOT_WINDOW_S`）を過ぎたら次の周期まで待ち、
-**系統ごとに 1 周期 1 回**にする。ドコモの本番（1 分〜1 分 30 秒ほど）の後に 50 秒、次の周期の
-HELLO の本番（5 分）の前に 1 分半の余裕が残る（試し打ちは 13〜22 秒。10/26・11/2 の実測）。
+**本番の ML の仕事と重ねない。** 推論は HELLO が毎 5 分の 0 分（周期の頭）、ドコモが 2 分に
+起動する（`vercel.json`。2026-11-17 まではドコモが 1 分だった。D-48・W11-01）。同じインスタンスで
+重なると、成果物を 2 つ開いた山でメモリが足りなくなりうる。試し打ちはその合間に入れる：
+**HELLO は 3 分 40 秒、ドコモは 4 分 15 秒**から。窓（`SLOT_WINDOW_S`）を過ぎたら次の周期まで
+待ち、**系統ごとに 1 周期 1 回**にする。
+
+  * ドコモの本番は、2 分の中のどの秒に呼ばれても最長 36 秒で 3 分 36 秒までに終わる——**分の
+    中の起動の秒は、Cron のスケジュールを変えると変わる**ので、秒をあてにしない（W11 プランの
+    所見 246）
+  * 試し打ちは HELLO 25〜27 秒・ドコモ 15〜18 秒（11/9 の実測）。ドコモの試し打ちは周期の
+    終わり（5 分）までに終わり、次の周期の HELLO の本番（5 分 45 秒ごろ）とも重ならない
+  * **Parquet 化（毎時 9 分）・天気の取り込み（毎時 28 分）・参照（05:03 JST）の周期は飛ばす**
+    （`HOURLY_BUSY_MINUTES`・`DAILY_BUSY_AT`）
 
 **URL も秘密も記録に出さない**（CLAUDE.md §5）。HTTP の口は `io/infer_client.py` にあり、
 失敗は系統・HTTP の状態・例外の種類に詰め替えてある。
@@ -17,7 +24,8 @@ HELLO の本番（5 分）の前に 1 分半の余裕が残る（試し打ちは
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from itertools import count
 from typing import Final, Protocol
 
 from bikechance_ml.jobs.clock import Clock
@@ -25,12 +33,24 @@ from bikechance_ml.jobs.clock import Clock
 #: 推論の周期（秒）。`vercel.json` の `*/5` と同じ。
 CYCLE_S: Final[int] = 300
 
-#: 周期の中の、試し打ちを始める位置（秒）。**本番の推論（HELLO 0 秒・ドコモ 60 秒）の後、
-#: 次の周期の HELLO（300 秒）の前。**
-SLOT_OFFSETS_S: Final[Mapping[str, int]] = {"hellocycling": 140, "docomo-cycle": 180}
+#: 1 周期の分の数。
+CYCLE_MINUTES: Final[int] = CYCLE_S // 60
+
+#: 周期の中の、試し打ちを始める位置（秒）。**ドコモの本番が最も遅く終わる 216 秒（3 分 36 秒）
+#: の後**に HELLO、HELLO の試し打ちの後にドコモ。ドコモの試し打ちは周期の終わり（300 秒）までに
+#: 終わる。
+SLOT_OFFSETS_S: Final[Mapping[str, int]] = {"hellocycling": 220, "docomo-cycle": 255}
 
 #: 窓の幅（秒）。**この中で始められなければ、次の周期まで待つ。**
 SLOT_WINDOW_S: Final[int] = 15
+
+#: ML のサービスの**毎時の仕事の分**（UTC。`vercel.json`）：Parquet 化（9 分）と天気の取り込み
+#: （28 分）。**この分を含む周期は、両系統とも試し打ちをしない。**
+HOURLY_BUSY_MINUTES: Final[frozenset[int]] = frozenset({9, 28})
+
+#: ML のサービスの**毎日の仕事の時刻**（UTC の時と分。`vercel.json`）：参照スナップショット
+#: （20:03 UTC ＝ 05:03 JST）。この分を含む周期も飛ばす。
+DAILY_BUSY_AT: Final[frozenset[tuple[int, int]]] = frozenset({(20, 3)})
 
 #: 系統ごとに叩く回数（2 回目は温まった成果物での所要を見る）。
 CALLS_PER_SYSTEM: Final[int] = 2
@@ -97,15 +117,25 @@ def _count_problems(summary: Mapping[str, object]) -> list[str]:
 
 def position_s(now: datetime) -> float:
     """周期の中の位置（秒）。**周期は毎時 0 分から 5 分ごと**（本番の Cron と同じ）。"""
-    return (now.minute % (CYCLE_S // 60)) * 60 + now.second + now.microsecond / 1_000_000
+    return (now.minute % CYCLE_MINUTES) * 60 + now.second + now.microsecond / 1_000_000
+
+
+def is_busy_cycle(at: datetime) -> bool:
+    """`at` を含む周期に、ML のサービスの毎時・毎日の仕事があるか。**あれば試し打ちをしない。**"""
+    utc = at.astimezone(UTC)
+    first = utc.minute - utc.minute % CYCLE_MINUTES
+    minutes = range(first, first + CYCLE_MINUTES)
+    return any(one in HOURLY_BUSY_MINUTES or (utc.hour, one) in DAILY_BUSY_AT for one in minutes)
 
 
 def seconds_until(offset_s: int, now: datetime) -> float:
-    """次に枠が開くまでの秒。**いま窓の中なら 0。**"""
+    """次に枠が開くまでの秒。**いま窓の中なら 0。** ほかの ML の仕事がある周期は飛ばす。"""
     position = position_s(now)
-    if offset_s <= position < offset_s + SLOT_WINDOW_S:
+    if offset_s <= position < offset_s + SLOT_WINDOW_S and not is_busy_cycle(now):
         return 0.0
-    return (offset_s - position) % CYCLE_S
+    first = (offset_s - position) % CYCLE_S or float(CYCLE_S)
+    waits = (first + CYCLE_S * cycles for cycles in count())
+    return next(wait for wait in waits if not is_busy_cycle(now + timedelta(seconds=wait)))
 
 
 def plan(systems: Sequence[str]) -> list[tuple[int, str]]:
