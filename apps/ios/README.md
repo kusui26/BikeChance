@@ -94,7 +94,7 @@ xcrun simctl launch booted app.bikechance.BikeChance
 
 | もの | どこ | 中身 |
 |---|---|---|
-| プライバシーマニフェスト | `BikeChance/PrivacyInfo.xcprivacy` | **追跡しない・集めるのは「おおよその位置」だけ（ユーザーに連結しない・目的はアプリの機能）・理由の要る API を使わない**（W6-33、W7-07、開発プランの D-43）。CI（`ios.yml`）が `.app` の中身を確かめる。同期グループなので、置くだけで `.app` の直下に入る。**UserDefaults を使い始めたら、理由 `CA92.1` を足す** |
+| プライバシーマニフェスト | `BikeChance/PrivacyInfo.xcprivacy` | **追跡しない・集めるのは「おおよその位置」と「製品の操作」の 2 つ（どちらもユーザーに連結しない・目的はアプリの機能）・理由の要る API を使わない**（W6-33、W7-07、開発プランの D-43。製品の操作は 2026-11-08 に足した）。CI（`ios.yml`）が `.app` の中身を確かめる。同期グループなので、置くだけで `.app` の直下に入る。**UserDefaults を使い始めたら、理由 `CA92.1` を足す** |
 | 暗号化の申告 | `project.pbxproj` の `INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO` | 使う暗号は `URLSession` の HTTPS だけで、輸出規制の対象外。**これがあると、アップロードのたびに輸出コンプライアンスの質問票が出ない** |
 
 ### 最初に 1 回だけ（利用者の作業。W6 プラン §7.4）
@@ -111,24 +111,34 @@ xcrun simctl launch booted app.bikechance.BikeChance
 
 ### 毎回
 
-1. **Archive**：実行先を **Any iOS Device (arm64)** にして Product → Archive。
+**申請に出すビルドは `MARKETING_VERSION` 1.0**（App Store Connect の 1.0 の版と揃える。0.1 のビルドは
+1.0 の版に出せない。W11 プランの W11-08）。
+
+1. **メインの作業場所を最新の main に進める**：Xcode で開いているのは `~/Developer/BikeChance` の作業場所で、
+   ほかの作業木ではない。そこで `git switch main` と `git pull --ff-only` を済ませてから開く
+   （**2026-11-12 は 11/2 の main のままアーカイブし、新しい画面の無いビルドを上げて作り直した**）
+2. **Archive**：実行先を **Any iOS Device (arm64)** にして Product → Archive。
    終わると Organizer（Window → Organizer → Archives）に並ぶ。**Product メニューの「Archive」のすぐ下の
    「Xcode Cloud」を選ばない**——Xcode Cloud（Apple のクラウドのビルド）を始める道で、
    「Grant Access to Your Source Code」（GitHub への権限）の画面に進む（2026-10-22 の M5 で一度入った。使わない）
-2. **確かめる**（任意）：Archive を右クリック（Control クリック）→ **Generate Privacy Report** で、
-   集めるデータが**おおよその位置（Coarse Location）だけ**（ユーザーに連結しない・トラッキングに使わない・
-   目的はアプリの機能）であることを見る。App Store Connect のプライバシーの回答と同じ中身になる
-   （W7-07、開発プランの D-43）。**Validate App** で、上げる前の自動の検証だけを先に通せる
-3. **アップロード**：**Distribute App** → **App Store Connect** → Distribute。いまの Xcode では、以前の
+3. **確かめる**：Organizer に並んだ Archive の作成時刻が、手順 1 の後であること（古いコードのまま
+   アーカイブしていないか）。任意で、Archive を右クリック（Control クリック）→ **Generate Privacy Report** で、
+   集めるデータが**おおよその位置（Coarse Location）と製品の操作（Product Interaction）の 2 つ**（どちらも
+   ユーザーに連結しない・トラッキングに使わない・目的はアプリの機能）であることを見る。App Store Connect の
+   プライバシーの回答と同じ中身になる（W7-07、開発プランの D-43）。**Validate App** で、上げる前の自動の
+   検証だけを先に通せる
+4. **アップロード**：**Distribute App** → **App Store Connect** → Distribute。いまの Xcode では、以前の
    「TestFlight & App Store」がこの名前になっている（内部・外部のテストにも申請にも使えるビルド。2026-10-22 の M5）。
    この選択肢は**ビルド番号を Xcode が付け直す**ので、リポジトリの `CURRENT_PROJECT_VERSION`（1）を
-   毎回上げなくてよい（同じバージョン `MARKETING_VERSION`（0.1）の中で、アップロードごとに違う番号が要る）。
+   毎回上げなくてよい（同じバージョン `MARKETING_VERSION`（1.0）の中で、アップロードごとに違う番号が要る）。
    チームの中だけで試し、App Store へは出さないと決めた回は **TestFlight Internal Only** を選ぶ
-   （その回のビルドは申請に使えない）
-4. **グループに足す**：処理が終わると（数分〜数十分）App Store Connect の TestFlight にビルドが出る。
+   （その回のビルドは申請に使えない）。**Apple Developer Program の使用許諾契約が更新されていると、署名の段で
+   止まる**（ログは `403` の `PLA_NOT_ACCEPTED`、画面の表示は「No signing certificate "iOS Distribution"」）。
+   developer.apple.com の Account で同意してから、Distribute をやり直す（2026-11-12）
+5. **グループに足す**：処理が終わると（数分〜数十分）App Store Connect の TestFlight にビルドが出る。
    **Internal Testing のグループには自動では届かない**（自動配布に印を付けてあるが、2026-10-22 の M5 では
    入らなかった）——**TestFlight → Internal Testing の自分のグループ → ビルドの「＋」から、今日のビルドを足す**
-5. **入れる**：iPhone の TestFlight アプリで「アップデート」（初めてなら「インストール」）→ 開く。
+6. **入れる**：iPhone の TestFlight アプリで「アップデート」（初めてなら「インストール」）→ 開く。
    TestFlight の版は、ホーム画面の名前の前にオレンジの点が付く
 
 手順の元は Apple の「Distributing your app for beta testing and releases」。メニューや
@@ -137,5 +147,6 @@ xcrun simctl launch booted app.bikechance.BikeChance
 ## まだ無いもの
 
 Widget、**低ズームのセル表示**（いまはセルが返ったら拡大の案内を出すだけ。W6-30）、
-位置情報の常時利用。申請に要るもののうち、**アイコンの画像・署名のチーム・App Store Connect の
-アプリ**は利用者の作業（上の「TestFlight に上げる」。W6 プラン §7.4）。
+位置情報の常時利用。申請に要るもののうち、アイコンの画像・署名のチーム・App Store Connect の
+アプリは 2026-10-22 の M5 で済んだ（利用者）。App Store の掲載情報（名前・説明・スクリーンショット）は、
+W11〜W12 に利用者が App Store Connect に入れる。
