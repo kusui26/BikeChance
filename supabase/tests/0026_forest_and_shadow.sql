@@ -107,7 +107,7 @@ select is(
 );
 select is(
   (select value from public.app_config where key = 'forest_stale_days'),
-  '49', '森の閾値はいま一時的に 49 日（0060。0058 の 42 日 ＋ 1 週。W11 の昇格の後に 42 日へ戻す）'
+  '63', '森の閾値はいま一時的に 63 日（0062。0060 の 49 日 ＋ 2 週。次の森の昇格の後に 42 日へ戻す）'
 );
 select is(
   (select value from public.app_config where key = 'shadow_fail_cycles'),
