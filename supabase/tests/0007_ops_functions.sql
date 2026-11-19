@@ -5,7 +5,7 @@
 -- 到達の確認は本番での強制発火で行う。
 
 begin;
-select plan(68);
+select plan(72);
 
 -- テストはトランザクション内で完結し rollback するので、ここでの削除は外に影響しない
 delete from public.station_status_latest;
@@ -178,22 +178,34 @@ update public.feed_state set last_fetch_at = null;
 select is(public.watchdog_collect(), 2, '一度も取得できていない 2 システムを叩き直す');
 select is(pg_temp.job_status('watchdog_collect'), 'ok', '成功も job_runs に残る');
 select is(
-  pg_temp.job_detail('watchdog_collect', 'threshold_s'), '630',
-  'E1 の閾値は collect_interval_s 300 秒 × 2 + 30 = 630 秒'
+  pg_temp.job_detail('watchdog_collect', 'threshold_s'), '310',
+  'E1 の閾値は collect_interval_s 300 秒 ＋ 10 = 310 秒（0061。0009 は × 2 ＋ 30 ＝ 630 秒）'
 );
 
 -- Vercel Cron が正常に動いているときは何もしない（平常運転）
 update public.feed_state set last_fetch_at = now();
 select is(public.watchdog_collect(), 0, '直近に取得できていれば叩かない');
+update public.feed_state set last_fetch_at = now() - interval '305 seconds';
+select is(public.watchdog_collect(), 0, 'E1 のふだんの間隔（5 分 ＋ 数秒）では叩かない');
 
--- 閾値は収集周期に追随する。E2（毎分）では 150 秒に締まる（W1-29）
+-- 閾値は収集周期に追随する。E2（毎分）では 70 秒に締まる（W1-29、0061）
 update public.app_config set value = '60' where key = 'collect_interval_s';
 update public.feed_state set last_fetch_at = now() - interval '3 minutes';
 select is(public.watchdog_collect(), 2, 'E2 では 3 分前の取得を停滞とみなす');
 select is(
-  pg_temp.job_detail('watchdog_collect', 'threshold_s'), '150',
-  'E2 の閾値は 60 秒 × 2 + 30 = 150 秒'
+  pg_temp.job_detail('watchdog_collect', 'threshold_s'), '70',
+  'E2 の閾値は 60 秒 ＋ 10 = 70 秒（0061。0009 は × 2 ＋ 30 ＝ 150 秒）'
 );
+
+-- **Vercel Cron が 1 分欠けた後の最初の 0 秒で叩き直す**（W10 プランの所見 241）。見張りの
+-- 0 秒の時点の取得の古さは、ふだん 18〜29 秒、1 分欠けると 78〜89 秒（直近 7 日の実測）。
+-- 0009 の 150 秒では 2 分続けて欠けるまで動かなかった
+update public.feed_state set last_fetch_at = now() - interval '29 seconds';
+select is(public.watchdog_collect(), 0, 'ふだんの古さ（最大 29 秒）では叩かない');
+update public.feed_state set last_fetch_at = now() - interval '70 seconds';
+select is(public.watchdog_collect(), 0, 'ちょうど閾値（70 秒）では叩かない（より古いときだけ）');
+update public.feed_state set last_fetch_at = now() - interval '78 seconds';
+select is(public.watchdog_collect(), 2, '1 分欠けた後（78 秒）は叩き直す');
 select is(
   (select count(*)::int from public.job_runs where job_name = 'watchdog_collect' and status = 'running'),
   0, '走りっぱなしの記録は残らない（成功も失敗も必ず閉じる）'
