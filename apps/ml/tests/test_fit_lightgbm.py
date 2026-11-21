@@ -33,10 +33,10 @@ import pytest
 
 from bikechance_ml.baselines import climatology
 from bikechance_ml.baselines.climatology import FromSamples
-from bikechance_ml.eval import candidates, gates, harness
+from bikechance_ml.eval import candidates, gates, harness, rain_bands
 from bikechance_ml.eval.candidates import Candidate, ForestFacts, Importance
 from bikechance_ml.eval.dataset import BUCKET_LABELS, TARGETS, Samples, to_samples
-from bikechance_ml.eval.split import DaySplit, mask_of
+from bikechance_ml.eval.split import DaySplit, mask_of, split_days
 from bikechance_ml.features import coverage
 from bikechance_ml.features.arrays import Float32
 from bikechance_ml.features.fingerprint import Fingerprint
@@ -45,7 +45,7 @@ from bikechance_ml.io.supabase import SupabaseIo
 from bikechance_ml.jobs import climate as climate_module
 from bikechance_ml.jobs import fit_lightgbm as fit
 from bikechance_ml.jobs.build_features import to_parquet_bytes
-from bikechance_ml.jobs.window import Window
+from bikechance_ml.jobs.window import Window, matrix_of
 from bikechance_ml.models import artifact as lightgbm_artifact
 from bikechance_ml.models import gates as gate_tables
 from bikechance_ml.models import matrix, registry
@@ -213,6 +213,21 @@ def test_the_window_can_be_counted_back_from_the_last_day() -> None:
         pytest.param([*BASE, "--label", "Rehearsal"], id="印に大文字"),
         pytest.param([*BASE, "--label", "re-hearsal"], id="印にハイフン"),
         pytest.param([*BASE, "--label", ""], id="空の印"),
+        pytest.param([*BASE, "--extra-days", "2026-09-07"], id="足す日が窓の最初の日"),
+        pytest.param([*BASE, "--extra-days", "2026-09-10"], id="足す日が窓の後"),
+        pytest.param([*BASE, "--extra-days", "2026-09-01,2026-09-01"], id="足す日が重なる"),
+        pytest.param([*BASE, "--extra-days", "2026/09/01"], id="足す日の書き方"),
+        pytest.param([*BASE, "--extra-days", "2026-09-01", "--upload"], id="足した日で置く"),
+        pytest.param(
+            [*BASE, "--compare-forests", "lgbm-v1-20261005", "--upload"], id="比べる森で置く"
+        ),
+        pytest.param([*BASE, "--compare-forests", "composite-v1-20261115"], id="森でない版"),
+        pytest.param(
+            [*BASE, "--compare-forests", "lgbm-v1-20261005,lgbm-v1-20261005"], id="比べる森が重なる"
+        ),
+        pytest.param(
+            [*BASE, "--compare-forests", "lgbm-v1-20261005", "--local", "x"], id="比べる森を手元で"
+        ),
     ],
 )
 def test_a_wrong_request_stops_before_anything_is_opened(
@@ -608,6 +623,8 @@ def test_the_fit_matrix_is_built_once_for_all_candidates(
     monkeypatch.setattr(fit, "row_tree_seconds", lambda *args: {})
     monkeypatch.setattr(harness, "run", lambda *args, **kwargs: None)
     monkeypatch.setattr(candidates, "summarize", lambda *args: None)
+    # §13 の切り口は評価の結果を読む（ここでは評価を差し替えたので、切り口も差し替える）
+    monkeypatch.setattr(fit, "rain_cells", lambda *args: ())
 
     pair = (Candidate(50, 0.15), Candidate(100, 0.15))
     fit.fit_and_score(opened, samples, split, FromSamples(), pair)
@@ -703,6 +720,7 @@ def test_the_run_reads_the_profiles_by_default(
         split: DaySplit,
         climate_source: climatology.Source,
         wanted: Sequence[Candidate],
+        compared: object = None,
     ) -> fit.Fitted:
         handed.append(climate_source)
         return _fitted(1.0, 1.0, 1.0)
@@ -1062,3 +1080,185 @@ def test_a_name_promoted_between_the_two_puts_is_not_registered(
     assert shelf.uploads == _both_paths(FIT_NAME)[:1]
     assert shelf.registered == []
     assert (root / f"card-{FIT_NAME}.md").exists(), "カードを置く前に書いていない"
+
+
+# ── 足す日・比べる森（W12 プランの W12-06）──────────────────────────
+#: W12-06 の A の窓（学習 10-19〜11-15・パージ 11-16・検証 11-17〜19）
+W12: Final[list[str]] = ["--to", "2026-11-19", "--train-days", "28", "--eval-days", "3"]
+#: 9 月の強い雨の夜（W12 プラン §2 の表）
+EXTRA: Final[tuple[date, ...]] = (date(2026, 9, 8), date(2026, 9, 20), date(2026, 9, 21))
+OLD: Final[str] = "lgbm-v1-old"
+COMPARED: Final[str] = f"{fit.COMPARED_PREFIX} {OLD}"
+
+
+def _requested(argv: list[str]) -> fit.Request:
+    return fit.request_of(fit._arguments(argv))
+
+
+def test_the_extra_days_go_before_the_window_and_into_the_fit() -> None:
+    """**足した日は窓の前に並び、学習の側に入る**（検証とパージは窓の最後のまま）。"""
+    request = _requested([*W12, "--extra-days", "2026-09-21,2026-09-08,2026-09-20"])
+    assert request.extra_days == EXTRA, "並びを揃えていない"
+    assert request.days[:3] == EXTRA
+    assert (request.days[3], request.days[-1], len(request.days)) == (
+        date(2026, 10, 19),
+        date(2026, 11, 19),
+        35,
+    )
+    split = split_days(request.days, 3, 1)
+    assert set(EXTRA) <= set(split.fit)
+    assert split.purge == (date(2026, 11, 16),)
+    assert split.evaluate == (date(2026, 11, 17), date(2026, 11, 18), date(2026, 11, 19))
+
+
+def test_the_extra_days_change_neither_the_name_nor_the_gate_b3() -> None:
+    """**版の名前（最後の学習日）も、門の相手の B3（学習の最後の 7 暦日）も変わらない。**"""
+    plain = split_days(_requested(W12).days, 3, 1)
+    added = split_days(_requested([*W12, "--extra-days", "2026-09-08"]).days, 3, 1)
+    assert fit.model_version_for(added.fit) == fit.model_version_for(plain.fit)
+    assert fit.model_version_for(plain.fit) == "lgbm-v1-20261115"
+    assert fit.baseline_days(added.fit) == fit.baseline_days(plain.fit)
+
+
+def test_a_measuring_run_may_use_both_tools() -> None:
+    """**測るだけの回**なら、足す日と比べる森を一緒に使える（置かず登録しない）。"""
+    request = _requested(
+        [
+            *W12,
+            "--extra-days",
+            "2026-09-08",
+            "--compare-forests",
+            "lgbm-v1-20261005,lgbm-v1-20261103",
+        ]
+    )
+    assert request.compare_forests == ("lgbm-v1-20261005", "lgbm-v1-20261103")
+    assert (request.upload, request.register) == (False, False)
+
+
+def test_an_extra_day_without_samples_is_refused(tmp_path: Path) -> None:
+    """**頼まれた日が無ければ止める**（窓の途中の欠けと違い、黙って飛ばさない）。"""
+    opened = read_local(write_samples(tmp_path, {DAYS[1]: True, DAYS[2]: True}), DAYS[1:])
+    with pytest.raises(fit.MissingExtraDayError, match="2026-09-07"):
+        fit.refuse_missing_extra(opened, (DAYS[0],))
+    fit.refuse_missing_extra(opened, ())
+
+
+@dataclass
+class _Models:
+    """登録簿と成果物を読む口（比べる森の試験）。**書く口は持たない。**"""
+
+    registered: dict[str, registry.Registered]
+    bodies: dict[str, bytes]
+
+    def active_model(self) -> registry.Registered | None:
+        return None
+
+    def find_model(self, model_version: str) -> registry.Registered | None:
+        return self.registered.get(model_version)
+
+    def download(self, bucket: str, path: str) -> bytes | None:
+        assert bucket == registry.MODEL_BUCKET
+        return self.bodies.get(path)
+
+
+def _models(kind: str = registry.LIGHTGBM_KIND, body: bytes | None = None) -> _Models:
+    path = lightgbm_artifact.artifact_path(OLD)
+    found = registry.Registered(OLD, kind, ARTIFACT.feature_set, path, "candidate")
+    bodies = {} if body is None else {path: body}
+    return _Models({OLD: found}, bodies)
+
+
+def test_a_compared_forest_is_read_like_the_serving_side() -> None:
+    """**登録簿で引き、成果物を照合して読む**。列の名前は「森 版」。"""
+    loaded = fit.load_compared(_models(body=lightgbm_artifact.to_bytes(ARTIFACT)), (OLD,))
+    assert list(loaded) == [COMPARED]
+    assert set(loaded[COMPARED]) == set(ARTIFACT.forests)
+    assert fit.load_compared(_models(), ()) == {}, "頼まれなければ何も読まない"
+
+
+@pytest.mark.parametrize(
+    ("models", "error"),
+    [
+        pytest.param(_Models({}, {}), registry.UnknownModelError, id="登録されていない"),
+        pytest.param(
+            _models(kind=registry.BASELINE_KIND, body=b"x"), fit.CompareForestError, id="森でない"
+        ),
+        pytest.param(_models(body=None), fit.CompareForestError, id="成果物が無い"),
+        pytest.param(
+            _models(body=lightgbm_artifact.to_bytes(replace(ARTIFACT, feature_set="v0"))),
+            fit.CompareForestError,
+            id="特徴量の版が違う",
+        ),
+    ],
+)
+def test_a_forest_that_cannot_be_compared_is_refused(
+    models: _Models, error: type[Exception]
+) -> None:
+    """**別の森で測らない。** 読めない・森でない・版が違うなら、当てはめる前に止まる。"""
+    with pytest.raises(error):
+        fit.load_compared(models, (OLD,))
+
+
+def test_a_compared_forest_is_measured_on_the_same_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**比べる森は候補と同じ検証の行で測る**（表の列と §13 に入る）。
+
+    **門を当てるのは候補だけ**（比べる森は門の表を持たない）。
+    """
+    days = _calendar(date(2026, 9, 7), 10)
+    opened = read_local(write_samples(tmp_path, dict.fromkeys(days, True)), days)
+    samples, split = fit.prepare(opened, eval_days=1, purge_days=1, allow_mixed_weather=False)
+    same = fit.Grown(ARTIFACT.forests["bike"], fit.Checked(0, 0.0), ())
+    monkeypatch.setattr(fit, "grow", lambda *args: same)
+    monkeypatch.setattr(fit, "dataset_for", lambda *args: None)
+    fitted = fit.fit_and_score(
+        opened, samples, split, FromSamples(), (CANDIDATE,), {COMPARED: ARTIFACT.forests}
+    )
+    assert COMPARED in fitted.outcome.models
+    assert fitted.compared == (COMPARED,)
+    assert [one.candidate for one in fitted.summaries] == [CANDIDATE], "門を当てるのは候補だけ"
+    evaluated = samples.take(mask_of(samples, split.evaluate))
+    expected = fit.predict_on(ARTIFACT.forests, matrix_of(opened, split.evaluate))
+    for one in fitted.outcome.fits:
+        np.testing.assert_allclose(one.probability[COMPARED], expected[one.target.name])
+    whole = next(
+        cell
+        for cell in fitted.rain
+        if (cell.system, cell.target, cell.band, cell.rain) == (rain_bands.ALL,) * 4
+    )
+    weight = np.asarray(evaluated.weight, dtype=np.float64)
+    sse = sum(
+        float(np.sum(weight * np.square(expected[one.target.name] - evaluated.y(one.target))))
+        for one in fitted.outcome.fits
+    )
+    assert whole.n == len(evaluated) * len(fitted.outcome.fits)
+    assert whole.brier(COMPARED) == pytest.approx(sse / (len(fitted.outcome.fits) * weight.sum()))
+
+
+def _with_rain(compared: tuple[str, ...]) -> fit.Fitted:
+    models = ("B3", CANDIDATE.name, *compared)
+    cell = rain_bands.Cell(
+        rain_bands.ALL,
+        rain_bands.ALL,
+        rain_bands.EVENING,
+        rain_bands.RAIN,
+        4,
+        4.0,
+        {model: 0.1 * (index + 1) for index, model in enumerate(models)},
+    )
+    return replace(_fitted(1.0, 1.0, 1.0), rain=(cell,), compared=compared)
+
+
+def test_the_rain_table_is_based_on_the_first_compared_forest() -> None:
+    """**比べる森があれば最初の森が基準**（配信中の森を先に書く）。無ければ門の相手の B3。"""
+    header_with = next(
+        line for line in fit.rain_section(_with_rain((COMPARED,))) if line.startswith("| 時間帯 |")
+    )
+    assert f"{CANDIDATE.name} の改善" in header_with and "B3 の改善" in header_with
+    assert f"{COMPARED} の改善" not in header_with
+    header_without = next(
+        line for line in fit.rain_section(_with_rain(())) if line.startswith("| 時間帯 |")
+    )
+    assert f"{CANDIDATE.name} の改善" in header_without and "B3 の改善" not in header_without
+    assert fit.rain_section(_fitted(1.0, 1.0, 1.0)) == [], "切り口が無ければ §13 を出さない"

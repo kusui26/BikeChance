@@ -133,7 +133,7 @@ def by_time_of_day(samples: Samples, target: Target) -> Iterator[Slice]:
     hour = target_hour(samples)
     for system_index, system in enumerate(samples.systems):
         in_system = np.asarray(samples.system == system_index, dtype=np.bool_)
-        for label, mask in _bands(hour):
+        for label, mask in bands(hour):
             yield Slice(system, target.name, None, None, np.asarray(in_system & mask), label)
 
 
@@ -143,8 +143,12 @@ def target_hour(samples: Samples) -> Int16:
     return np.asarray(minute // 60, dtype=np.int16)
 
 
-def _bands(hour: Int16) -> Iterator[tuple[str, Bools]]:
-    """時間帯ごとの真偽。**最後の帯は 24 時まで**（次の帯が無いので閉じる）。"""
+def bands(hour: Int16) -> Iterator[tuple[str, Bools]]:
+    """時間帯ごとの真偽。**最後の帯は 24 時まで**（次の帯が無いので閉じる）。
+
+    **時間帯の切り方はここだけ**——雨と時間帯の表（`eval/rain_bands.py`。W12-06）も
+    これを通す（同じ規約を 2 か所に無名で置かない）。
+    """
     starts = [one for _, one in TIME_BANDS]
     for index, (label, start) in enumerate(TIME_BANDS):
         end = starts[index + 1] if index + 1 < len(starts) else 24

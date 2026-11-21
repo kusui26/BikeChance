@@ -81,8 +81,30 @@ def mask_of(samples: Samples, days: Sequence[date]) -> Bools:
 
 
 def _span(days: Sequence[date]) -> str:
-    if not days:
-        return "なし"
+    return runs_text(days) if days else "なし"
+
+
+def runs_text(days: Sequence[date]) -> str:
+    """日の並びを、**続いている所ごとに**「最初〜最後」で書き、「・」でつなぐ。
+
+    続いた窓は今までどおり 1 つの「最初〜最後」になる。**離れた日が混ざっても嘘をつかない**——
+    当てはめに古い日を足すと（`fit_lightgbm` の `--extra-days`。W12-06）、最初と最後だけでは
+    その間の日もすべて使ったように読める。空なら空の文字列。
+    """
+    ordered = sorted(set(days))
+    if not ordered:
+        return ""
+    starts = [
+        index
+        for index, day in enumerate(ordered)
+        if index == 0 or (day - ordered[index - 1]).days > 1
+    ]
+    ends = [*starts[1:], len(ordered)]
+    return "・".join(_run(ordered[start:end]) for start, end in zip(starts, ends, strict=True))
+
+
+def _run(days: Sequence[date]) -> str:
+    """続いた日の並び 1 つ。**1 日だけならその日**。"""
     if len(days) == 1:
         return days[0].isoformat()
     return f"{days[0].isoformat()}〜{days[-1].isoformat()}"
