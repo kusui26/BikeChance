@@ -4,6 +4,9 @@
  * 数字は共有の定数から組む（取得の間隔・更新の周期・水平・表示の上限と刻み・予測を出さなくなる
  * までの時間）。**画面の言葉に合わせる**：「現在地へ移動」「行程をチェック」「参考値」
  * 「更新が滞っています」「ふだんの傾向」は iOS の表示の文字列と同じ。
+ *
+ * **配り方（TestFlight か App Store か）は書かない**（W12 プランの W12-02、PR U）。サポートの URL は
+ * 審査でも読まれ、承認の前にも後にも同じ頁が出るので、どちらの時点で読まれても誤りにならない文にする。
  */
 import {
   FORECAST_STALE_AFTER_S,
@@ -65,7 +68,7 @@ const pollText = [...new Set(systems.map((system) => system.poll_interval_s))]
   .join("・");
 
 export const SUPPORT_LEAD = [
-  `BikeChance は、シェアサイクル（${SYSTEM_NAMES_TEXT}）のポートに着いたとき、自転車を借りられる・返せる確率を表示する iPhone アプリです。いまは TestFlight でベータ版を配っています。`,
+  `BikeChance は、シェアサイクル（${SYSTEM_NAMES_TEXT}）のポートに着いたとき、自転車を借りられる・返せる確率を表示する iPhone アプリです。`,
 ] as const;
 
 const READ_PROBABILITY: TextSection = {
@@ -130,10 +133,11 @@ const LOCATION: TextSection = {
   links: [{ label: "プライバシーポリシー", href: "/privacy" }],
 };
 
-const BETA_FEEDBACK: TextSection = {
-  heading: "ベータ版の不具合を知らせるには",
+const FEEDBACK: TextSection = {
+  heading: "不具合を知らせるには",
   paragraphs: [
-    "TestFlight のフィードバックの機能（スクリーンショットを撮ったときなど）から送ってください。下のお問い合わせ先へのメールでも受け付けます。",
+    "下のお問い合わせ先へ、メールでお知らせください。起きた日時と、お使いの iPhone の機種・iOS の版を書いていただけると、調べやすくなります。",
+    "TestFlight のベータ版をお使いの方は、TestFlight のフィードバックの機能（スクリーンショットを撮ったときなど）からも送れます。",
   ],
 };
 
@@ -146,5 +150,5 @@ export const SUPPORT_FAQ: readonly TextSection[] = [
   COVERAGE,
   RESERVATION,
   LOCATION,
-  BETA_FEEDBACK,
+  FEEDBACK,
 ];

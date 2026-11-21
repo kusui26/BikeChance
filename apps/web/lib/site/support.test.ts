@@ -83,6 +83,22 @@ describe("サポートの文は、動いている作りと一致する", () => {
     expect(text).toContain("15 分を超えて止まると、予測は出しません");
   });
 
+  it("**冒頭は配り方を書かない**（審査の前にも後にも読まれる。W12-02）", () => {
+    const lead = SUPPORT_LEAD.join("\n");
+    expect(lead).toContain("iPhone アプリです。");
+    expect(lead).not.toContain("TestFlight");
+    expect(lead).not.toContain("ベータ");
+    expect(lead).not.toContain("App Store");
+  });
+
+  it("不具合の知らせ方は、まずお問い合わせ先へのメール（テスターは TestFlight からも）", () => {
+    const feedback = SUPPORT_FAQ.find((section) => section.heading === "不具合を知らせるには");
+    const [first, second] = feedback?.paragraphs ?? [];
+    expect(first).toContain("下のお問い合わせ先へ、メールでお知らせください");
+    expect(second).toContain("TestFlight のベータ版をお使いの方は");
+    expect(SUPPORT_FAQ.some((section) => section.heading.includes("ベータ"))).toBe(false);
+  });
+
   it("問いは重ならず、頁の中のリンクは / で、外は https で始まる", () => {
     const headings = SUPPORT_FAQ.map((section) => section.heading);
     expect(new Set(headings).size).toBe(headings.length);
