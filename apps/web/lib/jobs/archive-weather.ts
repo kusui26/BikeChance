@@ -19,6 +19,10 @@
  * 発行に 2 つの時刻が混ざり、特徴量は遅いほうを採る——配信で使った発行を、学習では
  * 使えなくなる。**時間の上限でも止められない**：分割を投げる前に、投げて保存して記録まで
  * 収まるかを確かめ（`fitsArchiveBudget`）、収まらない分割は投げずに `failed` として残す。
+ *
+ * **例外は 1 つ：その時間に 1 つも保存できなかったときだけ、47 分の回が取り直す**
+ * （`catchUpWeather`。W12 プランの W12-04・§4.3、W11 プランの所見 247）。7 分割すべてを
+ * その回で取るので、1 つの発行に 2 つの時刻は混ざらない。途中まで保存できた時間は取り直さない。
  */
 import {
   WEATHER_BATCH_SIZE,
@@ -32,10 +36,10 @@ import {
   weatherObjectPath,
   type EpochSeconds,
 } from "@bikechance/shared";
-import { JobError, isJobError, toJobFailure, type JobFailure } from "./errors";
+import { JobError, failureName, isJobError, toJobFailure, type JobFailure } from "./errors";
 import type { RawUploader } from "./storage";
 import { fetchWeatherBatch, type WeatherCell } from "./weather-fetch";
-import type { WeatherPort } from "./weather-port";
+import type { WeatherIssuePort, WeatherPort } from "./weather-port";
 
 const MS_PER_S = 1000;
 
@@ -59,6 +63,13 @@ const sleep = (ms: number): Promise<void> =>
   });
 
 export const ARCHIVE_WEATHER_JOB_NAME = "archive_weather";
+
+/**
+ * 回の種類（`job_runs.detail.run_kind`）：毎時 17 分の定時の回と、47 分の取り直しの回
+ * （W12 プランの W12-04）。**どちらも `archive_weather` として記録する**——取り直しで保存した
+ * 発行も `v_weather_files` に載り、次の時間の取り込みが拾う。
+ */
+export type WeatherRunKind = "scheduled" | "catch_up";
 
 /** 1 分割の結果。失敗しても他の分割は続ける。 */
 export type BatchOutcome = {
@@ -93,6 +104,7 @@ export type ArchiveWeatherSummary = {
   readonly bytes: number;
   readonly gzip_bytes: number;
   readonly hour_epoch_s: EpochSeconds;
+  readonly run_kind: WeatherRunKind;
   readonly duration_ms: number;
   /** 速さを抑えるために待った合計（ミリ秒）。**枠に近づいたらここが伸びる。** */
   readonly waited_ms: number;
@@ -125,6 +137,7 @@ export type ArchiveWeatherParams = {
 type Run = {
   readonly job: ArchiveWeatherParams;
   readonly epoch_s: EpochSeconds;
+  readonly run_kind: WeatherRunKind;
   readonly elapsed: () => number;
 };
 
@@ -214,11 +227,12 @@ const archiveBatch = async (params: Parameters<typeof saveBatch>[0]): Promise<Ba
     return await saveBatch(params);
   } catch (cause) {
     const failure = isJobError(cause) ? cause.failure : toJobFailure({ phase: "unknown", cause });
-    // 種別（error_name）を落とさない。message だけだと後から grep できない
+    // 種別（error_name）と原因のコードを落とさない。message だけだと後から grep できず、
+    // `fetch failed` だけでは届かなかった理由が分からない（W11 プランの所見 247）
     return failedBatch({
       batch: params.batch,
       n_cells: params.cells.length,
-      error: `${failure.phase}/${failure.error_name}: ${failure.message}`,
+      error: `${failure.phase}/${failureName(failure)}: ${failure.message}`,
       retryable: isRetryable(failure),
       attempts: params.attempt,
     });
@@ -308,6 +322,7 @@ const NO_COUNTS: Counts = { n_retried: 0, n_recovered: 0, n_skipped: 0, waited_m
 
 const summarize = (params: {
   readonly hour_epoch_s: EpochSeconds;
+  readonly run_kind: WeatherRunKind;
   readonly n_cells: number;
   readonly batches: readonly BatchOutcome[];
   readonly duration_ms: number;
@@ -329,6 +344,7 @@ const summarize = (params: {
     bytes: batches.reduce((total, outcome) => total + (outcome.bytes ?? 0), 0),
     gzip_bytes: batches.reduce((total, outcome) => total + (outcome.gzip_bytes ?? 0), 0),
     hour_epoch_s: params.hour_epoch_s,
+    run_kind: params.run_kind,
     duration_ms: params.duration_ms,
     batches,
     error: params.error,
@@ -337,6 +353,7 @@ const summarize = (params: {
 
 /** `job_runs.detail` に入れる要約。分割ごとの失敗理由まで残す。 */
 const toDetail = (summary: ArchiveWeatherSummary): Readonly<Record<string, unknown>> => ({
+  run_kind: summary.run_kind,
   n_cells: summary.n_cells,
   n_batches: summary.n_batches,
   n_saved: summary.n_saved,
@@ -356,16 +373,18 @@ const toDetail = (summary: ArchiveWeatherSummary): Readonly<Record<string, unkno
   ...(summary.error === null ? {} : { error: `${summary.error.phase}: ${summary.error.message}` }),
 });
 
-const recordQuietly = async (
-  params: ArchiveWeatherParams,
+/** 記録を閉じる。**閉じられなくても結果は返す**（閉じられなかった行は保守が閉じる。0056）。 */
+const finishQuietly = async (
+  db: WeatherPort,
   run_id: number | null,
-  summary: ArchiveWeatherSummary,
+  status: "ok" | "failed" | "skipped",
+  detail: Readonly<Record<string, unknown>>,
 ): Promise<void> => {
   if (run_id === null) {
     return;
   }
   try {
-    await params.db.jobFinished(run_id, summary.ok ? "ok" : "failed", toDetail(summary));
+    await db.jobFinished(run_id, status, detail);
   } catch (cause) {
     const failure = toJobFailure({ phase: "ingest", cause });
     console.error(`job_finished に失敗した: ${failure.error_name}: ${failure.message}`);
@@ -399,6 +418,7 @@ const archiveAll = async (run: Run): Promise<ArchiveWeatherSummary> => {
   const retried = await sendInOrder(run, retries, RETRY_ATTEMPT);
   return summarize({
     hour_epoch_s: truncateToHour(run.epoch_s),
+    run_kind: run.run_kind,
     n_cells: cells.length,
     batches: mergeRetries(first, retries, retried),
     duration_ms: run.elapsed(),
@@ -423,20 +443,24 @@ const startQuietly = async (db: WeatherPort): Promise<number | null> => {
   }
 };
 
-export const archiveWeather = async (
+/** 1 回ぶんのアーカイブ（定時の回も、取り直しの回も同じ手順）。 */
+const archiveAs = async (
   params: ArchiveWeatherParams,
+  run_kind: WeatherRunKind,
 ): Promise<ArchiveWeatherSummary> => {
   const clock = params.clock ?? Date.now;
   const started_ms = clock();
   const run: Run = {
     job: params,
     epoch_s: toEpochSeconds(params.now),
+    run_kind,
     elapsed: () => clock() - started_ms,
   };
   const run_id = await startQuietly(params.db);
   const summary = await archiveAll(run).catch((cause: unknown) =>
     summarize({
       hour_epoch_s: truncateToHour(run.epoch_s),
+      run_kind,
       n_cells: 0,
       batches: [],
       duration_ms: run.elapsed(),
@@ -444,6 +468,57 @@ export const archiveWeather = async (
       error: isJobError(cause) ? cause.failure : toJobFailure({ phase: "unknown", cause }),
     }),
   );
-  await recordQuietly(params, run_id, summary);
+  await finishQuietly(params.db, run_id, summary.ok ? "ok" : "failed", toDetail(summary));
   return summary;
+};
+
+/** 定時の回（毎時 17 分）。 */
+export const archiveWeather = async (
+  params: ArchiveWeatherParams,
+): Promise<ArchiveWeatherSummary> => archiveAs(params, "scheduled");
+
+/** 取り直しの回の入力。**DB の入り口に「その時間の発行が在るか」が要る**（`WeatherIssuePort`）。 */
+export type CatchUpParams = Omit<ArchiveWeatherParams, "db"> & {
+  readonly db: WeatherPort & WeatherIssuePort;
+};
+
+/** 取り直しの回の結果。**保存済みの時間は何もしない**（`action: "none"`、`archive` は null）。 */
+export type CatchUpSummary = {
+  readonly ok: boolean;
+  readonly action: "none" | "archived";
+  readonly hour_epoch_s: EpochSeconds;
+  readonly archive: ArchiveWeatherSummary | null;
+};
+
+/** 何もしなかった回を `skipped` で残す。**`hour_epoch_s` の鍵は書かない**（`v_weather_files` に載せない）。 */
+const recordNothingToDo = async (db: WeatherPort, hour_epoch_s: EpochSeconds): Promise<void> => {
+  const run_id = await startQuietly(db);
+  await finishQuietly(db, run_id, "skipped", {
+    run_kind: "catch_up",
+    reason: "already_saved",
+    checked_hour_epoch_s: hour_epoch_s,
+  });
+};
+
+/**
+ * 取り直しの回（毎時 47 分。W12 プランの W12-04・§4.3、W11 プランの所見 247）。
+ *
+ * **その時間の定時の回が 1 つも保存できなかったとき**（落ちた・呼ばれなかった）**だけ**、7 分割
+ * すべてを取る。1 つでも保存できていれば何もしない（`skipped`）。
+ *
+ *   * **1 つの発行に 2 つの時刻を混ぜない**（W7-01、W6 プランの所見 223）：取るなら全部をこの回で
+ *     取るので、入手した時刻（`v_weather_files.available_at`）はこの回の終わり 1 つになる。
+ *     途中まで保存できた時間は取り直さない——推論は直近 3 つの発行を使い、欠けた分割の格子は
+ *     1 つ前の発行が埋める
+ *   * **保存済みのファイルは上書きしない**（生のアーカイブは一次ソース。同じパスは 409 で返る）
+ *   * **確かめられなければ取らない**：DB に聞けなければ例外のまま投げ、ルートが 500 を返す
+ */
+export const catchUpWeather = async (params: CatchUpParams): Promise<CatchUpSummary> => {
+  const hour_epoch_s = truncateToHour(toEpochSeconds(params.now));
+  if (await params.db.issueSaved(hour_epoch_s)) {
+    await recordNothingToDo(params.db, hour_epoch_s);
+    return { ok: true, action: "none", hour_epoch_s, archive: null };
+  }
+  const archive = await archiveAs(params, "catch_up");
+  return { ok: archive.ok, action: "archived", hour_epoch_s, archive };
 };

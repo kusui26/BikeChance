@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   ARCHIVE_WEATHER_CRON,
+  ARCHIVE_WEATHER_MAX_DURATION_S,
   COMPACT_CRON,
   INFER_CRON,
   LOAD_WEATHER_CRON,
@@ -19,11 +20,13 @@ import {
   SYNC_STATIONS_CRON,
   SYSTEMS,
   SYSTEM_IDS,
+  WEATHER_CATCH_UP_CRON,
 } from "@bikechance/shared";
 
 const COLLECT_PATH_PREFIX = "/api/jobs/collect/";
 const SYNC_PATH_PREFIX = "/api/jobs/sync-stations/";
 const WEATHER_PATH = "/api/jobs/archive-weather";
+const WEATHER_CATCH_UP_PATH = "/api/jobs/weather-catch-up";
 const COMPACT_PATH = "/ml/compact";
 const INFER_PATH_PREFIX = "/ml/infer/";
 const REFERENCE_PATH = "/ml/reference";
@@ -235,6 +238,37 @@ describe("vercel.json の天気アーカイブ Cron", () => {
     expect(minute).not.toBe("*");
     expect(minute).not.toBe("0");
     expect(overlaps(minutesOfPath(WEATHER_PATH), minutesOfPath(COMPACT_PATH))).toBe(false);
+  });
+});
+
+describe("vercel.json の天気の取り直し Cron（W12 の PR T）", () => {
+  it("ちょうど 1 本あり、スケジュールが共有定数と一致する", () => {
+    const crons = readCrons(WEATHER_CATCH_UP_PATH);
+    expect(crons).toHaveLength(1);
+    expect(crons[0]?.schedule).toBe(WEATHER_CATCH_UP_CRON);
+  });
+
+  it("**毎時 1 回、定時の回が時間の上限で必ず終わった後の、同じ時間のうちに走る**", () => {
+    // 発行の時刻は時に丸める。同じ時間のうちでなければ、取り直す相手（その時間の発行）が変わる。
+    // 定時の回（17 分）が時間の上限（5 分）まで走っても、取り直しの回はその後に始まる
+    const [archive] = [...minutesOfPath(WEATHER_PATH)];
+    const catch_up = [...minutesOfPath(WEATHER_CATCH_UP_PATH)];
+    expect(catch_up).toHaveLength(1);
+    const [minute] = catch_up;
+    const archive_ends = (archive ?? MINUTES_PER_HOUR) + ARCHIVE_WEATHER_MAX_DURATION_S / 60;
+    expect(minute).toBeGreaterThan(archive_ends);
+    expect(minute).toBeLessThan(MINUTES_PER_HOUR);
+  });
+
+  it("**取り直しの回も時間の上限で終わり、その時間のうちに収まる**（次の時の定時の回と重ならない）", () => {
+    const [minute] = [...minutesOfPath(WEATHER_CATCH_UP_PATH)];
+    const ends = (minute ?? MINUTES_PER_HOUR) + ARCHIVE_WEATHER_MAX_DURATION_S / 60;
+    expect(ends).toBeLessThanOrEqual(MINUTES_PER_HOUR);
+  });
+
+  it("ML のサービスの道ではない（推論とインスタンスを共有しない）", () => {
+    expect(WEATHER_CATCH_UP_PATH.startsWith(ML_PATH_PREFIX)).toBe(false);
+    expect(readCrons(ML_PATH_PREFIX).map((cron) => cron.path)).not.toContain(WEATHER_CATCH_UP_PATH);
   });
 });
 
