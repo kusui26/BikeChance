@@ -53,7 +53,7 @@
     },
     {
       "path": "/ml/weather",
-      "schedule": "28 * * * *"
+      "schedule": "29 * * * *"
     },
     {
       "path": "/ml/compact",
@@ -69,7 +69,7 @@
     },
     {
       "path": "/ml/reference",
-      "schedule": "3 20 * * *"
+      "schedule": "4 20 * * *"
     }
   ]
 }
