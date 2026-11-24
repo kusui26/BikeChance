@@ -326,6 +326,18 @@ export const WEATHER_RETRY_BACKOFF_MS = 10_000;
 export const ARCHIVE_WEATHER_CRON = "17 * * * *";
 
 /**
+ * 天気の取り直しの Cron（UTC。`/api/jobs/weather-catch-up`）。毎時 47 分（W12 プランの W12-04・
+ * §4.3、W11 プランの所見 247）。
+ *
+ * **その時間の定時の回（17 分）が 1 つも保存できなかったときだけ**、7 分割すべてを取る
+ * （`catchUpWeather`）。保存できていれば何もしない。定時の回は時間の上限（5 分）までに必ず終わる
+ * ので、47 分なら定時の回と重ならず、**同じ時間のうちに**取れる（発行の時刻は時に丸める。
+ * 次の時に入ると、別の発行になる）。取った発行は、次の時間の取り込み（`LOAD_WEATHER_CRON`）が拾う。
+ * Web のサービスの仕事なので、推論とインスタンスを共有しない（ドコモの 47 分の回と同じ分でよい）。
+ */
+export const WEATHER_CATCH_UP_CRON = "47 * * * *";
+
+/**
  * 毎時 Parquet 化の設定（W2 プラン §5.6、§9.2）。
  *
  * 実体は Python（`apps/ml`）にあり、この定数を import できない。値は

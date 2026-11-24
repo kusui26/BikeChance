@@ -7,10 +7,15 @@ import {
   WEATHER_RETRY_BACKOFF_MS,
 } from "@bikechance/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { archiveWeather, type ArchiveWeatherParams } from "./archive-weather";
+import {
+  archiveWeather,
+  catchUpWeather,
+  type ArchiveWeatherParams,
+  type CatchUpParams,
+} from "./archive-weather";
 import type { RawUploader } from "./storage";
 import type { WeatherCell } from "./weather-fetch";
-import type { WeatherPort } from "./weather-port";
+import type { WeatherIssuePort, WeatherPort } from "./weather-port";
 
 type FetchLike = (url: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -561,5 +566,155 @@ describe("取り直し（W7-01、W6 プランの所見 223）", () => {
     await archiveWeather(paramsWith(db, upload));
 
     expect(finished[0]?.detail).toMatchObject({ n_retried: 0, n_recovered: 0, n_skipped: 0 });
+  });
+});
+
+describe("回の種類と原因のコード（W12 の PR T）", () => {
+  it("**定時の回は `run_kind: scheduled` を残す**", async () => {
+    stubFetch(async () => okResponse(forecastBody(3)));
+    const { db, finished } = recordingDb();
+    const { upload } = uploaderThat();
+
+    const summary = await archiveWeather(paramsWith(db, upload));
+
+    expect(summary.run_kind).toBe("scheduled");
+    expect(finished[0]?.detail).toMatchObject({ run_kind: "scheduled", hour_epoch_s: HOUR_EPOCH });
+  });
+
+  it("**届かなかった分割は、原因のコードを記録に残す**（`fetch failed` だけでは理由が分からない。所見 247）", async () => {
+    const unreachable = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("connect ECONNRESET 203.0.113.7:443"), { code: "ECONNRESET" }),
+    });
+    stubFetch(async () => {
+      throw unreachable;
+    });
+    const { db, finished } = recordingDb();
+    const { upload } = uploaderThat();
+
+    const summary = await archiveWeather(paramsWith(db, upload));
+
+    expect(summary.ok).toBe(false);
+    const failures = finished[0]?.detail["failures"];
+    expect(failures).toEqual(["0: fetch/TypeError(ECONNRESET): fetch failed"]);
+    expect(JSON.stringify(finished[0]?.detail)).not.toContain("203.0.113.7");
+  });
+});
+
+describe("取り直しの回（毎時 47 分。catchUpWeather、W12 プランの W12-04）", () => {
+  /** 17 分の回より後の、同じ時間（05:47:12Z。時に丸めると同じ 05:00）。 */
+  const CATCH_UP_NOW = new Date("2026-09-08T05:47:12.000Z");
+
+  /** `recordingDb` に「その時間の発行が在るか」を足す。**聞かれた時間を残す。** */
+  const catchUpDb = (
+    saved: boolean | Error,
+    cells?: WeatherCell[],
+  ): { db: WeatherPort & WeatherIssuePort; finished: Recorded["finished"]; asked: number[] } => {
+    const { db, finished } = recordingDb(cells === undefined ? {} : { cells });
+    const asked: number[] = [];
+    const issueSaved = async (hour_epoch_s: number): Promise<boolean> => {
+      asked.push(hour_epoch_s);
+      if (saved instanceof Error) throw saved;
+      return saved;
+    };
+    return { db: { ...db, issueSaved }, finished, asked };
+  };
+
+  const catchUpParams = (
+    db: WeatherPort & WeatherIssuePort,
+    upload: RawUploader,
+  ): CatchUpParams => ({
+    ...paramsWith(db, upload),
+    db,
+    now: CATCH_UP_NOW,
+  });
+
+  it("**その時間の発行が保存済みなら、取らずに `skipped` で残す**（`hour_epoch_s` の鍵は書かない）", async () => {
+    const fetch = vi.fn(async () => okResponse(forecastBody(3)));
+    vi.stubGlobal("fetch", fetch);
+    const { db, finished, asked } = catchUpDb(true);
+    const { upload, paths } = uploaderThat();
+
+    const summary = await catchUpWeather(catchUpParams(db, upload));
+
+    expect(summary).toEqual({ ok: true, action: "none", hour_epoch_s: HOUR_EPOCH, archive: null });
+    expect(asked).toEqual([HOUR_EPOCH]);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(paths).toEqual([]);
+    expect(finished).toEqual([
+      {
+        status: "skipped",
+        detail: { run_kind: "catch_up", reason: "already_saved", checked_hour_epoch_s: HOUR_EPOCH },
+      },
+    ]);
+    // v_weather_files は `detail ? 'hour_epoch_s'` で発行を拾う。何もしなかった回を載せない
+    expect(finished[0]?.detail).not.toHaveProperty("hour_epoch_s");
+  });
+
+  it("**1 つも保存されていなければ、17 分の回と同じパスに 7 分割すべてを取る**（`run_kind: catch_up`）", async () => {
+    stubFetch(async (url) => {
+      const count = (new URL(String(url)).searchParams.get("latitude") ?? "").split(",").length;
+      return okResponse(forecastBody(count));
+    });
+    const { db, finished } = catchUpDb(false, cellsOf(623));
+    const { upload, paths } = uploaderThat();
+
+    const summary = await catchUpWeather(catchUpParams(db, upload));
+
+    expect(summary.ok).toBe(true);
+    expect(summary.action).toBe("archived");
+    expect(summary.archive?.run_kind).toBe("catch_up");
+    expect(summary.archive?.n_saved).toBe(7);
+    expect(paths).toHaveLength(7);
+    expect(paths[0]).toBe("2026/09/08/jma_msm_1788843600_00.json.gz");
+    expect(finished).toHaveLength(1);
+    expect(finished[0]?.status).toBe("ok");
+    expect(finished[0]?.detail).toMatchObject({
+      run_kind: "catch_up",
+      hour_epoch_s: HOUR_EPOCH,
+      n_saved: 7,
+    });
+  });
+
+  it("**取り直しも落ちれば `failed`**（原因のコード付き。応答も ok にしない）", async () => {
+    stubFetch(async () => {
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error("Connect Timeout Error"), {
+          code: "UND_ERR_CONNECT_TIMEOUT",
+        }),
+      });
+    });
+    const { db, finished } = catchUpDb(false);
+    const { upload } = uploaderThat();
+
+    const summary = await catchUpWeather(catchUpParams(db, upload));
+
+    expect(summary.ok).toBe(false);
+    expect(summary.action).toBe("archived");
+    expect(finished[0]?.status).toBe("failed");
+    expect(finished[0]?.detail).toMatchObject({ run_kind: "catch_up" });
+    expect(JSON.stringify(finished[0]?.detail)).toContain("TypeError(UND_ERR_CONNECT_TIMEOUT)");
+  });
+
+  it("**確かめられなければ取らない**（DB に聞けなければ投げる。記録も保存もしない）", async () => {
+    const fetch = vi.fn(async () => okResponse(forecastBody(3)));
+    vi.stubGlobal("fetch", fetch);
+    const { db, finished } = catchUpDb(new Error("db down"));
+    const { upload, paths } = uploaderThat();
+
+    await expect(catchUpWeather(catchUpParams(db, upload))).rejects.toThrow("db down");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(paths).toEqual([]);
+    expect(finished).toEqual([]);
+  });
+
+  it("**保存済みのファイルは上書きしない**（同じパスは重複として返り、保存した数に入れない）", async () => {
+    stubFetch(async () => okResponse(forecastBody(3)));
+    const { db } = catchUpDb(false);
+    const { upload } = uploaderThat({ duplicate: true });
+
+    const summary = await catchUpWeather(catchUpParams(db, upload));
+
+    expect(summary.archive?.n_duplicate).toBe(1);
+    expect(summary.archive?.n_saved).toBe(0);
   });
 });

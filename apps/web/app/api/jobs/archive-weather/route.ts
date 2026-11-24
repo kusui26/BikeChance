@@ -5,22 +5,18 @@
  * 状態コードの割り当てだけを行う（collect / sync-stations と同じ形）。
  *
  * システム別ではないので `[system]` を取らない。天気は事業者に依らない。
+ * **その時間に 1 つも保存できなかったら、47 分の `/api/jobs/weather-catch-up` が取り直す**
+ * （W12 プランの W12-04）。依存の組み立ては 2 つのルートで同じ（`lib/jobs/weather-job.ts`）。
  *
  * ステータスコードの方針（W1 プラン §11.6、W1-20）：
  *   200 成功        401 CRON_SECRET 不一致       500 失敗
  * エラーを 500 にするのは Vercel Observability のエラー率検知を効かせるため。
  * Cron はリダイレクトを追わないので 3xx は返さない（CLAUDE.md §3）。
  */
-import { gzip } from "node:zlib";
-import { promisify } from "node:util";
-import { WEATHER_BUCKET, WEATHER_DB_TIMEOUT_MS } from "@bikechance/shared";
 import { archiveWeather, type ArchiveWeatherSummary } from "@/lib/jobs/archive-weather";
 import { isAuthorizedCronRequest } from "@/lib/jobs/auth";
-import { readCollectorEnv } from "@/lib/jobs/env";
 import { toJobFailure } from "@/lib/jobs/errors";
-import { createSupabaseUploader } from "@/lib/jobs/storage";
-import { createServiceClient } from "@/lib/jobs/supabase";
-import { createSupabaseWeatherPort } from "@/lib/jobs/weather-port";
+import { weatherJobParams } from "@/lib/jobs/weather-job";
 
 /**
  * `maxDuration` は**静的なリテラルでなければならない**（定数を import すると Next が
@@ -36,8 +32,6 @@ export const maxDuration = 300;
 
 const NO_STORE = { "Cache-Control": "no-store" } as const;
 
-const gzipAsync = promisify(gzip);
-
 const problem = (status: number, title: string, detail: string): Response =>
   Response.json({ ok: false, title, detail }, { status, headers: NO_STORE });
 
@@ -52,21 +46,7 @@ export const GET = async (request: Request): Promise<Response> => {
 
   // 2. 環境変数 → 格子の取得 → 予報の取得 → 保存 → 記録
   try {
-    const env = readCollectorEnv(process.env);
-    // **DB と Storage の 1 要求にも時間切れ**（W7-03）。時間の予算（`fitsArchiveBudget`）は、
-    // 1 分割の最悪を「取得の時間切れ ＋ この時間切れ」として数えている
-    const client = createServiceClient({
-      url: env.SUPABASE_URL,
-      secret_key: env.SUPABASE_SECRET_KEY,
-      request_timeout_ms: WEATHER_DB_TIMEOUT_MS,
-    });
-    const summary = await archiveWeather({
-      db: createSupabaseWeatherPort(client),
-      upload: createSupabaseUploader(client, WEATHER_BUCKET),
-      gzip: async (body) => new Uint8Array(await gzipAsync(body)),
-      contact_email: env.CONTACT_EMAIL,
-      now: new Date(),
-    });
+    const summary = await archiveWeather(weatherJobParams(process.env, new Date()));
     return summaryResponse(summary);
   } catch (cause) {
     const failure = toJobFailure({ phase: "validate", cause });

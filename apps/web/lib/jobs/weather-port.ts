@@ -4,7 +4,11 @@
  * `IngestPort` / `AttributesPort` と同じ考え方。DB とのやりとりを 3 つの関数に絞ると、
  * 上位のロジックが supabase-js に依存せず、テストで分岐を全部通せる。
  */
-import { WEATHER_GRID_LAT_STEP, WEATHER_GRID_LON_STEP } from "@bikechance/shared";
+import {
+  WEATHER_GRID_LAT_STEP,
+  WEATHER_GRID_LON_STEP,
+  type EpochSeconds,
+} from "@bikechance/shared";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { JobError, toJobFailure } from "./errors";
 import type { WeatherCell } from "./weather-fetch";
@@ -15,9 +19,18 @@ export type WeatherPort = {
   readonly jobStarted: (job_name: string) => Promise<number>;
   readonly jobFinished: (
     id: number,
-    status: "ok" | "failed",
+    status: "ok" | "failed" | "skipped",
     detail: Readonly<Record<string, unknown>>,
   ) => Promise<void>;
+};
+
+/**
+ * 取り直しの回（毎時 47 分。W12 プランの W12-04）だけが使う入り口：**その時間の発行が、1 つでも
+ * 保存されたか**。天気の「使える時刻」を決める `v_weather_files` に、`n_saved > 0` の行があるかで
+ * 見る（取り込み（`v_weather_pending`）が読むのと同じ定義）。
+ */
+export type WeatherIssuePort = {
+  readonly issueSaved: (hour_epoch_s: EpochSeconds) => Promise<boolean>;
 };
 
 const raiseRpcError = (rpc: string, error: unknown): never => {
@@ -44,7 +57,9 @@ const toCells = (data: unknown): readonly WeatherCell[] => {
   return rows.filter(isCell).map((cell) => ({ lat: cell.lat, lon: cell.lon }));
 };
 
-export const createSupabaseWeatherPort = (client: SupabaseClient): WeatherPort => ({
+export const createSupabaseWeatherPort = (
+  client: SupabaseClient,
+): WeatherPort & WeatherIssuePort => ({
   listGridCells: async () => {
     const { data, error } = await client.rpc("weather_grid_cells", {
       p_lat_step: WEATHER_GRID_LAT_STEP,
@@ -81,5 +96,18 @@ export const createSupabaseWeatherPort = (client: SupabaseClient): WeatherPort =
     if (error !== null) {
       raiseRpcError("job_finished", error);
     }
+  },
+
+  issueSaved: async (hour_epoch_s) => {
+    const { data, error } = await client
+      .from("v_weather_files")
+      .select("hour_epoch_s")
+      .eq("hour_epoch_s", hour_epoch_s)
+      .gt("n_saved", 0)
+      .limit(1);
+    if (error !== null) {
+      raiseRpcError("v_weather_files", error);
+    }
+    return Array.isArray(data) && data.length > 0;
   },
 });
