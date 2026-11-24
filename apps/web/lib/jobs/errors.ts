@@ -23,6 +23,11 @@ export type JobFailure = {
   readonly phase: JobPhase;
   /** 例外の名前（`TimeoutError` など）。型ではなく値の分類に使う。 */
   readonly error_name: string;
+  /**
+   * 原因のコード（`ECONNRESET`・`UND_ERR_CONNECT_TIMEOUT` など）。**形が合うときだけ**入る
+   * （`toJobFailure`）。`fetch failed` だけでは、届かなかった理由が分からない（W11 プランの所見 247）。
+   */
+  readonly cause_code?: string;
   /** 上流の HTTP ステータス。HTTP を伴わない失敗では null。 */
   readonly http_status: number | null;
   /** 伏字化済みのメッセージ。**URL とトークンは含まない。** */
@@ -69,18 +74,57 @@ const messageOf = (cause: unknown): string => {
   return isMessageBearing(cause) ? plainMessageOf(cause) : String(cause);
 };
 
+/**
+ * 原因のコードとして拾う形：英大文字で始まり、英大文字・数字・`_` が続く 2〜40 文字。
+ * **これ以外は拾わない**——コードの欄に何が入っていても、URL やトークンは通らない。
+ */
+const CAUSE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,39}$/;
+
+/** `code` 欄の値を、形が合うときだけ返す。**`code` のほかの欄（`message`・`hostname` など）は読まない。** */
+const codeOf = (value: unknown): string | null => {
+  if (typeof value !== "object" || value === null || !("code" in value)) {
+    return null;
+  }
+  const code: unknown = value.code;
+  return typeof code === "string" && CAUSE_CODE_PATTERN.test(code) ? code : null;
+};
+
+/**
+ * 例外の原因のコード。**fetch の失敗（`TypeError: fetch failed`）は、本当の理由を `cause` の
+ * `code` に持つ**（undici。`ECONNRESET`・`UND_ERR_CONNECT_TIMEOUT`・`ENOTFOUND` など）。
+ * 例外そのものの `code`（Node のシステムエラー）を先に見て、無ければ `cause` の `code` を見る。
+ * **`cause` から読むのは `code` だけ**——`message` には接続先が入る。ふつうのオブジェクト
+ * （PostgREST の本文）の `code` は `message` に入れてあるので、ここでは拾わない。
+ */
+const causeCodeOf = (cause: unknown): string | null => {
+  if (!(cause instanceof Error)) {
+    return null;
+  }
+  return codeOf(cause) ?? codeOf(cause.cause);
+};
+
 /** 例外を `JobFailure` に詰め替える。記録・応答にはこの結果だけを使う。 */
 export const toJobFailure = (params: {
   readonly phase: JobPhase;
   readonly cause: unknown;
   readonly http_status?: number | null;
   readonly secrets?: readonly string[];
-}): JobFailure => ({
-  phase: params.phase,
-  error_name: nameOf(params.cause),
-  http_status: params.http_status ?? null,
-  message: redact(messageOf(params.cause), params.secrets ?? []),
-});
+}): JobFailure => {
+  const cause_code = causeCodeOf(params.cause);
+  return {
+    phase: params.phase,
+    error_name: nameOf(params.cause),
+    ...(cause_code === null ? {} : { cause_code }),
+    http_status: params.http_status ?? null,
+    message: redact(messageOf(params.cause), params.secrets ?? []),
+  };
+};
+
+/** 記録に書く失敗の名前：例外の名前と、あれば原因のコード（`TypeError(ECONNRESET)`）。 */
+export const failureName = (failure: JobFailure): string =>
+  failure.cause_code === undefined
+    ? failure.error_name
+    : `${failure.error_name}(${failure.cause_code})`;
 
 /** 上流が異常なステータスを返した（例外ではない）ときの失敗。 */
 export const httpJobFailure = (params: {

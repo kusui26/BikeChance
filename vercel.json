@@ -52,6 +52,10 @@
       "schedule": "17 * * * *"
     },
     {
+      "path": "/api/jobs/weather-catch-up",
+      "schedule": "47 * * * *"
+    },
+    {
       "path": "/ml/weather",
       "schedule": "29 * * * *"
     },
