@@ -153,8 +153,8 @@ def test_seconds_until_the_next_slot(now: datetime, offset: int, expected: float
         (_at(5, 0), 220, 520.0, "9 分の Parquet 化の周期を飛ばす"),
         (_at(4, 0), 220, 580.0, "窓を過ぎた次の周期が Parquet 化 → もう 1 つ先"),
         (_at(8, 45), 220, 295.0, "窓の中でも Parquet 化の周期なら叩かない"),
-        (_at(25, 0), 255, 555.0, "28 分の天気の取り込みの周期を飛ばす"),
-        (_at(0, 0, hour=20), 220, 820.0, "20:03 UTC（05:03 JST）の参照と次の 9 分の周期を飛ばす"),
+        (_at(25, 0), 255, 555.0, "29 分の天気の取り込みの周期を飛ばす"),
+        (_at(0, 0, hour=20), 220, 820.0, "20:04 UTC（05:04 JST）の参照と次の 9 分の周期を飛ばす"),
         (_at(0, 0, hour=1), 220, 220.0, "参照は 1 日 1 回。ほかの時の 3 分は飛ばさない"),
     ],
 )
@@ -179,10 +179,10 @@ def test_from_any_moment_the_slot_is_in_its_window_and_a_free_cycle() -> None:
 
 
 def test_busy_cycles_follow_utc_even_for_jst_times() -> None:
-    """**JST の時刻で渡しても UTC で判定する**（参照は 05:03 JST ＝ 20:03 UTC）。"""
+    """**JST の時刻で渡しても UTC で判定する**（参照は 05:04 JST ＝ 20:04 UTC）。"""
     jst = timezone(timedelta(hours=9))
-    assert dry_run.is_busy_cycle(datetime(2026, 11, 3, 5, 3, 30, tzinfo=jst))
-    assert not dry_run.is_busy_cycle(datetime(2026, 11, 3, 20, 3, 30, tzinfo=jst))
+    assert dry_run.is_busy_cycle(datetime(2026, 11, 3, 5, 4, 30, tzinfo=jst))
+    assert not dry_run.is_busy_cycle(datetime(2026, 11, 3, 20, 4, 30, tzinfo=jst))
 
 
 def test_the_plan_calls_each_system_once_per_cycle() -> None:

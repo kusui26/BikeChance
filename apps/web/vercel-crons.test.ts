@@ -35,41 +35,80 @@ const ML_PATH_PREFIX = "/ml/";
 const HELLO_INFER_PATH = `${INFER_PATH_PREFIX}hellocycling`;
 const DOCOMO_INFER_PATH = `${INFER_PATH_PREFIX}docomo-cycle`;
 const MINUTES_PER_HOUR = 60;
+const SECONDS_PER_MINUTE = 60;
+const SECONDS_PER_HOUR = MINUTES_PER_HOUR * SECONDS_PER_MINUTE;
 /** 推論の格子（分）。`jobs/infer.py` の `GRID_MINUTES` と同じ。 */
 const GRID_MINUTES = 5;
 
-/**
- * HELLO の推論が、起動した分から**走りうる分の数**。格子の 45 秒後に呼ばれ、直近 7 日の
- * 最長 70 秒で格子の 116 秒後に終わる（2026-11-14 に測った。W11 プランの W11-01）。
- */
-const HELLO_RUN_MINUTES = 2;
+/** 分の中で起動する秒の範囲 [早い, 遅い]。 */
+type StartSeconds = readonly [number, number];
 
-type MlJob = {
+/**
+ * **起動の秒をあてにしない**ときの範囲（分の中のどの秒にもなりうる）。Vercel Cron の分の中の
+ * 起動の秒は、仕事ごとに決まっていて毎日ほぼ同じだが、**スケジュールを変えると変わる**
+ * （W11 プランの所見 246）。
+ */
+const ANY_SECOND: StartSeconds = [0, SECONDS_PER_MINUTE];
+
+/** 仕事が走りうる時間：分の中の起動の秒と、最長の所要（秒）。 */
+type Timing = {
+  readonly start_s: StartSeconds;
+  readonly longest_s: number;
+};
+
+type MlJob = Timing & {
   readonly path: string;
-  /** 起動した分から走りうる分の数（分の中の起動の秒と、所要の最長から）。 */
-  readonly run_minutes: number;
+  /**
+   * `start_s` を測ったときのスケジュール。**測った秒は、このスケジュールでだけ正しい。**
+   * 測っていなければ null（`ANY_SECOND` か、重ならないための条件を置く）。
+   */
+  readonly measured_on: string | null;
 };
 
 /**
- * **ML のサービスの Cron と、それぞれが走りうる分**（直近 7 日の実測。W11 プランの W11-01）。
+ * 参照（05:04）の起動が、分の何秒までなら 05:05 の HELLO の前に終わるか（W12 プランの W12-05）。
+ * 参照の最長 54 秒と HELLO の起動 45 秒から（51 ＋ 54 ＝ 60 ＋ 45）。**まだ測っていない**
+ * ——スケジュールを変えたので、マージの翌朝に測り、過ぎていたら分を選び直す（W12 プラン §4.4）。
+ */
+const REFERENCE_START_BOUND_S = 51;
+
+/**
+ * **ML のサービスの Cron と、それぞれが走りうる時間**（W11 プランの W11-01・所見 246、
+ * W12 プランの W12-05）。
  *
  * ML のサービスは 1 つの関数で、同時に呼ばれると同じインスタンスで走りうる——重なると
- * `rss_mb` が積み上がる（W6 プランの所見 212、W10 プランの所見 244）。
+ * `rss_mb` が積み上がる（W6 プランの所見 212、W10 プランの所見 244）。だから**起動の分ではなく、
+ * 走りうる秒の区間で比べる**（2026-11-26 までは分で比べ、ドコモを 1 分とみていた。ドコモは
+ * 2 分 44〜48 秒に起動して 3 分台まで走る——所見 246）。
  *
- *   * ドコモの推論（最長 36 秒）・Parquet 化（5 秒）・天気の取り込み（23 秒後に呼ばれて
- *     最長 31 秒）は、起動した分の内に終わる見込み
- *   * 参照（最長 52 秒）は、分の後半に呼ばれると次の分にかかる
- *
- * **分の中の起動の秒は、スケジュールを変えると変わる**（W11 プランの所見 246）。2026-11-17 に
- * 変えたドコモ・Parquet 化・参照の秒はマージの後に測り、この見込みを確かめる。
+ *   * 推論と Parquet 化の起動の秒は、2026-11-17（W11 の PR P）からの実測。最長の所要は実測を
+ *     切り上げた値（ほかの仕事と重なっていた回を除く。HELLO 70.5 秒・ドコモ 35.7 秒・Parquet 化
+ *     6.8 秒・天気の取り込み 24.1 秒・参照 53.7 秒。2026-11-22 に測った）
+ *   * **天気の取り込み（29 分）と参照（05:04）は、2026-11-26 にスケジュールを変えたので、秒を
+ *     まだ測っていない**。天気の取り込みはどの秒に呼ばれても重ならない。参照は
+ *     `REFERENCE_START_BOUND_S` 秒までに起動すれば重ならない
  */
 const ML_JOBS: readonly MlJob[] = [
-  { path: HELLO_INFER_PATH, run_minutes: HELLO_RUN_MINUTES },
-  { path: DOCOMO_INFER_PATH, run_minutes: 1 },
-  { path: COMPACT_PATH, run_minutes: 1 },
-  { path: LOAD_WEATHER_PATH, run_minutes: 1 },
-  { path: REFERENCE_PATH, run_minutes: 2 },
+  { path: HELLO_INFER_PATH, measured_on: "0-59/5 * * * *", start_s: [45, 49], longest_s: 71 },
+  { path: DOCOMO_INFER_PATH, measured_on: "2-59/5 * * * *", start_s: [44, 48], longest_s: 36 },
+  { path: COMPACT_PATH, measured_on: "9 * * * *", start_s: [24, 28], longest_s: 7 },
+  { path: LOAD_WEATHER_PATH, measured_on: null, start_s: ANY_SECOND, longest_s: 25 },
+  { path: REFERENCE_PATH, measured_on: null, start_s: [0, REFERENCE_START_BOUND_S], longest_s: 54 },
 ];
+
+const jobOf = (path: string): MlJob => {
+  const job = ML_JOBS.find((one) => one.path === path);
+  if (job === undefined) throw new Error(`${path} は ML_JOBS にありません`);
+  return job;
+};
+
+/**
+ * HELLO の推論が、起動した分から**走りうる分の数**（格子の 49 秒後までに呼ばれ、最長 71 秒で
+ * 格子の 120 秒後に終わる）。ドコモはこの直後の分に起動する。
+ */
+const HELLO_RUN_MINUTES = Math.ceil(
+  (jobOf(HELLO_INFER_PATH).start_s[1] + jobOf(HELLO_INFER_PATH).longest_s) / SECONDS_PER_MINUTE,
+);
 
 type CronEntry = {
   readonly path: string;
@@ -137,16 +176,34 @@ const minutesOfPath = (path: string): ReadonlySet<number> =>
 const inferMinutes = (): readonly ReadonlySet<number>[] =>
   readCrons(INFER_PATH_PREFIX).map((cron) => minutesOf(cron.schedule));
 
-/** 起動する分の集合を、走りうる分の集合に広げる（`run_minutes` ぶん後ろへ。時をまたぐ）。 */
-const runMinutes = (starts: ReadonlySet<number>, run_minutes: number): ReadonlySet<number> =>
-  new Set(
-    [...starts].flatMap((start) =>
-      Array.from({ length: run_minutes }, (_, i) => (start + i) % MINUTES_PER_HOUR),
-    ),
+/** 走りうる時間（時の頭からの秒。[始め, 終わり]）。 */
+type Interval = readonly [number, number];
+
+/** 起動する分ごとに、**分の中の起動の秒から、最も遅い起動 ＋ 最長の所要まで**を走りうるとみる。 */
+const runIntervals = (schedule: string, timing: Timing): readonly Interval[] =>
+  [...minutesOf(schedule)].map((minute) => [
+    minute * SECONDS_PER_MINUTE + timing.start_s[0],
+    minute * SECONDS_PER_MINUTE + timing.start_s[1] + timing.longest_s,
+  ]);
+
+/** 2 つの区間が重なるか。**時をまたぐ**（59 分に起動して 0 分にかかる仕事）。端が接するだけは重ならない。 */
+const intervalsOverlap = (a: Interval, b: Interval): boolean =>
+  [-SECONDS_PER_HOUR, 0, SECONDS_PER_HOUR].some(
+    (shift) => a[0] < b[1] + shift && b[0] + shift < a[1],
   );
 
-const runMinutesOf = (job: MlJob): ReadonlySet<number> =>
-  runMinutes(minutesOfPath(job.path), job.run_minutes);
+/** 2 つの仕事が走りうる時間が重なるか。**日に 1 回の仕事も、毎時その分に起動するとみる**（時は見ない）。 */
+const timingsOverlap = (
+  schedule_a: string,
+  timing_a: Timing,
+  schedule_b: string,
+  timing_b: Timing,
+): boolean =>
+  runIntervals(schedule_a, timing_a).some((a) =>
+    runIntervals(schedule_b, timing_b).some((b) => intervalsOverlap(a, b)),
+  );
+
+const scheduleOf = (path: string): string => readCrons(path)[0]?.schedule ?? "";
 
 describe("分の集合の読み方（下の検査が使う）", () => {
   it("刻み・範囲・単独の分を開く", () => {
@@ -165,13 +222,29 @@ describe("分の集合の読み方（下の検査が使う）", () => {
     expect(overlaps(minutesOf("1-59/5 * * * *"), minutesOf("28 * * * *"))).toBe(false);
   });
 
-  it("起動する分を、走りうる分に広げる（時をまたぐ）", () => {
-    // HELLO（0 分起点・2 分）は 0・1・5・6…分。**2026-11-17 までのドコモ（1 分起点）は 1 分で重なる**
-    const hello = runMinutes(minutesOf("0-59/5 * * * *"), HELLO_RUN_MINUTES);
-    expect([...hello].slice(0, 4)).toEqual([0, 1, 5, 6]);
-    expect(overlaps(hello, minutesOf("1-59/5 * * * *"))).toBe(true);
-    expect(overlaps(hello, minutesOf("2-59/5 * * * *"))).toBe(false);
-    expect(runMinutes(minutesOf("59 * * * *"), 2)).toEqual(new Set([59, 0]));
+  it("走りうる時間は、起動する分ごとに「最も早い起動」から「最も遅い起動 ＋ 最長の所要」まで", () => {
+    const hello: Timing = { start_s: [45, 49], longest_s: 71 };
+    expect(runIntervals("0-59/5 * * * *", hello).slice(0, 2)).toEqual([
+      [45, 120],
+      [345, 420],
+    ]);
+    expect(runIntervals("4 20 * * *", { start_s: ANY_SECOND, longest_s: 30 })).toEqual([
+      [240, 330],
+    ]);
+  });
+
+  it("**分が違っても、走りうる時間が重なれば重なりとして数える**（時をまたぐ）", () => {
+    // 2026-11-17 までのドコモ（1 分起点。1 分 11 秒ごろに起動）は、HELLO の長い周期と重なった
+    // （W10 プランの所見 244）。2 分起点なら、どの秒に呼ばれても重ならない
+    const hello: Timing = { start_s: [45, 49], longest_s: 71 };
+    const docomo: Timing = { start_s: ANY_SECOND, longest_s: 36 };
+    expect(timingsOverlap("0-59/5 * * * *", hello, "1-59/5 * * * *", docomo)).toBe(true);
+    expect(timingsOverlap("0-59/5 * * * *", hello, "2-59/5 * * * *", docomo)).toBe(false);
+    // 59 分に起動して長引く仕事は、次の時の 0 分の仕事にかかる
+    const late: Timing = { start_s: [50, 50], longest_s: 60 };
+    expect(timingsOverlap("59 * * * *", late, "0-59/5 * * * *", hello)).toBe(true);
+    // 端が接するだけ（120 秒に終わり、120 秒に始まる）は重ならない
+    expect(intervalsOverlap([45, 120], [120, 156])).toBe(false);
   });
 });
 
@@ -386,23 +459,59 @@ describe("vercel.json の参照スナップショット Cron", () => {
 });
 
 describe("vercel.json の ML のサービスの仕事（推論・Parquet 化・天気の取り込み・参照）", () => {
-  it("ML のサービスの Cron は、走りうる分を決めたものだけ", () => {
-    // ML の Cron を足すときに、走りうる分（`ML_JOBS`）を決めずに済ませない
+  it("ML のサービスの Cron は、走りうる時間を決めたものだけ", () => {
+    // ML の Cron を足すときに、走りうる時間（`ML_JOBS`）を決めずに済ませない
     const paths = readCrons(ML_PATH_PREFIX).map((cron) => cron.path);
     expect([...paths].sort()).toEqual(ML_JOBS.map((job) => job.path).sort());
   });
 
-  it("**走りうる分が重ならない**（起動の分が違うだけでは足りない）", () => {
+  it("**起動の秒を測った仕事は、測ったときのスケジュールのまま**", () => {
+    // スケジュールを変えると、分の中の起動の秒も変わる（W11 プランの所見 246）。変えたら
+    // `measured_on` を null にして秒をあてにしない形で確かめ、マージの後に測り直す
+    for (const job of ML_JOBS) {
+      if (job.measured_on === null) continue;
+      expect(scheduleOf(job.path), job.path).toBe(job.measured_on);
+    }
+  });
+
+  it("**走りうる時間が重ならない**（起動の分が違うだけでは足りない）", () => {
     // 2026-11-17 まではドコモ（1 分起点）が HELLO（0 分起点）と別の分だったのに、HELLO が
     // 長い周期で 1 分台に食い込み、直近 7 日の 5.3% の周期で重なった（W10 プランの所見 244）。
-    // 日に 1 回の参照も、毎時の仕事と同じ分に置けば重なりうる（分の集合で比べる）。
+    // 日に 1 回の参照も、毎時の仕事と同じ時間に置けば重なりうる（時は見ない）。
     // 天気アーカイブは Web のサービスの仕事で、インスタンスを共有しないので数えない
-    const runs = ML_JOBS.map((job) => ({ path: job.path, minutes: runMinutesOf(job) }));
-    const pairs = runs.flatMap((a, i) => runs.slice(i + 1).map((b) => ({ a, b })));
+    const pairs = ML_JOBS.flatMap((a, i) => ML_JOBS.slice(i + 1).map((b) => ({ a, b })));
     expect(pairs).toHaveLength((ML_JOBS.length * (ML_JOBS.length - 1)) / 2);
     for (const { a, b } of pairs) {
-      expect(overlaps(a.minutes, b.minutes), `${a.path} と ${b.path}`).toBe(false);
+      expect(
+        timingsOverlap(scheduleOf(a.path), a, scheduleOf(b.path), b),
+        `${a.path} と ${b.path}`,
+      ).toBe(false);
     }
+  });
+
+  it("**推論のほかの ML の仕事は、毎 5 分の 4 分台に置く**（推論の合間。W12 プランの W12-05）", () => {
+    // ドコモの最も遅い終わり（3 分 24 秒）の後、次の HELLO の起動（5 分 45 秒）の前
+    for (const path of [COMPACT_PATH, LOAD_WEATHER_PATH, REFERENCE_PATH]) {
+      const offsets = [...minutesOfPath(path)].map((minute) => minute % GRID_MINUTES);
+      expect(offsets, path).toEqual([GRID_MINUTES - 1]);
+    }
+  });
+
+  it("**2026-11-26 までの天気の取り込み（28 分）と参照（05:03）は、ドコモの長い回と重なりうる**", () => {
+    // 28 分 23 秒・05:03 の 16 秒に起動していた（実測）。ドコモが分の後半に呼ばれて最長まで
+    // 長引くと、その終わり（3 分 24 秒）にかかる（W11 プランの所見 246）
+    const docomo = jobOf(DOCOMO_INFER_PATH);
+    const docomo_schedule = INFER_CRON["docomo-cycle"];
+    const old_weather: Timing = { start_s: [23, 27], longest_s: 25 };
+    const old_reference: Timing = { start_s: [16, 17], longest_s: 54 };
+    expect(timingsOverlap(docomo_schedule, docomo, "28 * * * *", old_weather)).toBe(true);
+    expect(timingsOverlap(docomo_schedule, docomo, "3 20 * * *", old_reference)).toBe(true);
+    expect(
+      timingsOverlap(docomo_schedule, docomo, LOAD_WEATHER_CRON, jobOf(LOAD_WEATHER_PATH)),
+    ).toBe(false);
+    expect(timingsOverlap(docomo_schedule, docomo, REFERENCE_CRON, jobOf(REFERENCE_PATH))).toBe(
+      false,
+    );
   });
 });
 
