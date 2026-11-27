@@ -217,10 +217,6 @@ def test_the_window_can_be_counted_back_from_the_last_day() -> None:
         pytest.param([*BASE, "--extra-days", "2026-09-10"], id="足す日が窓の後"),
         pytest.param([*BASE, "--extra-days", "2026-09-01,2026-09-01"], id="足す日が重なる"),
         pytest.param([*BASE, "--extra-days", "2026/09/01"], id="足す日の書き方"),
-        pytest.param([*BASE, "--extra-days", "2026-09-01", "--upload"], id="足した日で置く"),
-        pytest.param(
-            [*BASE, "--compare-forests", "lgbm-v1-20261005", "--upload"], id="比べる森で置く"
-        ),
         pytest.param([*BASE, "--compare-forests", "composite-v1-20261115"], id="森でない版"),
         pytest.param(
             [*BASE, "--compare-forests", "lgbm-v1-20261005,lgbm-v1-20261005"], id="比べる森が重なる"
@@ -949,6 +945,8 @@ class Shelf:
     lookups: list[str] = field(default_factory=list)
     uploads: list[tuple[str, str, str]] = field(default_factory=list)
     registered: list[str] = field(default_factory=list)
+    #: 登録した行そのもの（足した日が登録簿に届くかを見る。D-49）
+    rows: list[dict[str, object]] = field(default_factory=list)
     promoted_from: int | None = None
 
     def find_model(self, model_version: str) -> registry.Registered | None:
@@ -970,6 +968,7 @@ class Shelf:
 
     def register_model_version(self, row: dict[str, object]) -> str:
         self.registered.append(str(row["model_version"]))
+        self.rows.append(row)
         return str(row["model_version"])
 
 
@@ -1120,8 +1119,18 @@ def test_the_extra_days_change_neither_the_name_nor_the_gate_b3() -> None:
     assert fit.baseline_days(added.fit) == fit.baseline_days(plain.fit)
 
 
-def test_a_measuring_run_may_use_both_tools() -> None:
-    """**測るだけの回**なら、足す日と比べる森を一緒に使える（置かず登録しない）。"""
+@pytest.mark.parametrize(
+    "placing",
+    [
+        pytest.param([], id="測るだけの回"),
+        pytest.param(["--upload", "--register", "--card", "c.md"], id="置いて登録する回"),
+    ],
+)
+def test_both_tools_may_be_used_when_measuring_or_placing(placing: list[str]) -> None:
+    """**足す日と比べる森は、どちらの回でも使える**（W13 の PR F、D-49。W12 は測るだけの回だけ）。
+
+    置く回で比べる森を使っても、門の表は候補だけで決まる（比べる森は読むだけ）。
+    """
     request = _requested(
         [
             *W12,
@@ -1129,10 +1138,65 @@ def test_a_measuring_run_may_use_both_tools() -> None:
             "2026-09-08",
             "--compare-forests",
             "lgbm-v1-20261005,lgbm-v1-20261103",
+            *placing,
         ]
     )
+    assert request.extra_days == (date(2026, 9, 8),)
     assert request.compare_forests == ("lgbm-v1-20261005", "lgbm-v1-20261103")
-    assert (request.upload, request.register) == (False, False)
+    assert (request.upload, request.register) == (bool(placing), bool(placing))
+
+
+def test_the_extra_days_reach_the_registry_the_card_and_the_report() -> None:
+    """**足した日は、登録簿（`metrics.extra_days`・`note`）・カード・報告書に出る**（D-49）。
+
+    `train_days` だけでは、窓の途中の欠け（補わない日）と足した日を見分けられない。
+    """
+    fitted = replace(_fitted(1.0, 1.0, 1.0), extra_days=(date(2026, 9, 1), date(2026, 9, 2)))
+    chosen = _chosen(fitted)
+    row = fit.to_registration(fitted, chosen, None)
+    metrics = row["metrics"]
+    assert isinstance(metrics, dict)
+    assert metrics["extra_days"] == ["2026-09-01", "2026-09-02"]
+    assert str(row["note"]).endswith("窓より古い日を足した：2026-09-01〜2026-09-02（D-49）")
+    assert "| 足した日 | 2026-09-01〜2026-09-02（窓より古い日を" in fit.render_card(fitted, chosen)
+    report_text = fit.render_report(fit.Made(fitted, VERSION, chosen))
+    assert "**足した日**：2026-09-01〜2026-09-02（窓より古い日を" in report_text
+
+
+def test_without_extra_days_nothing_is_added() -> None:
+    """**足していなければ、何も足さない**（いまの森のカードと登録簿の形のまま。空の並びだけ残す）。"""
+    fitted = _fitted(1.0, 1.0, 1.0)
+    chosen = _chosen(fitted)
+    row = fit.to_registration(fitted, chosen, None)
+    metrics = row["metrics"]
+    assert isinstance(metrics, dict)
+    assert metrics["extra_days"] == []
+    assert row["note"] == f"W6 の PR F。候補 {CANDIDATE.spec}。単体では配らない（契約 33）"
+    assert "足した日" not in fit.render_card(fitted, chosen)
+    assert "足した日" not in fit.render_report(fit.Made(fitted, VERSION, chosen))
+
+
+def test_the_extra_days_are_registered_from_the_command_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**入り口から**：`--extra-days` で置いて登録すると、登録する行とカードに足した日が残る。
+
+    当てはめは差し替える。見るのは、指定の足した日を `make` が `Fitted` に載せ、登録簿と
+    カードまで運ぶところ（**呼ぶのをやめても気づける**ように、入り口から通す）。版の名前は
+    最後の学習日のままで、足した日で変わらない。
+    """
+    early = date(2026, 9, 1)
+    root = write_samples(tmp_path, dict.fromkeys((early, *DAYS), True))
+    shelf = Shelf()
+    monkeypatch.setattr(fit, "fit_and_score", lambda *args: _fitted(1.0, 1.0, 1.0))
+    assert _run_with(shelf, root, monkeypatch, "--extra-days", early.isoformat()) == 0
+    assert shelf.registered == [FIT_NAME], "足した日で版の名前が変わった"
+    (row,) = shelf.rows
+    metrics = row["metrics"]
+    assert isinstance(metrics, dict)
+    assert metrics["extra_days"] == [early.isoformat()]
+    card = (root / f"card-{FIT_NAME}.md").read_text(encoding="utf-8")
+    assert f"| 足した日 | {early.isoformat()}（" in card
 
 
 def test_an_extra_day_without_samples_is_refused(tmp_path: Path) -> None:

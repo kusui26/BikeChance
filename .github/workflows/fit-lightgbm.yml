@@ -23,10 +23,12 @@ name: LightGBM v1 を当てはめる
 # 森を比べ直す）。**置く回・登録する回は 2 日に限る**——門の表は検証日で決まるので、
 # 置く版の門は W6-14 の形のままにする。
 #
-# **測るだけの回の道具が 3 つある**（W12 プランの W12-06。**置く回・登録する回では使えない**）：
-# `extra_days`（窓より古い日を学習に足す）、`compare_forests`（置いてある森を同じ検証の行で測る。
-# 報告書の §13 に雨と到着の時間帯の表が出る）、`allow_mixed_weather`（天気の被覆の違う日を承知で
-# 混ぜる。11-15 は天気のアーカイブが欠け、被覆が 96.9% しかない）。
+# **道具が 3 つある**（W12 プランの W12-06 で測るだけの回に作り、W13 の PR F で**置く回・登録する
+# 回でも使えるようにした**。開発プランの D-49）：`extra_days`（窓より古い日を学習に足す。足した日は
+# 登録簿の `train_days`・`metrics.extra_days`・カード・報告書に残る）、`compare_forests`（置いてある
+# 森を同じ検証の行で測る。読むだけ。報告書の §13 に雨と到着の時間帯の表が出る）、
+# `allow_mixed_weather`（天気の被覆の違う日を承知で混ぜる。11-15 は天気のアーカイブが欠け、被覆が
+# 96.9% しかない）。
 #
 # **定時では走らせない。** `push` / `pull_request` も付けない——秘密を使うワークフローだから
 # である（D-12）。**ファイル名を変えない**（`workflow_dispatch` の登録もファイル単位）。
@@ -73,12 +75,12 @@ on:
         type: boolean
         default: false
       extra_days:
-        description: "窓より古い、学習に足す日（YYYY-MM-DD をカンマで。測るだけの回だけ。W12-06）"
+        description: "窓より古い、学習に足す日（YYYY-MM-DD をカンマで。置く回でも使える。D-49）"
         required: false
         type: string
         default: ""
       compare_forests:
-        description: "同じ検証の行で測る、置いてある森の版（カンマで。測るだけの回だけ。W12-06）"
+        description: "同じ検証の行で測る、置いてある森の版（カンマで。読むだけ。D-49）"
         required: false
         type: string
         default: ""
@@ -185,7 +187,7 @@ jobs:
           if [ "${REGISTER}" = "true" ]; then
             args+=(--register)
           fi
-          # **足す日・比べる森は測るだけの回だけ**（置く回・登録する回は当てはめる側が断る）
+          # **足す日・比べる森は置く回でも使える**（W13 の PR F、D-49。足した日は登録簿とカードに残る）
           if [ -n "${EXTRA_DAYS}" ]; then
             args+=(--extra-days "${EXTRA_DAYS}")
           fi
