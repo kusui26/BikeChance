@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readCollectorEnv, readDispatchEnv } from "./env";
 
-const SECRET_VALUE = "sb_secret_never_printed_value";
+const SECRET_VALUE = "test-secret-key-never-printed";
 const TOKEN_VALUE = "test-dispatch-token-never-printed";
 
 const messageOf = (work: () => unknown): string => {

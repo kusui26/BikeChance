@@ -54,7 +54,7 @@ describe("GET /api/jobs/daily-dispatch の環境変数", () => {
   it("**トークンが無ければ 500**（3xx は返さない。DB にも GitHub にも触らない）", async () => {
     vi.stubEnv("CRON_SECRET", CRON_SECRET);
     vi.stubEnv("SUPABASE_URL", "https://example.supabase.co");
-    vi.stubEnv("SUPABASE_SECRET_KEY", "sb_secret_test");
+    vi.stubEnv("SUPABASE_SECRET_KEY", "test-secret-key-value");
     vi.stubEnv("GITHUB_DISPATCH_TOKEN", "");
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
