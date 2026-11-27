@@ -333,7 +333,7 @@ def _promote_block(report: RefitReport, promote_sql: str) -> str:
             "## 7. 昇格の手順（W8-04。確認を取ってから）",
             "",
             f"`docs/refits/{report.day}-promote.sql` を推論の合間"
-            "（毎 5 分の 4 分台の 5〜40 秒）に流し、"
+            "（毎 5 分の 4 分台の 5〜40 秒。9 分・29 分・05:04 は避ける）に流し、"
             "2 周期と鮮度の見張りを見てから、この PR をマージする。"
             f"戻すなら `{report.composite.serving.active.model_version}` を active に"
             "（確認を取ってから）。",

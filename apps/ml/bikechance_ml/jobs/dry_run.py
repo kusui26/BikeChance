@@ -15,8 +15,9 @@
     所見 246）
   * 試し打ちは HELLO 25〜27 秒・ドコモ 15〜18 秒（11/9 の実測）。ドコモの試し打ちは周期の
     終わり（5 分）までに終わり、次の周期の HELLO の本番（5 分 45 秒ごろ）とも重ならない
-  * **Parquet 化（毎時 9 分）・天気の取り込み（毎時 28 分）・参照（05:03 JST）の周期は飛ばす**
-    （`HOURLY_BUSY_MINUTES`・`DAILY_BUSY_AT`）
+  * **Parquet 化（毎時 9 分）・天気の取り込み（毎時 29 分）・参照（05:04 JST）の周期は飛ばす**
+    （`HOURLY_BUSY_MINUTES`・`DAILY_BUSY_AT`）。3 つとも推論の合間の 4 分台にあり、ドコモの
+    試し打ち（4 分 15 秒から）と同じ分になる（2026-11-26 から。W12 プランの W12-05）
 
 **URL も秘密も記録に出さない**（CLAUDE.md §5）。HTTP の口は `io/infer_client.py` にあり、
 失敗は系統・HTTP の状態・例外の種類に詰め替えてある。
@@ -45,12 +46,12 @@ SLOT_OFFSETS_S: Final[Mapping[str, int]] = {"hellocycling": 220, "docomo-cycle":
 SLOT_WINDOW_S: Final[int] = 15
 
 #: ML のサービスの**毎時の仕事の分**（UTC。`vercel.json`）：Parquet 化（9 分）と天気の取り込み
-#: （28 分）。**この分を含む周期は、両系統とも試し打ちをしない。**
-HOURLY_BUSY_MINUTES: Final[frozenset[int]] = frozenset({9, 28})
+#: （29 分。2026-11-26 までは 28 分）。**この分を含む周期は、両系統とも試し打ちをしない。**
+HOURLY_BUSY_MINUTES: Final[frozenset[int]] = frozenset({9, 29})
 
 #: ML のサービスの**毎日の仕事の時刻**（UTC の時と分。`vercel.json`）：参照スナップショット
-#: （20:03 UTC ＝ 05:03 JST）。この分を含む周期も飛ばす。
-DAILY_BUSY_AT: Final[frozenset[tuple[int, int]]] = frozenset({(20, 3)})
+#: （20:04 UTC ＝ 05:04 JST。2026-11-26 までは 05:03）。この分を含む周期も飛ばす。
+DAILY_BUSY_AT: Final[frozenset[tuple[int, int]]] = frozenset({(20, 4)})
 
 #: 系統ごとに叩く回数（2 回目は温まった成果物での所要を見る）。
 CALLS_PER_SYSTEM: Final[int] = 2
