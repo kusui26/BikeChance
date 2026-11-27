@@ -50,7 +50,7 @@ jobs:
           # 資格情報「そのものの形」を探す。ロール名 service_role のような
           # 語そのものは対象にしない（SQL の grant や Supabase の生成設定に正当に現れ、
           # 誤検知で CI が止まるため）。実際の鍵は sb_secret_ か JWT の形で現れる。
-          if git grep -nIE '(acl:consumerKey=[A-Za-z0-9_-]{8}|sb_secret_[A-Za-z0-9]|eyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' -- . ':!*.md' ':!.github/workflows/ci.yml'; then
+          if git grep -nIE '(acl:consumerKey=[A-Za-z0-9_-]{8}|sb_secret_[A-Za-z0-9]|eyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20}|github_pat_[A-Za-z0-9_]{20}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' -- . ':!*.md' ':!.github/workflows/ci.yml'; then
             echo "::error::機密情報らしき文字列が含まれています"
             exit 1
           fi

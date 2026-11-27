@@ -9,7 +9,7 @@
 - **プロダクト**：シェアサイクル（HELLO CYCLING・ドコモ・バイクシェア）のポートに「**到着した時刻に借りられる／返せる確率**」を降水確率のように示す iPhone アプリ（後にスマホ Web）。差別化は予測・確率・行程チェック。現在台数の表示は前提機能。
 - **データ**：ODPT の GBFS v2.3。`hellocycling`（14,861 ポート、約 5 分毎更新）と `docomo-cycle`（5,800 ポート、約 80 秒毎更新）。ライセンスは CC BY 4.0（商用可、クレジット表示必須）。予約を表すフィールドは無く、HELLO の `capacity − bikes − docks`（`gap`）を予約の代理指標にする。ドコモの `capacity` は固定ラック数ではなく `bikes + docks` の動的値。
 - **構成（Vercel Pro と Supabase Pro の 2 つに集約）**
-  - **Vercel Pro**（1 プロジェクト、Services、東京 `hnd1`）：`apps/web` = Next.js（公開 API `/v1`、Cron ジョブ `/api/jobs/*`（毎分収集・属性同期・天気）、スマホ Web）、`apps/ml` = FastAPI + LightGBM（`/ml/infer` 5 分毎推論、`/ml/compact` 毎時 Parquet 化、`/ml/evaluate` 日次評価、`/ml/profiles`）。スケジューラは **Vercel Cron**。
+  - **Vercel Pro**（1 プロジェクト、Services、東京 `hnd1`）：`apps/web` = Next.js（公開 API `/v1`、Cron ジョブ `/api/jobs/*`（毎分収集・属性同期・天気・日次の枠を起こす）、スマホ Web）、`apps/ml` = FastAPI + LightGBM（`/ml/infer` 5 分毎推論、`/ml/compact` 毎時 Parquet 化、`/ml/evaluate` 日次評価、`/ml/profiles`）。スケジューラは **Vercel Cron**。
   - **Supabase Pro**（東京）：Postgres（配列形式スナップショット・最新状態・予測・ログ）、Storage（生 gzip JSON＝一次ソース、Parquet、モデル、予測ログ）、pg_cron（保守・ウォッチドッグ・SQL 監視→Webhook）、Edge Function は **バックアップ収集器のみ**。
   - **GitHub Actions**：CI、週次再学習、週次 Drive ミラー。**Colab Pro+**：実験。**iOS**：SwiftUI + MapKit、最小 iOS 26。
 - **リポジトリ**：pnpm モノレポ。`apps/web`・`apps/ml`・`apps/ios`・`packages/shared`（Zod スキーマ・型・定数）・`packages/gbfs-core`（収集の純粋関数、Node/Deno 共用）・`supabase/`（migrations・functions・seed）・`fixtures/gbfs/`（実データの縮約サンプル）・`docs/`。ルートの `vercel.json` に services / rewrites / crons。
@@ -78,7 +78,7 @@
 
 ## 5. セキュリティ / 機密
 
-- **ローカル**は `.env`（gitignore）に `ODPT_ACCESS_TOKEN` 等。**本番**は Vercel 環境変数（`CRON_SECRET`、Supabase サービスロールキー、`ODPT_ACCESS_TOKEN`）と Supabase Vault（ウォッチドッグ用の `CRON_SECRET`・Webhook URL）。GitHub Secrets は CI・再学習用のみ。
+- **ローカル**は `.env`（gitignore）に `ODPT_ACCESS_TOKEN` 等。**本番**は Vercel 環境変数（`CRON_SECRET`、Supabase サービスロールキー、`ODPT_ACCESS_TOKEN`、**`GITHUB_DISPATCH_TOKEN`**——日次の枠を `workflow_dispatch` で起こす fine-grained トークン。このリポジトリの Actions の読み書きとメタデータの読みだけ・期限つき。開発プランの D-50）と Supabase Vault（ウォッチドッグ用の `CRON_SECRET`・Webhook URL）。GitHub Secrets は CI・再学習用のみ。
 - **API キー・トークン付き URL・Webhook URL・サービスロールキーを、出力・ログ・例外・テスト・ドキュメントに出さない**（CI に正規表現チェック）。取得ログには `endpoint: 'token' | 'public'` のみ残す。
 - Supabase は**全テーブル RLS 有効化**。匿名ロールには読み取り用ビューのみ。書き込みは Vercel の関数とバックアップ収集器からサービスロールで行う。
 - **iOS アプリにトークンやキーを埋め込まない**。アプリは `/v1` のみを叩き、Authorization ヘッダを付けない（CDN キャッシュのため）。
