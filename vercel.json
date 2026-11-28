@@ -56,6 +56,14 @@
       "schedule": "47 * * * *"
     },
     {
+      "path": "/api/jobs/daily-dispatch",
+      "schedule": "15 1 * * *"
+    },
+    {
+      "path": "/api/jobs/daily-dispatch",
+      "schedule": "35 1 * * *"
+    },
+    {
       "path": "/ml/weather",
       "schedule": "29 * * * *"
     },

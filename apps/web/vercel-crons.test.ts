@@ -13,6 +13,7 @@ import {
   ARCHIVE_WEATHER_CRON,
   ARCHIVE_WEATHER_MAX_DURATION_S,
   COMPACT_CRON,
+  DAILY_DISPATCH_CRONS,
   INFER_CRON,
   LOAD_WEATHER_CRON,
   ML_MAX_DURATION_S,
@@ -27,6 +28,7 @@ const COLLECT_PATH_PREFIX = "/api/jobs/collect/";
 const SYNC_PATH_PREFIX = "/api/jobs/sync-stations/";
 const WEATHER_PATH = "/api/jobs/archive-weather";
 const WEATHER_CATCH_UP_PATH = "/api/jobs/weather-catch-up";
+const DAILY_DISPATCH_PATH = "/api/jobs/daily-dispatch";
 const COMPACT_PATH = "/ml/compact";
 const INFER_PATH_PREFIX = "/ml/infer/";
 const REFERENCE_PATH = "/ml/reference";
@@ -342,6 +344,49 @@ describe("vercel.json の天気の取り直し Cron（W12 の PR T）", () => {
   it("ML のサービスの道ではない（推論とインスタンスを共有しない）", () => {
     expect(WEATHER_CATCH_UP_PATH.startsWith(ML_PATH_PREFIX)).toBe(false);
     expect(readCrons(ML_PATH_PREFIX).map((cron) => cron.path)).not.toContain(WEATHER_CATCH_UP_PATH);
+  });
+});
+
+/** GitHub Actions のワークフローの `schedule` の Cron 式（`- cron: "…"` の行）。 */
+const workflowCrons = (file: string): readonly string[] => {
+  const path = fileURLToPath(new URL(`../../.github/workflows/${file}`, import.meta.url));
+  return [...readFileSync(path, "utf8").matchAll(/^\s*- cron: "([^"]+)"\s*$/gm)].map(
+    (match) => match[1] ?? "",
+  );
+};
+
+/** Cron 式（分・時、日は毎日）の JST の時刻（`HH:MM`）。日に 1 回の式だけを読む。 */
+const jstTimeOf = (schedule: string): string => {
+  const [minute = "", hour = ""] = schedule.split(" ");
+  const jst_hour = (Number(hour) + 9) % 24;
+  return `${String(jst_hour).padStart(2, "0")}:${minute.padStart(2, "0")}`;
+};
+
+describe("vercel.json の日次の枠を起こす Cron（W13 の PR D、開発プランの D-50）", () => {
+  it("**同じ道に 2 本**あり、スケジュールが共有定数と一致する", () => {
+    const schedules = readCrons(DAILY_DISPATCH_PATH).map((cron) => cron.schedule);
+    expect(schedules).toEqual([...DAILY_DISPATCH_CRONS]);
+  });
+
+  it("**10:15・10:35 JST**（W12-07 で手で起こしていた時刻と、特徴量が済む 20 分後）", () => {
+    expect(DAILY_DISPATCH_CRONS.map(jstTimeOf)).toEqual(["10:15", "10:35"]);
+  });
+
+  it("**GitHub の定時（00:40・06:00・06:40 JST）より後**に見る（定時の回に来る余地を残す）", () => {
+    // 定時はワークフローのファイルから読む（ずらしたら、この検査も追う）
+    const github_times = ["build-features.yml", "evaluate-daily.yml"]
+      .flatMap(workflowCrons)
+      .map(jstTimeOf)
+      .sort();
+    expect(github_times).toEqual(["00:40", "06:00", "06:40"]);
+    for (const time of DAILY_DISPATCH_CRONS.map(jstTimeOf)) {
+      expect(time > (github_times.at(-1) ?? ""), time).toBe(true);
+    }
+  });
+
+  it("ML のサービスの道ではない（推論とインスタンスを共有しない）", () => {
+    expect(DAILY_DISPATCH_PATH.startsWith(ML_PATH_PREFIX)).toBe(false);
+    expect(readCrons(ML_PATH_PREFIX).map((cron) => cron.path)).not.toContain(DAILY_DISPATCH_PATH);
   });
 });
 

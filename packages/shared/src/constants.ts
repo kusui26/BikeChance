@@ -338,6 +338,26 @@ export const ARCHIVE_WEATHER_CRON = "17 * * * *";
 export const WEATHER_CATCH_UP_CRON = "47 * * * *";
 
 /**
+ * 日次の枠を起こす Cron（UTC。`/api/jobs/daily-dispatch`。開発プランの D-50、W13 プランの W13-07）。
+ * **10:15 JST と 10:35 JST の 2 回。**
+ *
+ * GitHub Actions の定時（`build-features.yml` の 00:40・06:00、`evaluate-daily.yml` の 06:40）は、
+ * W12 の 5 日とも 4〜11 時間遅れた。来ていない枠だけを `workflow_dispatch` で起こす
+ * （`lib/jobs/daily-dispatch.ts`）：1 回目は特徴量（日付を空で。プロファイル・傾向まで動く）、
+ * 特徴量が済んでいれば日次評価。**2 回目は 20 分後**——特徴量（2〜3 分）が済んでから日次評価を
+ * 起こす（どちらも Storage を重く読むので重ねない。`evaluate-daily.yml` の注記）。
+ * **10:15 は W12-07 で手で起こしていた時刻**で、定時の回に来る余地を残す。
+ * Web のサービスの仕事なので、推論（ML のサービス）とインスタンスを共有しない。
+ */
+export const DAILY_DISPATCH_CRONS = ["15 1 * * *", "35 1 * * *"] as const;
+
+/** 日次の枠を起こすルートの上限（秒）。DB を 3 回・GitHub の API を最大 2 回呼ぶだけ。 */
+export const DAILY_DISPATCH_MAX_DURATION_S = 60;
+
+/** GitHub の API の 1 要求の時間切れ（ミリ秒）。2 回呼んでも上限（60 秒）に十分収まる。 */
+export const GITHUB_API_TIMEOUT_MS = 10_000;
+
+/**
  * 毎時 Parquet 化の設定（W2 プラン §5.6、§9.2）。
  *
  * 実体は Python（`apps/ml`）にあり、この定数を import できない。値は
