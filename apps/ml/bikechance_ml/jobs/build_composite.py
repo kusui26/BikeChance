@@ -46,6 +46,7 @@ from bikechance_ml.config import read_storage_config
 from bikechance_ml.eval import border
 from bikechance_ml.eval import gates as judging
 from bikechance_ml.eval.dataset import BUCKET_LABELS, TARGETS
+from bikechance_ml.eval.split import runs_text
 from bikechance_ml.features.constants import HORIZONS_MIN
 from bikechance_ml.features.grid import JST, features_path
 from bikechance_ml.io.supabase import PARQUET_BUCKET, open_storage
@@ -292,6 +293,12 @@ def to_metrics(made: Made) -> dict[str, object]:
 
 
 def _components(artifact: composite.CompositeArtifact) -> dict[str, dict[str, object]]:
+    """部品ごとの版・SHA-256・学習日。**学習日は全部の日を昇順で持つ**（門の表は学習日なし）。
+
+    ~~`[最初の日, 最後の日]`~~ → **全部の日**（W13 の PR F、D-49）。森に窓より古い日を足すと
+    （9 月の強い雨の夜）、最初と最後だけでは 9 月から 11 月までを全部学んだように読める。
+    森の鮮度の見張り（0058 の `check_forest_freshness`）は最大を採るので、どちらでも同じに鳴る。
+    """
     days = {
         composite.B3_PART: artifact.b3.train_days,
         composite.LIGHTGBM_PART: artifact.lightgbm.train_days,
@@ -305,7 +312,7 @@ def _components(artifact: composite.CompositeArtifact) -> dict[str, dict[str, ob
         name: {
             "model_version": versions[name],
             "sha256": composite.sha256_of(body),
-            "train_days": [min(days[name]), max(days[name])] if name in days else None,
+            "train_days": sorted(days[name]) if name in days else None,
         }
         for name, body in artifact.parts.items()
     }
@@ -345,18 +352,26 @@ def _card_header(made: Made) -> str:
             f"{len(made.body):,} バイト、SHA-256 `{composite.sha256_of(made.body)}`）",
             f"- 特徴量の版：{artifact.feature_set}"
             "（**森が全部の列を読むので、配信の版と一致しなければ配らない**）",
-            f"- 学習日（和集合）：{artifact.train_days[0]} 〜 {artifact.train_days[-1]}"
+            f"- 学習日（和集合）：{days_text(artifact.train_days)}"
             f"（{len(artifact.train_days)} 日）。**鮮度の警報は B3 の最終学習日で鳴る**（W6-08）",
             f"- LightGBM の最終学習日：{artifact.lightgbm_last_day}（警報では見ない。§5.12）",
         ]
     )
 
 
+def days_text(days: Sequence[str]) -> str:
+    """学習日を**続いている所ごとに**書く（`eval/split.runs_text`。D-49）。
+
+    森に窓より古い日を足すと、「最初〜最後」では離れた日の間もすべて学んだように読める。
+    """
+    return runs_text([date.fromisoformat(day) for day in days])
+
+
 def _card_parts(artifact: composite.CompositeArtifact) -> str:
     rows = ["## 部品", "", "| 部品 | 版 | SHA-256 | 学習日 |", "|---|---|---|---|"]
     for name, item in _components(artifact).items():
         days = item["train_days"]
-        span = f"{days[0]} 〜 {days[1]}" if isinstance(days, list) else "—"
+        span = days_text(days) if isinstance(days, list) else "—"
         rows.append(f"| {name} | {item['model_version']} | `{item['sha256']}` | {span} |")
     return "\n".join(rows)
 

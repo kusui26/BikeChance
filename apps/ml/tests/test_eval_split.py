@@ -8,7 +8,7 @@ from datetime import date
 import pytest
 
 from bikechance_ml.eval.dataset import to_samples
-from bikechance_ml.eval.split import NotEnoughDaysError, mask_of, split_days
+from bikechance_ml.eval.split import DaySplit, NotEnoughDaysError, mask_of, runs_text, split_days
 from tests import eval_fixture as fixture
 
 DAYS = [date(2026, 9, d) for d in range(1, 11)]
@@ -63,3 +63,34 @@ def test_mask_selects_only_the_named_days() -> None:
     samples = to_samples(fixture.to_table(rows))
     assert mask_of(samples, [fixture.DAYS[0]]).tolist() == [True, False]
     assert mask_of(samples, [fixture.DAYS[1]]).tolist() == [False, True]
+
+
+# ── 日の並びの書き方（W12-06 の足す日）──────────────────────────
+def test_a_contiguous_window_is_written_as_before() -> None:
+    """**続いた窓は今までどおり「最初〜最後」**（報告書の数字の見え方を変えない）。"""
+    assert runs_text(DAYS) == "2026-09-01〜2026-09-10"
+    assert runs_text(DAYS[:1]) == "2026-09-01"
+    assert runs_text([]) == ""
+
+
+def test_separate_days_are_not_written_as_one_span() -> None:
+    """**離れた日は「・」でつなぐ**——「09-08〜11-15」と書くと、その間の日もすべて使ったと読める。"""
+    days = [
+        date(2026, 9, 8),
+        date(2026, 9, 21),
+        date(2026, 9, 20),
+        date(2026, 10, 19),
+        date(2026, 10, 20),
+    ]
+    assert runs_text(days) == "2026-09-08・2026-09-20〜2026-09-21・2026-10-19〜2026-10-20"
+    assert runs_text([*days, days[0]]) == runs_text(days), "重なりと並びに左右されない"
+
+
+def test_the_split_describes_added_days_honestly() -> None:
+    """足した日が学習の側に入った分割の説明（`DaySplit.describe`）も、続いた所ごとに書く。"""
+    split = DaySplit(
+        fit=(date(2026, 9, 8), date(2026, 10, 19), date(2026, 10, 20)),
+        purge=(date(2026, 10, 21),),
+        evaluate=(date(2026, 10, 22),),
+    )
+    assert split.describe().startswith("学習 2026-09-08・2026-10-19〜2026-10-20（3 日）")

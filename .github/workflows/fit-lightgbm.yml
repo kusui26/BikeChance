@@ -23,6 +23,13 @@ name: LightGBM v1 を当てはめる
 # 森を比べ直す）。**置く回・登録する回は 2 日に限る**——門の表は検証日で決まるので、
 # 置く版の門は W6-14 の形のままにする。
 #
+# **道具が 3 つある**（W12 プランの W12-06 で測るだけの回に作り、W13 の PR F で**置く回・登録する
+# 回でも使えるようにした**。開発プランの D-49）：`extra_days`（窓より古い日を学習に足す。足した日は
+# 登録簿の `train_days`・`metrics.extra_days`・カード・報告書に残る）、`compare_forests`（置いてある
+# 森を同じ検証の行で測る。読むだけ。報告書の §13 に雨と到着の時間帯の表が出る）、
+# `allow_mixed_weather`（天気の被覆の違う日を承知で混ぜる。11-15 は天気のアーカイブが欠け、被覆が
+# 96.9% しかない）。
+#
 # **定時では走らせない。** `push` / `pull_request` も付けない——秘密を使うワークフローだから
 # である（D-12）。**ファイル名を変えない**（`workflow_dispatch` の登録もファイル単位）。
 on:
@@ -64,6 +71,21 @@ on:
         default: false
       register:
         description: "model_versions に candidate で登録する（upload も要る。昇格はしない）"
+        required: false
+        type: boolean
+        default: false
+      extra_days:
+        description: "窓より古い、学習に足す日（YYYY-MM-DD をカンマで。置く回でも使える。D-49）"
+        required: false
+        type: string
+        default: ""
+      compare_forests:
+        description: "同じ検証の行で測る、置いてある森の版（カンマで。読むだけ。D-49）"
+        required: false
+        type: string
+        default: ""
+      allow_mixed_weather:
+        description: "天気の被覆が日で違っても当てはめる（報告書と登録簿に残る。W4 プラン §8.5.3）"
         required: false
         type: boolean
         default: false
@@ -134,6 +156,9 @@ jobs:
           LABEL: ${{ inputs.label }}
           UPLOAD: ${{ inputs.upload }}
           REGISTER: ${{ inputs.register }}
+          EXTRA_DAYS: ${{ inputs.extra_days }}
+          COMPARE_FORESTS: ${{ inputs.compare_forests }}
+          ALLOW_MIXED_WEATHER: ${{ inputs.allow_mixed_weather }}
         run: |
           # **検証の日数は正の整数だけ**。置く回・登録する回は 2 日に限る（上の注記）
           if ! [[ "${EVAL_DAYS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -161,6 +186,16 @@ jobs:
           fi
           if [ "${REGISTER}" = "true" ]; then
             args+=(--register)
+          fi
+          # **足す日・比べる森は置く回でも使える**（W13 の PR F、D-49。足した日は登録簿とカードに残る）
+          if [ -n "${EXTRA_DAYS}" ]; then
+            args+=(--extra-days "${EXTRA_DAYS}")
+          fi
+          if [ -n "${COMPARE_FORESTS}" ]; then
+            args+=(--compare-forests "${COMPARE_FORESTS}")
+          fi
+          if [ "${ALLOW_MIXED_WEATHER}" = "true" ]; then
+            args+=(--allow-mixed-weather)
           fi
           # **山を記録に出す**（W9-10。検証を延ばすと行列が増え、28 日の当てはめ 12.1〜12.5 GiB が
           # ランナーの 16 GB の縁に来る）。GNU time が無い機械では、測らずにそのまま走らせる

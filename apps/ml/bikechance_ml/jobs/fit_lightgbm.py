@@ -38,6 +38,18 @@ OpenMP が無く `import lightgbm` が落ちるため（W4 プラン §12 の 12
 混ぜるなら `--allow-mixed-weather` を付ける——**付けた事実は
 `model_versions.metrics.weather` に残る。**
 
+**道具が 2 つある**（W12 プランの W12-06 で測るだけの回に作り、**W13 の PR F で置く回・登録する
+回でも使えるようにした**。開発プランの D-49）：
+
+* `--extra-days`：**窓より古い日を学習に足す**（9 月の強い雨の夜など。W11 プランの所見 248）。
+  足した日は学習の側に入り、検証とパージには入らない。版の名前（最後の学習日）も、門の相手の
+  B3（学習の最後の 7 暦日）も変わらない。**足した日は、登録簿（`train_days` と
+  `metrics.extra_days`、`note`）・モデルカード・報告書に残す**——学習期間を「最初〜最後」だけで
+  書くと、離れた日の間もすべて学んだように読める
+* `--compare-forests`：**置いてある森を読み、同じ検証の行で測る**。報告書の §3〜§11 に列が
+  増え、§13 の「雨と到着の時間帯」で並ぶ（雨の夜で配信中の森を下回らないかを、置く前に見る。
+  D-49）。**読むだけで何も書かない**——門の表は候補だけで決まる（`candidates.summarize`）
+
 **早期終了は使わない。** 検証の行は門を決めるのに使う。本数の選択にまで使うと、その行で
 B3 と比べる意味がさらに薄れる（同じ行で選んで測るほど良く見える。W6-14）。本数は候補
 ごとに固定し、並べて人が選ぶ。
@@ -48,7 +60,7 @@ import hashlib
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Final
@@ -58,7 +70,15 @@ import numpy as np
 
 from bikechance_ml.baselines import climatology
 from bikechance_ml.config import read_storage_config
-from bikechance_ml.eval import candidate_report, candidates, gates, harness, metrics, report
+from bikechance_ml.eval import (
+    candidate_report,
+    candidates,
+    gates,
+    harness,
+    metrics,
+    rain_bands,
+    report,
+)
 from bikechance_ml.eval.candidates import (
     Candidate,
     CandidateError,
@@ -68,7 +88,7 @@ from bikechance_ml.eval.candidates import (
     Summary,
 )
 from bikechance_ml.eval.dataset import TARGETS, Samples, Target
-from bikechance_ml.eval.split import DaySplit, mask_of, split_days
+from bikechance_ml.eval.split import DaySplit, mask_of, runs_text, split_days
 from bikechance_ml.features import coverage
 from bikechance_ml.features.arrays import Bools, Features, Float64
 from bikechance_ml.features.constants import FEATURE_SET, HORIZONS_MIN
@@ -131,6 +151,21 @@ UNSEEN_CATEGORY: Final[float] = 9.0e4
 TIMING_ROWS: Final[int] = 50_000
 TIMING_REPEATS: Final[int] = 3
 
+#: 比べる森（`--compare-forests`）の、報告書の列の名前の前に付ける語（候補は「LGBM 70×0.15」）。
+COMPARED_PREFIX: Final[str] = "森"
+
+#: 雨を見る列（§13。W12-06）。**到着の時刻の降水の予報**（発行時の値）で、森が見たのと同じ値。
+RAIN_COLUMN: Final[str] = "precip_mm_target"
+
+#: §13 の基準（比べる森が無いとき）。**門の相手と同じ B3**。
+GATE_BASELINE: Final[str] = "B3"
+
+#: 足した日の説明（カードと報告書で同じ文にする。D-49）。
+EXTRA_DAYS_NOTE: Final[str] = (
+    "窓より古い日を学習の側にだけ足した。検証・パージ・門の相手の B3（学習の最後の 7 暦日）には"
+    "入らない。開発プランの D-49"
+)
+
 
 class ForestMismatchError(RuntimeError):
     """平たくした森が `Booster.predict` と違う値を出した。**成果物を書かない。**"""
@@ -142,6 +177,14 @@ class OptionError(ValueError):
 
 class MissingLastDayError(RuntimeError):
     """`--to` の日の学習サンプルが無い。**検証日が 1 日ずれた窓で、黙って当てはめない。**"""
+
+
+class MissingExtraDayError(RuntimeError):
+    """`--extra-days` の日の学習サンプルが無い。**頼まれた日を黙って落とさない。**"""
+
+
+class CompareForestError(RuntimeError):
+    """比べる森を読めない（森でない・成果物が無い・特徴量の版が違う）。**別の森で測らない。**"""
 
 
 # ── 指定 ──────────────────────────────────────────────────────
@@ -172,6 +215,10 @@ class Request:
     register: bool
     from_profiles: bool
     allow_mixed_weather: bool
+    #: 窓より古い、学習に足す日（W12-06・D-49）。置く回でも使える
+    extra_days: tuple[date, ...] = ()
+    #: 同じ検証の行で測る、置いてある森の版（W12-06・D-49）。**読むだけ**で、置く回でも使える
+    compare_forests: tuple[str, ...] = ()
 
 
 def request_of(options: argparse.Namespace) -> Request:
@@ -179,8 +226,11 @@ def request_of(options: argparse.Namespace) -> Request:
     wanted = candidates.parse_candidates(options.candidates)
     chosen = chosen_of(wanted, options.choose)
     refuse_unwritable(options, chosen)
+    extra = parse_extra_days(options.extra_days)
+    compared = parse_compare_forests(options.compare_forests)
+    refuse_compare_locally(options, compared)
     return Request(
-        days=_days_of(options),
+        days=with_extra_days(_days_of(options), extra),
         eval_days=options.eval_days,
         purge_days=options.purge_days,
         candidates=wanted,
@@ -192,6 +242,8 @@ def request_of(options: argparse.Namespace) -> Request:
         register=options.register,
         from_profiles=not options.no_profile,
         allow_mixed_weather=options.allow_mixed_weather,
+        extra_days=extra,
+        compare_forests=compared,
     )
 
 
@@ -225,6 +277,56 @@ def refuse_unwritable(options: argparse.Namespace, chosen: Candidate | None) -> 
         raise OptionError(
             f"--label は英小文字で始まる英小文字と数字（20 字まで）です: {options.label!r}"
         )
+
+
+def parse_extra_days(text: str | None) -> tuple[date, ...]:
+    """`--extra-days` を日の並びにする。**同じ日を 2 度書いたら止める**（書き間違いの見込み）。"""
+    if not text:
+        return ()
+    days = tuple(_day(one.strip()) for one in text.split(","))
+    if len(set(days)) != len(days):
+        raise OptionError(f"--extra-days に同じ日が 2 度あります: {text!r}")
+    return tuple(sorted(days))
+
+
+def with_extra_days(window: Sequence[date], extra: Sequence[date]) -> tuple[date, ...]:
+    """窓の前に、足す日を並べる。**窓の最初の日より前の日だけ**を受ける。
+
+    `split_days` は**新しい順に**検証とパージを取るので、窓の中や後の日を足すと、
+    その日が検証やパージに入りうる（学習のつもりの日で測ることになる）。前の日だけなら、
+    足した日はかならず学習の側に入る。
+    """
+    late = [day for day in extra if day >= window[0]]
+    if late:
+        listed = "、".join(day.isoformat() for day in late)
+        raise OptionError(f"--extra-days は窓の最初の日（{window[0]}）より前の日だけです: {listed}")
+    return (*sorted(extra), *window)
+
+
+def parse_compare_forests(text: str | None) -> tuple[str, ...]:
+    """`--compare-forests` を版の並びにする。**森の版（`lgbm-v1-…`）だけ、同じ版は 1 度だけ。**"""
+    if not text:
+        return ()
+    names = tuple(one.strip() for one in text.split(","))
+    wrong = [name for name in names if not name.startswith(f"{VERSION_PREFIX}-")]
+    if wrong or len(set(names)) != len(names):
+        raise OptionError(
+            f"--compare-forests は {VERSION_PREFIX}- で始まる森の版をカンマで並べます"
+            f"（同じ版は 1 度）: {text!r}"
+        )
+    return names
+
+
+def refuse_compare_locally(options: argparse.Namespace, compared: Sequence[str]) -> None:
+    """**比べる森は Storage から読む**——手元の学習サンプル（`--local`）とは組み合わせない。
+
+    ~~足す日・比べる森は測るだけの回に限る（W12-06）~~ → **置く回・登録する回でも使える**
+    （W13 の PR F、D-49）。足した日は `Fitted.extra_days` に載り、登録簿（`metrics.extra_days`・
+    `note`）・モデルカード・報告書に出る（学習期間は続いている所ごとに書く。`runs_text`）。
+    比べる森は読むだけで、門の表は候補だけで決まる。
+    """
+    if compared and options.local:
+        raise OptionError("--compare-forests は Storage の森を読みます（--local と一緒に使わない）")
 
 
 def window_days(
@@ -522,6 +624,13 @@ class Fitted:
     weather: Mapping[date, coverage.Coverage]
     #: 読んだ日ごとのバイト列の素性（W6-17。**パージ日も含む**）
     data: Mapping[date, Fingerprint]
+    #: 雨と到着の時間帯の切り口（報告書の §13。W12-06）
+    rain: tuple[rain_bands.Cell, ...] = ()
+    #: 同じ検証の行で測った、置いてある森の列の名前（`--compare-forests`。W12-06）
+    compared: tuple[str, ...] = ()
+    #: 窓より古い、学習に足した日（`--extra-days`。D-49）。**指定から決まる**ので `make` が載せる
+    #: （当てはめは日を区別しない。登録簿・カード・報告書に、どの日を足したかを残すためにある）
+    extra_days: tuple[date, ...] = ()
 
     def summary_of(self, candidate: Candidate) -> Summary:
         return next(one for one in self.summaries if one.candidate == candidate)
@@ -533,23 +642,48 @@ def fit_and_score(
     split: DaySplit,
     climate_source: climatology.Source,
     wanted: Sequence[Candidate],
+    compared: Mapping[str, Mapping[str, forest.Forest]] | None = None,
 ) -> Fitted:
     """候補を当てはめて平たくし、**B3 と同じ検証行の上で**測り、候補ごとに門を当てる。
 
     `climate_source` は **B2 の作り方**で、**既定値を置かない**（W5 プラン §12 の 166）。
     門の相手の B3 は学習窓の最後の 7 暦日で当てはめる（W6-10、契約 36。`baseline_days`）。
+
+    `compared` は**置いてある森**（列の名前 → ターゲット → 森。W12-06）。同じ行で予測を作り、
+    表の列に足す。**門を当てるのは候補だけ**（`candidates.summarize` は候補を名指しで測る）。
     """
     built = matrix_of(window, split.evaluate)
     grown = fit_candidates(window, samples, split, wanted, verification_blocks(built.values))
     evaluated = samples.take(mask_of(samples, split.evaluate))
     fits = {one: assemble(one, grown, built.values, evaluated) for one in wanted}
     extra = {one.name: predict_on(fit.forests, built) for one, fit in fits.items()}
+    others = {name: predict_on(forests, built) for name, forests in (compared or {}).items()}
     days = baseline_days(split.fit)
-    outcome = harness.run(samples, split, extra, climate=climate_source, baseline_days=days)
+    outcome = harness.run(
+        samples, split, {**extra, **others}, climate=climate_source, baseline_days=days
+    )
     summaries = tuple(
         candidates.summarize(one, outcome, evaluated, split.evaluate) for one in wanted
     )
-    return Fitted(fits, outcome, summaries, window.weather, fingerprints(window))
+    return Fitted(
+        fits,
+        outcome,
+        summaries,
+        window.weather,
+        fingerprints(window),
+        rain=rain_cells(evaluated, built, outcome),
+        compared=tuple(others),
+    )
+
+
+def rain_cells(
+    evaluated: Samples, built: matrix.Matrix, outcome: harness.Outcome
+) -> tuple[rain_bands.Cell, ...]:
+    """§13 の切り口（W12-06）。**雨は行列の `precip_mm_target`**——森が見たのと同じ値で切る。"""
+    precip = np.asarray(built.values[:, matrix.MODEL_COLUMNS.index(RAIN_COLUMN)], dtype=np.float64)
+    labels = {one.target.name: evaluated.y(one.target) for one in outcome.fits}
+    probability = {one.target.name: one.probability for one in outcome.fits}
+    return rain_bands.cells(evaluated, precip, labels, probability)
 
 
 # ── 選んだ候補を書き出せる形にする ─────────────────────────────
@@ -619,6 +753,8 @@ def _basics(fitted: Fitted, candidate: Candidate) -> dict[str, object]:
     outcome = fitted.outcome
     return {
         "split": outcome.split.describe(),
+        # **足した日は別に持つ**（D-49）。`train_days` だけでは、窓の欠けと足した日を見分けられない
+        "extra_days": [day.isoformat() for day in fitted.extra_days],
         "n_fit": outcome.n_fit,
         "n_eval": outcome.n_eval,
         "feature_set": FEATURE_SET,
@@ -772,8 +908,16 @@ def to_registration(fitted: Fitted, chosen: Chosen, card_path: str | None) -> di
         "train_days": list(artifact.train_days),
         "metrics": to_metrics(fitted, chosen),
         "card_path": card_reference(card_path),
-        "note": f"W6 の PR F。候補 {chosen.candidate.spec}。単体では配らない（契約 33）",
+        "note": registration_note(fitted, chosen),
     }
+
+
+def registration_note(fitted: Fitted, chosen: Chosen) -> str:
+    """登録簿の `note`。**足した日があれば、ここにも書く**（一覧で離れた日に気づける。D-49）。"""
+    note = f"W6 の PR F。候補 {chosen.candidate.spec}。単体では配らない（契約 33）"
+    if not fitted.extra_days:
+        return note
+    return f"{note}。窓より古い日を足した：{runs_text(fitted.extra_days)}（D-49）"
 
 
 # ── 実行 ──────────────────────────────────────────────────────
@@ -797,6 +941,11 @@ def _add_window(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--eval-days", type=int, default=1, help="検証に使う日数（W6-14 は 2）")
     parser.add_argument("--purge-days", type=int, default=1, help="学習と検証の間に空ける日数")
+    parser.add_argument(
+        "--extra-days",
+        default=None,
+        help="窓より古い、学習に足す日（YYYY-MM-DD をカンマで並べる。測るだけの回だけ。W12-06）",
+    )
     parser.add_argument("--local", default=None, help="Storage の代わりに読む場所")
 
 
@@ -810,6 +959,11 @@ def _add_candidates(parser: argparse.ArgumentParser) -> None:
         "--choose", default=None, help="置く候補（本数:学習率）。候補が 2 つ以上なら置くのに要る"
     )
     parser.add_argument("--label", default=None, help="版の名前に挟む印（予行演習は rehearsal）")
+    parser.add_argument(
+        "--compare-forests",
+        default=None,
+        help="同じ検証の行で測る、置いてある森の版（カンマで並べる。測るだけの回だけ。W12-06）",
+    )
 
 
 def _add_outputs(parser: argparse.ArgumentParser) -> None:
@@ -904,6 +1058,8 @@ def run(argv: Sequence[str] | None = None) -> int:
 
 def make(source: SupabaseIo, request: Request) -> Made:
     """読んで、門を通し、当てはめ、選んだ候補を書き出せる形にする。"""
+    # **比べる森を先に読む**——読めない森のために 28 日を当てはめてから止まらない
+    compared = load_compared(source, request.compare_forests)
     window = _load(source, request)
     samples, split = prepare(
         window,
@@ -916,7 +1072,10 @@ def make(source: SupabaseIo, request: Request) -> Made:
         # **置けない名前なら当てはめる前に止める**（W6-19、契約 38）。名前は学習日と印で決まる
         registry.refuse_serving(source, version)
     chosen_climate = _climate(source, request, split, samples)
-    fitted = fit_and_score(window, samples, split, chosen_climate, request.candidates)
+    fitted = replace(
+        fit_and_score(window, samples, split, chosen_climate, request.candidates, compared),
+        extra_days=request.extra_days,
+    )
     picked = None if request.chosen is None else choose(fitted, request.chosen, version)
     return Made(fitted=fitted, version=version, chosen=picked)
 
@@ -925,7 +1084,47 @@ def _load(source: SupabaseIo, request: Request) -> Window:
     """窓を開く。**表は作らない**——日ごとの中身と素性だけを持つ（`jobs/window.py`）。"""
     opened = read_window(day_reader(None if request.local else source, request.local), request.days)
     refuse_missing_end(opened, request.days)
+    refuse_missing_extra(opened, request.extra_days)
     return opened
+
+
+def refuse_missing_extra(opened: Window, extra: Sequence[date]) -> None:
+    """**足す日が読めなければ止める。**
+
+    頼まれた日を黙って落とすと、比べたつもりの作りにならない。
+    """
+    missing = sorted(set(extra) - set(opened.days))
+    if missing:
+        listed = "、".join(day.isoformat() for day in missing)
+        raise MissingExtraDayError(f"--extra-days の日の学習サンプルがありません: {listed}")
+
+
+def load_compared(
+    source: registry.ReadsModels, versions: Sequence[str]
+) -> dict[str, Mapping[str, forest.Forest]]:
+    """比べる森（列の名前 → ターゲット → 森。W12-06）。**無ければ空**。"""
+    return {
+        f"{COMPARED_PREFIX} {version}": compared_forests(source, version) for version in versions
+    }
+
+
+def compared_forests(source: registry.ReadsModels, version: str) -> Mapping[str, forest.Forest]:
+    """**配る側と同じ決まりで読む**：登録簿で引き、森であること・成果物の列と語彙
+    （`from_bytes`）・特徴量の版を照合する。**読むだけで、何も書かない。**
+    """
+    registered = registry.named(source, version)
+    if registered.kind != LIGHTGBM_KIND:
+        raise CompareForestError(f"{version} は森ではありません（kind = {registered.kind}）")
+    body = source.download(registry.MODEL_BUCKET, registered.artifact_path)
+    if body is None:
+        raise CompareForestError(f"{version} の成果物が Storage にありません")
+    artifact = lightgbm_artifact.from_bytes(body)
+    if artifact.feature_set != FEATURE_SET:
+        raise CompareForestError(
+            f"{version} の特徴量の版（{artifact.feature_set}）が、"
+            f"いまの版（{FEATURE_SET}）と違います"
+        )
+    return artifact.forests
 
 
 def refuse_missing_end(opened: Window, days: Sequence[date]) -> None:
@@ -1036,18 +1235,38 @@ def render_report(made: Made) -> str:
     """§1〜§11（`eval/report.py`）の後ろに、**候補の比較の §12** を足す。"""
     fitted = made.fitted
     head = report.render_markdown(
-        fitted.outcome, _title(made.version), _NOTE, "fit_lightgbm", weather=fitted.weather
+        fitted.outcome,
+        _title(made.version),
+        report_note(fitted),
+        "fit_lightgbm",
+        weather=fitted.weather,
     )
     facts = {one: fit.facts for one, fit in fitted.fits.items()}
     chosen = None if made.chosen is None else made.chosen.candidate
     tail = candidate_report.render(
         fitted.summaries, facts, chosen, fitted.data, fitted.outcome.split
     )
-    return head + "\n".join(tail) + "\n"
+    return head + "\n".join([*tail, *rain_section(fitted)]) + "\n"
+
+
+def rain_section(fitted: Fitted) -> list[str]:
+    """§13（W12-06）。**比べる森があれば最初の森を基準に**、無ければ門の相手の B3 を基準にする。"""
+    if not fitted.rain:
+        return []
+    models = [GATE_BASELINE, *(one.name for one in fitted.fits), *fitted.compared]
+    reference = fitted.compared[0] if fitted.compared else GATE_BASELINE
+    return rain_bands.render(fitted.rain, models, reference)
 
 
 def _title(version: str) -> str:
     return f"LightGBM v1 の候補（{version}）と B0〜B3"
+
+
+def report_note(fitted: Fitted) -> str:
+    """報告書の冒頭の注記。**足した日があれば、その段を足す**（D-49）。"""
+    if not fitted.extra_days:
+        return _NOTE
+    return f"{_NOTE}\n>\n> **足した日**：{runs_text(fitted.extra_days)}（{EXTRA_DAYS_NOTE}）。"
 
 
 _NOTE: Final[str] = (
@@ -1093,6 +1312,7 @@ def _card_header(fitted: Fitted, chosen: Chosen) -> list[str]:
         f"| 候補 | {one.name}（本数 {one.trees}・学習率 {one.learning_rate:g}。早期終了なし） |",
         f"| 特徴量の版 | `{artifact.feature_set}` |",
         f"| 学習期間 | {_span(outcome.split.fit)}（{len(artifact.train_days)} 日） |",
+        *_extra_days_row(fitted.extra_days),
         f"| 分割 | {outcome.split.describe()} |",
         f"| 件数 | 学習 {outcome.n_fit:,} 行 / 検証 {outcome.n_eval:,} 行 |",
         f"| 門の相手 | B3（{_span(outcome.baseline_days)}・{outcome.n_baseline_fit:,} 行。"
@@ -1107,7 +1327,15 @@ def _card_header(fitted: Fitted, chosen: Chosen) -> list[str]:
 
 
 def _span(days: Sequence[date]) -> str:
-    return "—" if not days else f"{days[0]}〜{days[-1]}"
+    """**続いている所ごとに**書く（足した日が離れていても「最初〜最後」で全部を使ったと読ませない）。"""
+    return "—" if not days else runs_text(days)
+
+
+def _extra_days_row(extra: Sequence[date]) -> list[str]:
+    """カードの「足した日」の行（D-49）。**足していなければ出さない。**"""
+    if not extra:
+        return []
+    return [f"| 足した日 | {runs_text(extra)}（{EXTRA_DAYS_NOTE}） |"]
 
 
 def _card_data(fitted: Fitted) -> list[str]:

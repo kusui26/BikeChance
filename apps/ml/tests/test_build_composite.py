@@ -8,7 +8,7 @@
 
 import argparse
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Final
@@ -274,6 +274,47 @@ def test_the_registration_is_a_candidate_with_the_union_of_days(tmp_path: Path) 
         "border",
     }
     assert metrics["sha256"] == composite.sha256_of(made.body)
+
+
+def _with_an_extra_forest_day() -> composite.CompositeArtifact:
+    """窓より古い日を 1 つ足した森の合成器（D-49）。**部品は本物の書き手で、表も森と組。**"""
+    forest = replace(fixture.FOREST, train_days=("2026-09-01", *fixture.FOREST.train_days))
+    body = lightgbm_artifact.to_bytes(forest)
+    built = fixture.parts(
+        **{
+            composite.LIGHTGBM_PART: body,
+            composite.GATES_PART: fixture.gates_body(forest_body=body),
+        }
+    )
+    return composite.assemble(
+        built, model_version=fixture.VERSION, created_at=fixture.CREATED_AT, dropped=()
+    )
+
+
+def test_the_parts_keep_every_training_day() -> None:
+    """**部品の学習日は全部の日**（W13 の PR F、D-49。それまでは最初と最後だけ）。
+
+    森の鮮度の見張り（0058）は最大を採るので、全部の日にしても同じ日で鳴る。
+    """
+    artifact = _with_an_extra_forest_day()
+    parts = job.to_metrics(job.Made(artifact, b"", None))["components"]
+    assert isinstance(parts, dict)
+    assert parts[composite.LIGHTGBM_PART]["train_days"] == [
+        "2026-09-01",
+        *fixture.FOREST.train_days,
+    ]
+    assert parts[composite.B3_PART]["train_days"] == sorted(fixture.b3().train_days)
+    assert parts[composite.GATES_PART]["train_days"] is None
+    assert max(parts[composite.LIGHTGBM_PART]["train_days"]) == artifact.lightgbm_last_day
+
+
+def test_the_card_writes_separated_days_as_runs() -> None:
+    """**離れた日は、続いている所ごとに書く**（「09-01〜09-09」と書くと、間も学んだように読める）。"""
+    artifact = _with_an_extra_forest_day()
+    assert job.days_text(artifact.lightgbm.train_days) == "2026-09-01・2026-09-08〜2026-09-09"
+    parts = job._card_parts(artifact)
+    assert "| 2026-09-01・2026-09-08〜2026-09-09 |" in parts
+    assert "2026-09-01〜2026-09-09" not in parts
 
 
 def test_nothing_is_placed_without_upload() -> None:
